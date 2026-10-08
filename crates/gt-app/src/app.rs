@@ -326,7 +326,16 @@ impl GloomApp {
         }
     }
 
+    /// Ends a piano-roll gesture in progress and silences its audition.
+    fn cancel_roll_gesture(&mut self) {
+        if let Some(a) = self.roll.cancel() {
+            self.on_roll(a);
+        }
+    }
+
     fn undo(&mut self, redo: bool) {
+        // The roll's drag holds indices into the notes that are about to be replaced.
+        self.cancel_roll_gesture();
         // Finish the current gesture first so it becomes its own step.
         if let Some(label) = self.pending_edit.take() {
             self.history.commit(&self.project, label);
@@ -686,6 +695,10 @@ impl eframe::App for GloomApp {
         }
         for a in roll_actions {
             self.on_roll(a);
+        }
+        if self.main_view != MainView::PianoRoll {
+            // Hidden mid-gesture (F6, tab click): the roll never sees the release.
+            self.cancel_roll_gesture();
         }
         self.commit_if_idle(&ctx);
 

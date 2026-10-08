@@ -298,6 +298,15 @@ impl PianoRollState {
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
     }
+
+    /// Abandons any gesture in progress, e.g. before the notes are replaced by undo or when the
+    /// roll is hidden mid-drag. Returns the note-off for a key still being auditioned.
+    pub fn cancel(&mut self) -> Option<PianoRollAction> {
+        self.drag = None;
+        self.audition_key
+            .take()
+            .map(|key| PianoRollAction::AuditionOff { key })
+    }
 }
 
 /// What the roll edits and shows.
@@ -800,6 +809,18 @@ fn grid_input(
         }
     } else if resp.hovered() && secondary_pressed && st.drag.is_none() {
         st.drag = Some(Drag::Erase);
+    }
+
+    // A drag holds note indices; drop it if the list shrank under it (defensive: the app
+    // cancels drags before replacing notes).
+    let stale = match &st.drag {
+        Some(Drag::Move { originals, .. } | Drag::Resize { originals, .. }) => {
+            originals.iter().any(|(j, _)| *j >= notes.len())
+        }
+        _ => false,
+    };
+    if stale {
+        st.drag = None;
     }
 
     match &mut st.drag {
@@ -1551,6 +1572,29 @@ mod tests {
         let a = h.drag(p, p, Secondary);
         assert!(a.contains(&PianoRollAction::Changed));
         assert!(h.notes.is_empty());
+    }
+
+    #[test]
+    fn cancel_ends_a_drag_and_releases_the_audition() {
+        let mut h = Harness::new(vec![]);
+        let p = h.at(500, 64);
+        h.button(p, egui::PointerButton::Primary, true);
+        assert!(h.st.is_dragging());
+        assert_eq!(
+            h.st.cancel(),
+            Some(PianoRollAction::AuditionOff { key: 64 })
+        );
+        assert!(!h.st.is_dragging());
+        // The notes are replaced (as undo does) while the button is still down: no panic, and
+        // nothing is edited.
+        h.notes.clear();
+        h.frame(vec![egui::Event::PointerMoved(h.at(1500, 70))]);
+        assert!(h.notes.is_empty());
+        h.button(h.at(1500, 70), egui::PointerButton::Primary, false);
+        // A new click draws again.
+        let p = h.at(960, 60);
+        h.drag(p, p, egui::PointerButton::Primary);
+        assert_eq!(h.notes.len(), 1);
     }
 
     #[test]
