@@ -143,3 +143,77 @@ fn loop_wrap_restarts_the_bar_on_time() {
     let want: Vec<usize> = (0..10).map(|k| k * sr as usize / 2).collect();
     assert_eq!(got, want);
 }
+
+/// Commands that set up channel 0 with a single-sample click (an impulse) and a pattern.
+fn step_setup(bpm: f64, steps: &[u16], swing: f32, sr: u32) -> Vec<EngineCommand> {
+    use gt_engine::{ChannelParams, SongSnapshot};
+    let mut project = gt_core::Project::empty();
+    let c = project.add_channel("imp", None).unwrap();
+    for &s in steps {
+        project.current_pattern_mut().toggle_step(c, s);
+    }
+    project.swing = swing;
+    let mut impulse = vec![0.0; 2000];
+    impulse[0] = 1.0;
+    vec![
+        EngineCommand::SetMetronome(false),
+        EngineCommand::SetTempoMap(Box::new(TempoMap::constant(bpm))),
+        EngineCommand::SetChannelSample {
+            slot: 0,
+            sample: Some(std::sync::Arc::new(gt_core::SampleData::mono(sr, impulse))),
+        },
+        EngineCommand::SetChannelParams {
+            slot: 0,
+            params: Box::new(ChannelParams {
+                gain: 1.0,
+                ..ChannelParams::default()
+            }),
+        },
+        EngineCommand::SetSong(Box::new(SongSnapshot::compile(&project))),
+        EngineCommand::Play,
+    ]
+}
+
+#[test]
+fn steps_start_on_the_exact_frame_with_swing_and_any_buffer_size() {
+    let steps = [0, 3, 6, 9, 10, 15];
+    let swing = 0.5;
+    for sr in [44_100, 48_000, 96_000] {
+        let bpm = 133.0;
+        let step_s = 60.0 / bpm / 4.0;
+        let mut want = Vec::new();
+        for rep in 0..3 {
+            for &s in &steps {
+                let delay = if s % 2 == 1 { swing as f64 * 0.5 } else { 0.0 };
+                // Swing is rounded to whole ticks: 0.5 * 120 = 60 ticks, exact here.
+                let t = (rep * 16 + i64::from(s)) as f64 * step_s + delay * step_s;
+                want.push(frame(t, sr));
+            }
+        }
+        let seconds = 3.0 * 16.0 * step_s;
+        let reference = render(sr, seconds, &[64], step_setup(bpm, &steps, swing, sr));
+        assert_eq!(onsets(&reference), want, "sr {sr}");
+        for blocks in [&[1usize][..], &[37, 512, 3], &[1024]] {
+            let out = render(sr, seconds, blocks, step_setup(bpm, &steps, swing, sr));
+            assert_eq!(out, reference, "sr {sr} blocks {blocks:?}");
+        }
+    }
+}
+
+#[test]
+fn steps_restart_on_the_loop_start_frame() {
+    let sr = 48_000;
+    let mut setup = step_setup(120.0, &[0, 8], 0.0, sr);
+    // Loop the first half bar (steps 0..8): step 8 must never sound.
+    setup.insert(
+        0,
+        EngineCommand::SetLoop(LoopRegion {
+            start: Tick(0),
+            end: Tick(2 * PPQ),
+            enabled: true,
+        }),
+    );
+    let out = render(sr, 4.0, &[100], setup);
+    // Half a bar at 120 BPM is 1 s.
+    assert_eq!(onsets(&out), vec![0, 48_000, 96_000, 144_000]);
+}

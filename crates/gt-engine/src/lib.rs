@@ -16,13 +16,18 @@
 #![deny(unsafe_code)]
 
 mod atomic;
+mod channel;
 mod command;
 mod processor;
+pub mod song;
 pub mod transport;
 
 pub use atomic::AtomicF32;
+pub use channel::VOICES_PER_CHANNEL;
 pub use command::{EngineCommand, EngineEvent, Garbage, LoopRegion, TransportState};
-pub use processor::{AudioProcessor, TEST_TONE_DBFS, TEST_TONE_HZ};
+pub use gt_core::MAX_CHANNELS;
+pub use processor::{AudioProcessor, PREVIEW_GAIN, TEST_TONE_DBFS, TEST_TONE_HZ};
+pub use song::{ChannelParams, NoteKind, SongEvent, SongSnapshot};
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -38,7 +43,7 @@ pub const FADE_SECONDS: f32 = 0.02;
 
 const COMMAND_CAPACITY: usize = 1024;
 const EVENT_CAPACITY: usize = 256;
-const GARBAGE_CAPACITY: usize = 64;
+const GARBAGE_CAPACITY: usize = 512;
 
 /// Static configuration of an engine instance. A new device or sample rate means a new engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +56,7 @@ pub struct EngineConfig {
 
 /// Values the audio thread publishes for the UI. All plain atomics: written with `Relaxed`
 /// ordering on the audio thread, read at any time by the UI. No locks, no queues.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Telemetry {
     /// Number of frames in the most recent `process` call (the actual device buffer size).
     pub last_block_frames: AtomicU32,
@@ -71,6 +76,25 @@ pub struct Telemetry {
     pub frames_rendered: AtomicU64,
     /// Events that could not be delivered (scheduler or event queue full). Should stay 0.
     pub events_dropped: AtomicU32,
+    /// Peak output level per channel slot since the UI last reset it (activity lights).
+    pub channel_peaks: [AtomicF32; MAX_CHANNELS],
+}
+
+impl Default for Telemetry {
+    fn default() -> Self {
+        Self {
+            last_block_frames: AtomicU32::default(),
+            blocks: AtomicU64::default(),
+            peak: AtomicF32::default(),
+            silent: AtomicBool::default(),
+            faulted: AtomicBool::default(),
+            transport_state: AtomicU8::default(),
+            position_ticks: AtomicI64::default(),
+            frames_rendered: AtomicU64::default(),
+            events_dropped: AtomicU32::default(),
+            channel_peaks: std::array::from_fn(|_| AtomicF32::default()),
+        }
+    }
 }
 
 impl Telemetry {

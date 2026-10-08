@@ -17,17 +17,36 @@
 use gt_core::{TempoMap, Tick, TimeSig, PPQ};
 
 use crate::command::{LoopRegion, TransportState};
+use crate::song::{NoteKind, SongSnapshot};
 
 /// Shortest loop accepted: a 1/16 note. Shorter regions disable looping.
 pub const MIN_LOOP_TICKS: i64 = PPQ / 4;
 /// Capacity of the per-quantum event list.
-pub const MAX_EVENTS_PER_QUANTUM: usize = 64;
+pub const MAX_EVENTS_PER_QUANTUM: usize = 256;
 /// Upper bound on loop wraps inside one quantum (protects against pathological input).
 const MAX_SEGMENTS: usize = 64;
 
 /// What happens at a scheduled event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EventKind {
+    /// Playback jumped from the loop end back to the loop start: release held notes.
+    Wrap,
+    /// A pattern note ends.
+    NoteOff {
+        /// Channel slot.
+        slot: u16,
+        /// MIDI key.
+        key: u8,
+    },
+    /// A pattern note starts.
+    NoteOn {
+        /// Channel slot.
+        slot: u16,
+        /// MIDI key.
+        key: u8,
+        /// Velocity, 0 to 1.
+        velocity: f32,
+    },
     /// A metronome beat. `downbeat` is the first beat of a bar.
     Beat {
         /// True on beat 1.
@@ -35,8 +54,28 @@ pub enum EventKind {
     },
 }
 
+impl EventKind {
+    /// Order of events on the same frame: wrap, then note-offs, note-ons, beats.
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Wrap => 0,
+            Self::NoteOff { .. } => 1,
+            Self::NoteOn { .. } => 2,
+            Self::Beat { .. } => 3,
+        }
+    }
+
+    /// The channel slot a note event targets.
+    pub fn slot(&self) -> Option<u16> {
+        match *self {
+            Self::NoteOff { slot, .. } | Self::NoteOn { slot, .. } => Some(slot),
+            _ => None,
+        }
+    }
+}
+
 /// An event placed on a frame inside the current quantum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScheduledEvent {
     /// Frame offset from the start of the quantum.
     pub offset: u32,
@@ -84,6 +123,11 @@ impl EventBuf {
     /// Events that did not fit since creation.
     pub fn dropped(&self) -> u32 {
         self.dropped
+    }
+
+    /// Sorts by frame, then by [`EventKind`] rank. In place, no allocation.
+    fn sort(&mut self) {
+        self.events[..self.len].sort_unstable_by_key(|e| (e.offset, e.kind.rank()));
     }
 
     fn push(&mut self, e: ScheduledEvent) {
@@ -219,9 +263,18 @@ impl Transport {
         old
     }
 
-    /// Schedules the events for frames `[q_start, q_start + frames)` into `out` (cleared first)
-    /// and advances through loop wraps. Does nothing unless playing.
-    pub fn schedule(&mut self, q_start: u64, frames: u32, out: &mut EventBuf) {
+    /// Schedules the events for frames `[q_start, q_start + frames)` into `out` (cleared first,
+    /// sorted by frame) and advances through loop wraps. Does nothing unless playing.
+    ///
+    /// Events are metronome beats, loop wraps and, when `song` is given, its pattern notes. The
+    /// pattern repeats every `song.length` ticks from tick 0.
+    pub fn schedule(
+        &mut self,
+        q_start: u64,
+        frames: u32,
+        song: Option<&SongSnapshot>,
+        out: &mut EventBuf,
+    ) {
         out.clear();
         if self.state != TransportState::Playing {
             return;
@@ -246,16 +299,30 @@ impl Transport {
                 }
             }
             let limit = if wrap { Some(self.looping.end.0) } else { None };
-            self.collect(seg_start, seg_end, limit, q_start, out);
+            self.collect(seg_start, seg_end, limit, q_start, song, out);
             if wrap {
                 self.anchor(self.looping.start.0 as f64, seg_end);
+                out.push(ScheduledEvent {
+                    offset: (seg_end - q_start) as u32,
+                    tick: self.looping.start,
+                    kind: EventKind::Wrap,
+                });
             }
             seg_start = seg_end;
         }
+        out.sort();
     }
 
-    /// Adds metronome beats whose frame is in `[a, b)` (and whose tick is below `limit`).
-    fn collect(&self, a: u64, b: u64, limit: Option<i64>, q_start: u64, out: &mut EventBuf) {
+    /// Adds beats and notes whose frame is in `[a, b)` (and whose tick is below `limit`).
+    fn collect(
+        &self,
+        a: u64,
+        b: u64,
+        limit: Option<i64>,
+        q_start: u64,
+        song: Option<&SongSnapshot>,
+        out: &mut EventBuf,
+    ) {
         if a >= b {
             return;
         }
@@ -281,6 +348,60 @@ impl Transport {
                         downbeat: tick.rem_euclid(bar) == 0,
                     },
                 });
+            }
+        }
+        if let Some(song) = song.filter(|s| s.length > 0) {
+            self.collect_notes(song, a, b, t_lo, t_hi, limit, q_start, out);
+        }
+    }
+
+    /// Adds the notes of the repeating pattern in the tick window `[t_lo, t_hi]` whose frame is
+    /// in `[a, b)`.
+    #[allow(clippy::too_many_arguments)]
+    fn collect_notes(
+        &self,
+        song: &SongSnapshot,
+        a: u64,
+        b: u64,
+        t_lo: i64,
+        t_hi: i64,
+        limit: Option<i64>,
+        q_start: u64,
+        out: &mut EventBuf,
+    ) {
+        if t_hi < 0 {
+            return;
+        }
+        let len = song.length;
+        let first = t_lo.max(0).div_euclid(len);
+        let last = t_hi.div_euclid(len);
+        // A quantum spans far less than one pattern; the bound only guards odd input.
+        for k in first..=last.min(first + 4) {
+            let base = k * len;
+            for e in song.events_in(t_lo - base, t_hi - base) {
+                let tick = base + e.tick;
+                if limit.is_some_and(|l| tick >= l) {
+                    continue;
+                }
+                let f = self.frame_of_tick(tick as f64);
+                if f >= a as i64 && f < b as i64 {
+                    let kind = match e.kind {
+                        NoteKind::On { velocity } => EventKind::NoteOn {
+                            slot: e.slot,
+                            key: e.key,
+                            velocity,
+                        },
+                        NoteKind::Off => EventKind::NoteOff {
+                            slot: e.slot,
+                            key: e.key,
+                        },
+                    };
+                    out.push(ScheduledEvent {
+                        offset: (f - q_start as i64) as u32,
+                        tick: Tick(tick),
+                        kind,
+                    });
+                }
             }
         }
     }
@@ -315,10 +436,11 @@ mod tests {
         let total = (seconds * f64::from(sr)) as u64;
         let mut f = 0;
         while f < total {
-            t.schedule(f, q, &mut buf);
+            t.schedule(f, q, None, &mut buf);
             out.extend(
                 buf.as_slice()
                     .iter()
+                    .filter(|e| matches!(e.kind, EventKind::Beat { .. }))
                     .map(|e| (f + u64::from(e.offset), e.tick.0))
                     .filter(|&(frame, _)| frame < total),
             );
@@ -412,7 +534,7 @@ mod tests {
         assert!((t.position_at(at) - 1920.0).abs() < 1e-9);
         // Next beat (tick 2880) is now 1 s away instead of 0.5 s.
         let mut buf = EventBuf::default();
-        t.schedule(at + 47_990, 64, &mut buf);
+        t.schedule(at + 47_990, 64, None, &mut buf);
         assert_eq!(buf.as_slice()[0].offset, 10);
         assert_eq!(buf.as_slice()[0].tick, Tick(2880));
     }
@@ -503,7 +625,7 @@ mod tests {
         let mut downbeats = Vec::new();
         let mut f = 0;
         while f < 48_000 * 4 {
-            t.schedule(f, 64, &mut buf);
+            t.schedule(f, 64, None, &mut buf);
             for e in buf.as_slice() {
                 if e.kind == (EventKind::Beat { downbeat: true }) {
                     downbeats.push(e.tick.0);
@@ -512,5 +634,118 @@ mod tests {
             f += 64;
         }
         assert_eq!(&downbeats[..3], &[0, 3360, 6720]);
+    }
+
+    /// Runs the scheduler with a song and returns every event as (frame, tick, kind).
+    fn run_song(
+        t: &mut Transport,
+        song: &SongSnapshot,
+        sr: u32,
+        seconds: f64,
+        q: u32,
+    ) -> Vec<(u64, i64, EventKind)> {
+        let mut buf = EventBuf::default();
+        let mut out = Vec::new();
+        let total = (seconds * f64::from(sr)) as u64;
+        let mut f = 0;
+        while f < total {
+            t.schedule(f, q, Some(song), &mut buf);
+            for e in buf.as_slice() {
+                let frame = f + u64::from(e.offset);
+                if frame < total {
+                    out.push((frame, e.tick.0, e.kind));
+                }
+            }
+            f += u64::from(q);
+        }
+        assert_eq!(buf.dropped(), 0);
+        out
+    }
+
+    fn demo_song() -> SongSnapshot {
+        let mut p = gt_core::Project::demo();
+        p.swing = 0.4;
+        SongSnapshot::compile(&p)
+    }
+
+    #[test]
+    fn pattern_notes_repeat_on_exact_frames() {
+        let song = demo_song();
+        for sr in [44_100, 48_000, 96_000] {
+            let bpm = 128.0;
+            let mut t = Transport::new(sr, Box::new(TempoMap::constant(bpm)));
+            t.play(0);
+            let got = run_song(&mut t, &song, sr, 8.0, 64);
+            let kicks: Vec<_> = got
+                .iter()
+                .filter(|e| matches!(e.2, EventKind::NoteOn { slot: 0, .. }))
+                .collect();
+            // Four kicks per bar; 8 s at 128 BPM is 17.07 beats.
+            assert_eq!(kicks.len(), 18, "sr {sr}");
+            for (k, e) in kicks.iter().enumerate() {
+                let tick = k as i64 * PPQ;
+                assert_eq!(e.1, tick);
+                assert_eq!(
+                    e.0,
+                    expected_frame(tick as f64 / PPQ as f64 * 60.0 / bpm, sr)
+                );
+            }
+            // Ons and offs pair up per pattern repeat.
+            let ons = got
+                .iter()
+                .filter(|e| matches!(e.2, EventKind::NoteOn { .. }))
+                .count();
+            let offs = got
+                .iter()
+                .filter(|e| matches!(e.2, EventKind::NoteOff { .. }))
+                .count();
+            assert!(ons.abs_diff(offs) <= 2, "{ons} {offs}");
+        }
+    }
+
+    #[test]
+    fn song_scheduling_is_quantum_invariant_across_loops() {
+        let song = demo_song();
+        let mk = || {
+            let mut t = Transport::new(44_100, Box::new(TempoMap::constant(141.0)));
+            t.set_loop(LoopRegion {
+                start: Tick(PPQ),
+                end: Tick(PPQ * 7 + 120),
+                enabled: true,
+            });
+            t.play(0);
+            t
+        };
+        let reference = run_song(&mut mk(), &song, 44_100, 15.0, 64);
+        assert!(reference.iter().any(|e| e.2 == EventKind::Wrap));
+        for q in [1, 13, 441, 1024] {
+            assert_eq!(
+                run_song(&mut mk(), &song, 44_100, 15.0, q),
+                reference,
+                "quantum {q}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_comes_before_notes_on_the_same_frame() {
+        let song = demo_song();
+        let mut t = Transport::new(48_000, Box::new(TempoMap::constant(120.0)));
+        t.set_loop(LoopRegion {
+            start: Tick(0),
+            end: Tick(PPQ * 4),
+            enabled: true,
+        });
+        t.play(0);
+        let got = run_song(&mut t, &song, 48_000, 2.5, 64);
+        let i = got.iter().position(|e| e.2 == EventKind::Wrap).unwrap();
+        assert_eq!(got[i].0, 96_000);
+        let same_frame: Vec<_> = got.iter().filter(|e| e.0 == 96_000).collect();
+        assert_eq!(same_frame[0].2, EventKind::Wrap);
+        assert!(same_frame
+            .windows(2)
+            .all(|w| w[0].2.rank() <= w[1].2.rank()));
+        // Nothing at or past the loop end tick is scheduled.
+        assert!(got.iter().all(|e| e.1 < PPQ * 4));
     }
 }

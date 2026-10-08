@@ -1,7 +1,13 @@
 //! Top-level views (panels).
 
 mod audio_panel;
+mod browser;
+mod channel_rack;
+mod sampler_panel;
 mod transport_bar;
 
 pub use audio_panel::{audio_panel, AudioAction, AudioPanelModel, BUFFER_SIZES};
+pub use browser::{browser, BrowserAction, BrowserEntry, BrowserModel};
+pub use channel_rack::{channel_rack, RackAction, RackState, RackView};
+pub use sampler_panel::{sampler_panel, SamplerPanelView};
 pub use transport_bar::{transport_bar, PlayState, TransportAction, TransportModel};

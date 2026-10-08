@@ -17,7 +17,9 @@ path = "src/main.rs"
 
 [dependencies]
 gt-core.workspace = true
+gt-dsp.workspace = true
 gt-engine.workspace = true
+gt-project.workspace = true
 gt-ui.workspace = true
 cpal.workspace = true
 eframe.workspace = true

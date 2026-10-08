@@ -50,7 +50,8 @@ impl Default for TransportModel {
             loop_enabled: false,
             loop_start_bar: 1,
             loop_bars: 4,
-            metronome: true,
+            // Off by default now that the rack plays a beat; one click turns it on.
+            metronome: false,
             audio_online: false,
         }
     }

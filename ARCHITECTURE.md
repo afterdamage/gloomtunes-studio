@@ -299,7 +299,7 @@ Each producer thread gets its own queue, so there is never a multi-producer queu
   MIDI thread ───────────────────────────────▶ ├─▶ Audio thread (AudioProcessor)
                                                 │        │   │   │
   UI thread ◀── EngineEvent (rtrb, 256) ────────┘        │   │   │
-  UI thread ◀── Garbage (rtrb, 64) ──────────────────────┘   │   │
+  UI thread ◀── Garbage (rtrb, 512) ─────────────────────┘   │   │
   UI thread ◀── Telemetry (Arc of atomics, no queue) ────────┘   │
   Export    ◀── same AudioProcessor type, driven by a worker ────┘
 ```
@@ -309,10 +309,16 @@ Each producer thread gets its own queue, so there is never a multi-producer queu
 Every variant is small (target: at most 32 bytes); large payloads travel as a `Box` whose
 allocation happened on the UI side.
 
-As of Step 2 the implemented variants are `Play`, `Pause`, `Stop`, `Locate`, `SetLoop`,
-`SetTempoMap(Box<TempoMap>)` (the tempo part of `ApplySong`, until the song snapshot exists),
-`SetTimeSig`, `SetMetronome`, `SetTestTone`, `FadeOut` and `FadeIn`. The size limit is enforced
-by a compile-time assertion. The rest of the enum below arrives with the steps that need it.
+As of Step 3 the implemented variants are `Play`, `Pause`, `Stop`, `Locate`, `SetLoop`,
+`SetTempoMap(Box<TempoMap>)` (the tempo part of `ApplySong`, until the full song snapshot exists),
+`SetTimeSig`, `SetMetronome`, `SetTestTone`, `FadeOut`, `FadeIn`, and from Step 3
+`SetSong(Box<SongSnapshot>)` (the playing pattern), `SetChannelParams { slot, Box<ChannelParams> }`
+(stand-in for `SetParam` until the parameter system of Prompt 8), `SetChannelSample { slot,
+Option<Arc<SampleData>> }` (stand-in for `ApplyGraph` until the mixer graph of Prompt 6),
+`NoteOn`, `NoteOff` and `PreviewSample(Option<Arc<SampleData>>)` (`None` replaces
+`StopPreview`). Commands that hand something back are only taken when the garbage queue has a
+free slot. The size limit is enforced by a compile-time assertion. The rest of the enum below
+arrives with the steps that need it.
 
 ```rust
 pub enum EngineCommand {
@@ -481,9 +487,25 @@ Tests (Prompt 2): events land on the expected frame at 44.1, 48 and 96 kHz; acro
 across a loop wrap; for patterns longer than a buffer; with buffer sizes of 64 to 1024 and odd sizes
 (e.g. 441).
 
+Step 3 status: the scheduler gathers metronome beats, loop wraps and the notes of the playing
+pattern into one per-quantum list (capacity 256), sorted in place by frame and then wrap,
+note-off, note-on, beat. A wrap releases held notes. Each channel then walks only its own events
+(step 3 above). Tests: step onsets with swing land on exact frames at three rates and are
+bit-identical for device buffers of 1, 37/512/3 and 1024 frames; scheduling is quantum-invariant
+across loop wraps.
+
 ---
 
 ## 6. Data model
+
+**Implemented so far (Step 3), simplified on purpose** (D21): `Project { channels: Vec<Channel>,
+patterns: Vec<Pattern>, current_pattern, swing }`; the `Vec` order is the rack order and a
+channel's index is its engine slot. `Channel { id, name, volume, pan, mute, solo, sampler:
+SamplerSettings { sample: Option<SampleSource>, pitch, start, end, loop_mode, adsr } }`, where
+`SampleSource` is `BuiltIn(kind)` or `File(path)`. `Pattern { id, name, steps: 16 | 32, notes:
+BTreeMap<ChannelId, Vec<Note { start, length, key, velocity }>> }`. A step is a note on the 1/16
+grid at key 60 (D8). Swing is one rack-wide value. The full model below remains the target; IDs,
+the sample table and serde arrive with save/load (Prompt 9).
 
 The document lives in `gt-core`. All collections are keyed by typed IDs; order-sensitive lists
 (channel rack rows, playlist tracks, mixer strip order) keep an explicit `order: Vec<Id>`.
@@ -702,6 +724,14 @@ Each instrument node owns a fixed voice pool (sampler 32, Gloom Synth 16, config
 Allocation order: free voice, else the oldest voice in release, else the oldest voice overall
 (with a 2 ms fade to avoid a click). No allocation ever happens at note-on.
 
+Step 3 status: the engine preallocates 64 channel slots, each with 16 sampler voices; a full pool
+steals the oldest voice with a hard cut (the fade and release-first order come with the mixer
+graph in Prompt 6). A sampler voice reads the sample with linear interpolation at
+`2^(semitones/12) * sample_rate / engine_rate` frames per frame, applies an ADSR (linear attack,
+exponential decay/release reaching 1 % at the set time) and, for one-shots, a 2 ms fade before the
+end point. Velocity maps to gain as `v²`; pan is equal-power (-3 dB at centre). The engine
+quantum is planar stereo (D19).
+
 ### 7.4 Parameters, smoothing and automation
 
 - The engine holds a flat array of `ParamState { target, smoother }` indexed by `ParamSlot`.
@@ -804,8 +834,15 @@ polled), and float determinism across compilers.
 | D16 | cpal 0.18 and eframe/egui 0.36 | Current releases at Step 1 | Upgrade deliberately, one step at a time |
 | D17 | Stop returns to where playback last started; Stop while stopped returns to bar 1. Pause holds the position | Familiar from pattern-based DAWs; two keypresses reach bar 1 | — |
 | D18 | Loop wrap decided in the frame domain; playback located past the loop end plays on without wrapping | Same rounding as events, so the wrap frame and the loop-start event can never disagree | — |
-| D19 | The render quantum is mono until the mixer exists; it is copied to every device channel | Nothing stereo exists yet; avoids half-built bus code | Step 3 or 6 introduces planar stereo |
+| D19 | The render quantum is mono until the mixer exists; it is copied to every device channel | Nothing stereo exists yet; avoids half-built bus code | **Done in Step 3:** planar stereo quantum; L/R go to device channels 1 and 2 (others silent), a mono device gets (L+R)/2 |
 | D20 | Metronome: 60 ms damped sine burst (1 kHz, 1.6 kHz downbeat, -9 dBFS), cosine start | Original synthesized sound, no sample needed; non-zero first sample makes onsets measurable in tests | — |
+| D21 | Step 3 document is a subset of §6: channels in a `Vec` (index = engine slot), `SampleSource` instead of a sample table, one rack-wide swing (0 to 1, up to half a step; 0.67 ≈ triplet) | Enough for the rack without inventing persistence details early | Prompt 9 adds IDs maps, the sample table and serde; per-channel swing if wanted |
+| D22 | 64 channel slots × 16 voices preallocated in `create()`; any rack change resends every channel's params (boxed) and the song | No graph yet; resending 64 small boxes is cheaper than tracking diffs | Prompt 6 replaces slots with graph nodes and `SetParam` |
+| D23 | Sampler reads with linear interpolation | Cheap; fine for drums and moderate transposition | Offer a sinc/polyphase reader when pitched sampling quality matters (Prompt 12 or earlier) |
+| D24 | Pattern mode only: the current pattern repeats from tick 0 along the timeline; the transport loop still applies and a wrap releases held notes; changing the song releases held notes | Simplest correct behaviour before the playlist exists | Prompt 7 adds song mode |
+| D25 | Samples are resampled to the engine rate at load (rubato sinc, 128 taps, Blackman-Harris², ×256 oversampled table); voices still include the rate ratio | Load-time quality, zero per-voice cost; cached samples stay in tune if the device rate later changes | Re-resample the cache on a rate change if the ratio path proves audible |
+| D26 | Built-in drums are generated by code at load (`gt_dsp::drums`), output dedicated CC0; no audio files in the repo | Satisfies "original CC0 samples" with zero binary assets and exact reproducibility | Ship rendered `.flac` files only if users want to export them |
+| D27 | Default channel volume -4 dB, metronome off by default in the app | Three full-scale drums on one step stay under 0 dBFS without a limiter; the beat replaces the click as the first thing you hear | Prompt 6 adds the master limiter/meters; revisit defaults then |
 
 ---
 
@@ -821,9 +858,9 @@ GPL-3.0-or-later. **Flagged** entries are copyleft or have special terms.
 | rtrb | lock-free SPSC queues | MIT OR Apache-2.0 | 2 |
 | assert_no_alloc | RT-safety checks (dev/debug) | BSD-2-Clause | 2 |
 | log, env_logger | logging | MIT OR Apache-2.0 | 1 |
-| symphonia | decoding wav/flac/mp3/ogg | **MPL-2.0 (flag: file-level copyleft; compatible with GPL-3.0)** | 3 |
-| rubato | resampling | MIT | 3 |
-| hound | WAV writing | Apache-2.0 | 9 |
+| symphonia 0.6 (`mp3` feature on) | decoding wav/flac/mp3/ogg | **MPL-2.0 (flag: file-level copyleft; compatible with GPL-3.0)**; added in Step 3 | 3 |
+| rubato 5 (+ audioadapter crates) | resampling | MIT OR Apache-2.0; added in Step 3 | 3 |
+| hound | WAV writing (Step 3: test-only dev-dependency) | Apache-2.0 | 3/9 |
 | serde, serde_json | serialization | MIT OR Apache-2.0 | 3/9 |
 | zip | project container | MIT | 9 |
 | midir | MIDI I/O | MIT | 10 |

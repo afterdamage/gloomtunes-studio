@@ -1,6 +1,10 @@
 //! Messages between the UI thread and the audio thread (ARCHITECTURE.md §4).
 
-use gt_core::{TempoMap, Tick, TimeSig};
+use std::sync::Arc;
+
+use gt_core::{SampleData, TempoMap, Tick, TimeSig};
+
+use crate::song::{ChannelParams, SongSnapshot};
 
 /// Loop region in ticks. Playback wraps from `end` back to `start` while `enabled`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +56,55 @@ pub enum EngineCommand {
     FadeOut,
     /// Undo `FadeOut`.
     FadeIn,
+    /// Replace the playing pattern. Held notes are released.
+    SetSong(Box<SongSnapshot>),
+    /// Replace a channel's settings. Gain and pan glide; the rest applies to new notes.
+    SetChannelParams {
+        /// Channel slot (rack index), below `MAX_CHANNELS`.
+        slot: u16,
+        /// New settings (the box comes back as garbage).
+        params: Box<ChannelParams>,
+    },
+    /// Replace a channel's sample. Its playing voices stop.
+    SetChannelSample {
+        /// Channel slot.
+        slot: u16,
+        /// The new sample, or none for silence. The old one comes back as garbage.
+        sample: Option<Arc<SampleData>>,
+    },
+    /// Start a note on a channel now (auditioning from the UI).
+    NoteOn {
+        /// Channel slot.
+        slot: u16,
+        /// MIDI key.
+        key: u8,
+        /// Velocity, 0 to 1.
+        velocity: f32,
+    },
+    /// Release a note started with `NoteOn`.
+    NoteOff {
+        /// Channel slot.
+        slot: u16,
+        /// MIDI key.
+        key: u8,
+    },
+    /// Play a sample once through the preview voice (sample browser), or stop it with `None`.
+    PreviewSample(Option<Arc<SampleData>>),
+}
+
+impl EngineCommand {
+    /// True if applying this command hands something back through the garbage queue, so the
+    /// engine must only take it when the queue has room.
+    pub(crate) fn returns_garbage(&self) -> bool {
+        matches!(
+            self,
+            Self::SetTempoMap(_)
+                | Self::SetSong(_)
+                | Self::SetChannelParams { .. }
+                | Self::SetChannelSample { .. }
+                | Self::PreviewSample(_)
+        )
+    }
 }
 
 // Keep commands cheap to copy through the queue.
@@ -98,4 +151,10 @@ pub enum EngineEvent {
 pub enum Garbage {
     /// A replaced tempo map.
     TempoMap(Box<TempoMap>),
+    /// A replaced song.
+    Song(Box<SongSnapshot>),
+    /// A channel-settings box, already copied into the channel.
+    Params(Box<ChannelParams>),
+    /// A sample no longer used by a channel or the preview voice.
+    Sample(Arc<SampleData>),
 }
