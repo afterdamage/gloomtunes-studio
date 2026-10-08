@@ -1,0 +1,189 @@
+# GloomTunes Studio: Roadmap
+
+Each step below is one build prompt from the project plan, delivered as one or more small,
+compilable PRs. Every step ends in something you can **see or hear**. Estimates assume one
+developer working part-time (roughly 10 to 15 hours a week) and are honest ranges, not promises;
+they get revised in this file as real numbers come in.
+
+Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Status
+
+| Step | Name | Status |
+|---|---|---|
+| 0 | Architecture and plan | **In review** |
+| 1 | Workspace + hello audio | Next |
+| 2 | Engine core and transport | Planned |
+| 3 | Sampler + channel rack | Planned |
+| 4 | Piano roll | Planned |
+| 5 | Gloom Synth | Planned |
+| 6 | Mixer and effects | Planned |
+| 7 | Playlist / arrangement | Planned |
+| 8 | Automation and parameter system | Planned |
+| 9 | Save/load, export, recovery | Planned |
+| 10 | MIDI input and recording | Planned |
+| 11 | CLAP plugin hosting | Planned (can move after v1.0) |
+| 12 | Performance, polish, packaging | Planned |
+
+## Phases at a glance
+
+| Phase | Steps | Milestone you can demo | Estimate |
+|---|---|---|---|
+| A. Foundations | 0, 1, 2 | Metronome ticking in time at any tempo, on both OSes, with CI green | 3 to 6 weeks |
+| B. Make a beat | 3, 4, 5 | **First loop**: drums in the step sequencer plus a synth melody from the piano roll | 11 to 17 weeks |
+| C. Mix and arrange | 6, 7, 8 | **First song**: patterns arranged in the playlist, mixed with effects and automation | 14 to 23 weeks |
+| D. Keep and share | 9, 10 | **v0.1 alpha**: save, reopen, export a WAV; play it from a MIDI keyboard | 5 to 9 weeks |
+| E. Extend | 11 | A third-party CLAP synth and effect running in a project | 6 to 10 weeks |
+| F. Ship | 12 | **v1.0**: installers for Windows and Ubuntu, stable under load | 4 to 8 weeks |
+
+Total: roughly 43 to 73 part-time weeks, i.e. about a year. Phase C is the largest and riskiest
+for schedule; Phase E is the riskiest technically.
+
+---
+
+## Phase A: Foundations
+
+### Step 0: Architecture and plan
+- Deliverables: ARCHITECTURE.md, ROADMAP.md, README.md, LICENSE (GPL-3.0).
+- Done when: the owner has reviewed and merged the design.
+
+### Step 1: Workspace + hello audio (1 to 2 weeks)
+- Workspace with all six crates (empty where not yet needed), shared lints, `rust-toolchain.toml`.
+- `gt-app` opens the default output with cpal and plays a 440 Hz sine at -12 dBFS (amplitude
+  0.251) through a minimal `AudioProcessor`.
+- Window: device selector, buffer size selector (64/128/256/512/1024), sample-rate display,
+  start/stop, first version of `theme.rs`.
+- GitHub Actions: build, test, clippy, rustfmt on `windows-latest` and `ubuntu-22.04`.
+- **You should hear** a clean, steady tone with no clicks when starting/stopping (gain is ramped).
+- Exit criteria: runs on Windows (WASAPI) and Ubuntu (ALSA/PipeWire); CI green.
+- Cut if late: device hot-swap handling (just restart the stream).
+
+### Step 2: Engine core and transport (2 to 4 weeks)
+- `rtrb` command queue, `EngineEvent` queue, `Telemetry` atomics, garbage queue.
+- Transport: play/stop/pause, loop region, tempo, time signature, position in ticks (960 PPQ).
+- Fixed 64-frame render quantum with FIFO adapter; scheduler that splits at timeline events.
+- Metronome click (synthesized, original), accent on the downbeat.
+- Transport bar: play, stop, BPM field, bars:beats:ticks display, loop toggle.
+- Tests: events on the right frame at 44.1/48/96 kHz, across tempo changes and loop wraps, odd
+  buffer sizes; `process` under `assert_no_alloc`.
+- **You should hear** a click that stays locked to the display at any tempo and buffer size.
+- Exit criteria: scheduler tests pass; no xruns at 128 frames on a typical machine.
+
+---
+
+## Phase B: Make a beat
+
+### Step 3: Sampler + channel rack (3 to 5 weeks)
+- Sample loader (symphonia + rubato) on a worker thread, sample browser panel.
+- Sampler channel: pitch, volume, pan, start/end, one-shot/loop, ADSR; pooled voices.
+- Channel rack: 16/32 steps, step velocity, swing, mute/solo; create/clone/rename/select patterns.
+- Four procedurally generated, original drum sounds (kick, snare, hat, clap) committed as CC0.
+- **You should hear** a looping four-on-the-floor beat edited live from the step grid.
+- Cut if late: sample browser folders (single folder), loop mode.
+
+### Step 4: Piano roll (4 to 6 weeks)
+- Custom-painted egui widget: draw/erase/select/move/resize, snap (1/4 to 1/32 + triplets), zoom,
+  velocity lane, ghost notes, scale highlight, box select, copy/paste, quantize, humanize, shortcuts.
+- Undo/redo via the `Edit` command stack in `gt-project`.
+- **You should see** 60 fps with 10,000 notes; hear edits immediately during playback.
+- Cut if late: humanize, scale highlighting, ghost notes.
+
+### Step 5: Gloom Synth (4 to 6 weeks)
+- PolyBLEP oscillators, sub, noise, unison, ZDF ladder low-pass (24 dB/oct), 2 ADSR, 2 LFO,
+  8-slot mod matrix, 16 voices with stealing, portamento, presets.
+- Knob UI with oscilloscope and filter response display.
+- criterion benchmarks; insta snapshot of a rendered patch.
+- **Milestone: first loop**, drums plus a synth line.
+- Cut if late: unison stereo spread, mod-matrix slots beyond 4.
+
+---
+
+## Phase C: Mix and arrange
+
+### Step 6: Mixer and effects (6 to 10 weeks)
+- Master + 64 inserts + 4 sends; volume, pan, mute, solo, phase invert, 10 slots, meters, routing
+  from any channel to any insert; cycle-free routing enforced.
+- Effects: 8-band EQ, compressor with sidechain, tempo-synced ping-pong delay, reverb (FDN or
+  Dattorro), chorus, waveshaper, limiter, stereo width. All smoothed.
+- PDC groundwork in the graph.
+- **You should hear** a mixed loop with reverb tails that survive adding new channels.
+- Cut if late: chorus and width (ship later in 0.x), sidechain UI (keep engine support).
+
+### Step 7: Playlist / arrangement (5 to 8 weeks)
+- Unlimited tracks; pattern, audio and automation clips; move/resize/split/duplicate/slip-edit;
+  loop region, markers, snap, zoom, colours, mute/solo.
+- Tempo and time-signature changes honoured; waveform peaks built on a worker thread.
+- Song/pattern play modes.
+- **You should hear** a full arrangement playing from the playlist.
+- Cut if late: slip edit, markers.
+
+### Step 8: Automation and parameter system (3 to 5 weeks)
+- Stable `ParamAddress` for every parameter; range, curve, display formatting.
+- Automation clips (hold, linear, smooth, bezier); "create automation clip" from any control.
+- LFO and envelope-follower modulation; 32-frame control rate with smoothing, trade-off documented.
+- **Milestone: first song**, arranged, mixed and automated.
+- Cut if late: bezier curves, envelope follower.
+
+---
+
+## Phase D: Keep and share
+
+### Step 9: Save/load, export, recovery (3 to 5 weeks)
+- `.gloom` zip container, versioned JSON schema with migrations, optional embedded samples,
+  relative paths with relink dialog, autosave and crash recovery.
+- Offline export: WAV 16/24/32-float, sample-rate choice, TPDF dither, normalize, tails,
+  loop/song/stems.
+- Golden-file test: reference project export matches a stored hash per platform.
+- **Milestone: v0.1 alpha**, the first build worth giving to someone else.
+- Cut if late: per-track stems, normalization.
+
+### Step 10: MIDI input and recording (2 to 4 weeks)
+- midir input with polled hot-plug, MIDI learn, live recording with count-in, latency setting,
+  computer-keyboard piano, SMF type 1 import/export.
+- **You should hear** a hardware keyboard play Gloom Synth with no audible lag at 128 frames.
+- Cut if late: SMF export.
+
+---
+
+## Phase E: Extend
+
+### Step 11: CLAP hosting (6 to 10 weeks)
+- `gt-plugin-host`: scan, load, process, automate, save/restore state, native GUI window.
+- Crash containment: bypass and quarantine; out-of-process sandbox evaluated.
+- VST3 design and licensing write-up only.
+- Recommendation: if the schedule slips, ship v1.0 with built-in instruments and effects (after
+  Step 12) and deliver this step as v1.1. The architecture does not depend on it.
+
+---
+
+## Phase F: Ship
+
+### Step 12: Performance, polish, packaging (4 to 8 weeks)
+- Profile audio worst case, UI frame time, startup, memory; CPU/xrun meter.
+- Audio settings panel (device, buffer, rate, Windows exclusive mode evaluation), shortcut editor,
+  theme editor, first-run wizard.
+- Windows installer, Ubuntu .deb and AppImage, signed release workflow, opt-in crash reporter,
+  `cargo deny` license allow-list in CI.
+- **Milestone: v1.0.**
+
+---
+
+## v1.0 scope
+
+In: everything in Steps 1 to 10 and 12 at their non-cut level.
+Optional for v1.0: Step 11 (CLAP).
+Out (post-v1 backlog):
+
+- **Audio recording from an input device.** Not in the current plan; most users will expect it.
+  The engine already accepts `live_in`, so it is a contained addition after Step 10.
+- VST3 hosting.
+- Time-stretching and pitch-shifting of audio clips.
+- Tempo ramps (the tempo map currently has step changes only).
+- Out-of-process plugin sandbox (if not done in Step 11).
+- Additional built-in instruments (FM, wavetable, drum synth).
+- macOS (not a target; the architecture does not prevent it).
+
+## Keeping this file current
+
+Each step's PR updates the status table, replaces estimates with actuals, and moves anything cut
+into the backlog with a note.
