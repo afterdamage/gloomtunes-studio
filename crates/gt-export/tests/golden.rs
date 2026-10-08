@@ -17,7 +17,10 @@ use gt_export::{export, BitDepth, ExportSettings, Progress, Range};
 use gt_project::file;
 
 /// Expected FNV-1a 64 hash of the exported WAV, per operating system.
-const EXPECTED: &[(&str, &str)] = &[("linux", "b399cad748bb62c9"), ("windows", "WINDOWS_HASH")];
+const EXPECTED: &[(&str, &str)] = &[
+    ("linux", "b399cad748bb62c9"),
+    ("windows", "e682a81ea7dbbf92"),
+];
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference.gloom")
