@@ -97,6 +97,18 @@ impl Adsr {
         self.stage = Stage::Attack;
     }
 
+    /// Restarts the attack from the current level instead of 0, so a voice that is still
+    /// sounding (a stolen voice, a legato retrigger) does not click.
+    pub fn retrigger(&mut self, params: AdsrParams) {
+        self.p = params;
+        self.stage = Stage::Attack;
+    }
+
+    /// Replaces the coefficients without changing the stage or level (live knob changes).
+    pub fn set_params(&mut self, params: AdsrParams) {
+        self.p = params;
+    }
+
     /// Enters the release stage from the current level.
     pub fn release(&mut self) {
         if self.stage != Stage::Idle {
@@ -224,6 +236,20 @@ mod tests {
         e.trigger(AdsrParams::new(48_000.0, 0.0, 20.0, 0.0, 0.0));
         run(&mut e, 48_000);
         assert!(!e.is_active());
+    }
+
+    #[test]
+    fn retrigger_continues_from_the_current_level() {
+        let mut e = Adsr::default();
+        let p = AdsrParams::new(1000.0, 10.0, 0.0, 1.0, 10.0);
+        e.trigger(p);
+        run(&mut e, 5);
+        e.release();
+        run(&mut e, 2);
+        let before = e.level();
+        e.retrigger(p);
+        let x = e.next_level();
+        assert!(x > before && x - before < 0.11, "{before} {x}");
     }
 
     #[test]

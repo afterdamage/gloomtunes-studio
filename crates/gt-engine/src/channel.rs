@@ -1,19 +1,22 @@
-//! Channel slots: preallocated voice pools that play a sample.
+//! Channel slots: preallocated voice pools that play a sample or Gloom Synth.
 
 use std::sync::Arc;
 
 use gt_core::{SampleData, ROOT_KEY};
-use gt_dsp::{AdsrParams, LinearRamp, SamplerVoice, VoiceRegion};
+use gt_dsp::{AdsrParams, GloomSynth, LinearRamp, SamplerVoice, VoiceRegion};
 
-use crate::song::ChannelParams;
+use crate::song::{ChannelParams, InstrumentKind};
 
 /// Voices per channel. When all are busy, the oldest is stolen.
 pub const VOICES_PER_CHANNEL: usize = 16;
 /// Gain/pan smoothing time in seconds.
 const GAIN_RAMP_S: f32 = 0.01;
 
-/// One channel of the rack on the audio thread. Everything is allocated at engine creation.
+/// One channel of the rack on the audio thread. Everything is allocated at engine creation:
+/// each slot holds both a sampler voice pool and a Gloom Synth, and plays whichever its
+/// parameters select.
 pub(crate) struct ChannelSlot {
+    synth: Box<GloomSynth>,
     sr: f32,
     params: ChannelParams,
     env: AdsrParams,
@@ -34,6 +37,7 @@ impl ChannelSlot {
     pub(crate) fn new(sample_rate: f32) -> Self {
         let params = ChannelParams::default();
         Self {
+            synth: Box::new(GloomSynth::new(sample_rate)),
             sr: sample_rate,
             params,
             env: Self::env_for(sample_rate, &params),
@@ -52,6 +56,13 @@ impl ChannelSlot {
 
     /// Applies new settings. Gain and pan glide over 10 ms; the rest applies to new notes.
     pub(crate) fn set_params(&mut self, p: ChannelParams) {
+        if p.kind != self.params.kind {
+            // The other instrument's voices would never get their note-offs.
+            self.kill_all();
+        }
+        if p.kind == InstrumentKind::Synth {
+            self.synth.set_settings(&p.synth);
+        }
         self.params = p;
         self.env = Self::env_for(self.sr, &p);
         let (l, r) = pan_gains(p.gain, p.pan);
@@ -76,6 +87,10 @@ impl ChannelSlot {
 
     /// Starts a note. `age` orders voices for stealing.
     pub(crate) fn note_on(&mut self, key: u8, velocity: f32, age: u64) {
+        if self.params.kind == InstrumentKind::Synth {
+            self.synth.note_on(key, velocity, age);
+            return;
+        }
         let Some(sample) = &self.sample else {
             return;
         };
@@ -111,6 +126,7 @@ impl ChannelSlot {
 
     /// Releases held voices playing `key` (one-shot voices ignore it).
     pub(crate) fn note_off(&mut self, key: u8) {
+        self.synth.note_off(key);
         for v in &mut self.voices {
             if v.is_held() && v.key() == key {
                 v.release();
@@ -120,6 +136,7 @@ impl ChannelSlot {
 
     /// Releases every voice.
     pub(crate) fn release_all(&mut self) {
+        self.synth.release_all();
         for v in &mut self.voices {
             v.release();
         }
@@ -127,6 +144,7 @@ impl ChannelSlot {
 
     /// Silences every voice at once.
     pub(crate) fn kill_all(&mut self) {
+        self.synth.kill_all();
         for v in &mut self.voices {
             v.kill();
         }
@@ -134,11 +152,14 @@ impl ChannelSlot {
 
     /// True if any voice is sounding.
     pub(crate) fn is_active(&self) -> bool {
-        self.voices.iter().any(SamplerVoice::is_active)
+        self.voices.iter().any(SamplerVoice::is_active) || self.synth.is_active()
     }
 
     /// Adds the voices (dry, before channel gain) into the two buffers.
     pub(crate) fn render_voices(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
+        if self.synth.is_active() {
+            self.synth.render(out_l, out_r);
+        }
         let Some(sample) = &self.sample else {
             return;
         };
@@ -197,6 +218,23 @@ mod tests {
         let mut ages: Vec<_> = ch.voices.iter().map(|v| v.age).collect();
         ages.sort_unstable();
         assert_eq!(ages, (3..VOICES_PER_CHANNEL as u64 + 3).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn synth_channels_play_without_a_sample() {
+        let mut ch = ChannelSlot::new(48_000.0);
+        ch.set_params_now(ChannelParams {
+            kind: InstrumentKind::Synth,
+            gain: 1.0,
+            ..ChannelParams::default()
+        });
+        ch.note_on(60, 1.0, 1);
+        let (mut l, mut r) = (vec![0.0; 2048], vec![0.0; 2048]);
+        ch.render_voices(&mut l, &mut r);
+        assert!(l.iter().any(|x| x.abs() > 0.01));
+        // Switching back to the sampler silences the synth's voices.
+        ch.set_params(ChannelParams::default());
+        assert!(!ch.is_active());
     }
 
     #[test]

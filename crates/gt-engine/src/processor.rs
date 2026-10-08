@@ -11,7 +11,7 @@ use crate::channel::ChannelSlot;
 use crate::command::{EngineCommand, EngineEvent, Garbage, TransportState};
 use crate::song::{ChannelParams, SongSnapshot};
 use crate::transport::{EventBuf, EventKind, ScheduledEvent, Transport};
-use crate::{EngineConfig, Telemetry, FADE_SECONDS, RENDER_QUANTUM};
+use crate::{EngineConfig, Telemetry, FADE_SECONDS, RENDER_QUANTUM, SCOPE_LEN};
 
 /// Frequency of the device test tone (concert A).
 pub const TEST_TONE_HZ: f32 = 440.0;
@@ -61,6 +61,8 @@ pub struct AudioProcessor {
     preview: ChannelSlot,
     /// Increments with every note-on; orders voices for stealing.
     voice_age: u64,
+    /// Channel slot that feeds the oscilloscope.
+    scope_slot: Option<usize>,
 
     click: Click,
     click_gain: f32,
@@ -118,6 +120,7 @@ impl AudioProcessor {
             channels: (0..MAX_CHANNELS).map(|_| ChannelSlot::new(sr)).collect(),
             preview,
             voice_age: 0,
+            scope_slot: None,
             click: Click::new(sr),
             click_gain: db_to_gain(CLICK_DBFS),
             metronome: true,
@@ -249,6 +252,10 @@ impl AudioProcessor {
         let events = self.scheduled.as_slice();
         let ch = &mut self.channels[slot];
         if !ch.is_active() && !events.iter().any(|e| touches(&e)) {
+            if self.scope_slot == Some(slot) {
+                self.scratch_l.fill(0.0);
+                self.write_scope();
+            }
             return;
         }
         let (sl, sr) = (&mut self.scratch_l, &mut self.scratch_r);
@@ -272,6 +279,23 @@ impl AudioProcessor {
         ch.render_voices(&mut sl[cursor..], &mut sr[cursor..]);
         let peak = ch.mix_into((sl, sr), (&mut self.quantum_l, &mut self.quantum_r));
         self.telemetry.channel_peaks[slot].fetch_max(peak, Ordering::Relaxed);
+        if self.scope_slot == Some(slot) {
+            for (l, r) in self.scratch_l.iter_mut().zip(&self.scratch_r) {
+                *l = 0.5 * (*l + r);
+            }
+            self.write_scope();
+        }
+    }
+
+    /// Appends `scratch_l` to the telemetry oscilloscope ring.
+    fn write_scope(&self) {
+        let t = &*self.telemetry;
+        let start = t.scope_write.load(Ordering::Relaxed);
+        for (i, &x) in self.scratch_l.iter().enumerate() {
+            t.scope[((start + i as u64) % SCOPE_LEN as u64) as usize].store(x, Ordering::Relaxed);
+        }
+        t.scope_write
+            .store(start + self.scratch_l.len() as u64, Ordering::Relaxed);
     }
 
     fn apply_commands(&mut self) {
@@ -345,6 +369,7 @@ impl AudioProcessor {
                 }
                 self.retire(Garbage::Params(params));
             }
+            EngineCommand::SetScopeChannel(slot) => self.scope_slot = slot.map(usize::from),
             EngineCommand::SetChannelSample { slot, sample } => {
                 let old = match self.channels.get_mut(usize::from(slot)) {
                     Some(ch) => ch.set_sample(sample),
@@ -472,6 +497,34 @@ mod tests {
             gain: 1.0,
             ..crate::ChannelParams::default()
         })
+    }
+
+    #[test]
+    fn synth_channel_plays_and_feeds_the_scope() {
+        let (mut h, mut p) = engine(48_000, 2);
+        h.send(EngineCommand::SetChannelParams {
+            slot: 5,
+            params: Box::new(crate::ChannelParams {
+                kind: crate::InstrumentKind::Synth,
+                gain: 1.0,
+                ..crate::ChannelParams::default()
+            }),
+        })
+        .unwrap();
+        h.send(EngineCommand::SetScopeChannel(Some(5))).unwrap();
+        h.send(EngineCommand::NoteOn {
+            slot: 5,
+            key: 57,
+            velocity: 1.0,
+        })
+        .unwrap();
+        let mut buf = vec![0.0; 2 * 4800];
+        p.process(&mut buf);
+        assert!(buf.iter().any(|s| s.abs() > 0.05));
+        let mut scope = vec![0.0; 1024];
+        h.telemetry().read_scope(&mut scope);
+        assert!(scope.iter().any(|s| s.abs() > 0.05));
+        assert!(h.telemetry().scope_write.load(Ordering::Relaxed) >= 4800);
     }
 
     #[test]

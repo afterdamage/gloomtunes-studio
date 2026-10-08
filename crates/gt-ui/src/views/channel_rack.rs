@@ -60,7 +60,7 @@ pub fn channel_rack(
     ui.add_space(6.0);
 
     let mut remove = None;
-    let mut add = false;
+    let mut add = None;
     let steps = project.current_pattern().steps;
     let silenced: Vec<bool> = (0..project.channels.len())
         .map(|i| project.is_silenced(i))
@@ -100,17 +100,31 @@ pub fn channel_rack(
                 });
             }
             ui.add_space(4.0);
-            if ui
-                .button("+ Channel")
-                .on_hover_text("Add an empty sampler channel; load a sample from the browser")
-                .clicked()
-            {
-                add = true;
-            }
+            ui.horizontal(|ui| {
+                if ui
+                    .button("+ Sampler")
+                    .on_hover_text("Add an empty sampler channel; load a sample from the browser")
+                    .clicked()
+                {
+                    add = Some(false);
+                }
+                if ui
+                    .button("+ Gloom Synth")
+                    .on_hover_text("Add a Gloom Synth channel")
+                    .clicked()
+                {
+                    add = Some(true);
+                }
+            });
         });
-    if add {
+    if let Some(synth) = add {
         let n = project.channels.len() + 1;
-        if project.add_channel(&format!("Sampler {n}"), None).is_some() {
+        let added = if synth {
+            project.add_synth_channel(&format!("Synth {n}"), gt_core::SynthPatch::default())
+        } else {
+            project.add_channel(&format!("Sampler {n}"), None)
+        };
+        if added.is_some() {
             state.selected = project.channels.len() - 1;
             actions.push(RackAction::ChannelsChanged);
         }
@@ -281,6 +295,19 @@ fn step_button(
         let mut bar = rect.shrink(1.0);
         bar.set_top(bar.bottom() - h);
         p.rect_filled(bar, radius, theme.accent);
+    } else {
+        // Notes the piano roll placed in this step (other keys or off-grid): a small mark, so
+        // a melodic channel's row does not look empty.
+        let t0 = i64::from(step) * gt_core::STEP_TICKS;
+        let notes = pattern.channel_notes(ch.id);
+        let lo = notes.partition_point(|n| n.start < t0);
+        if notes
+            .get(lo)
+            .is_some_and(|n| n.start < t0 + gt_core::STEP_TICKS)
+        {
+            let mark = egui::Rect::from_center_size(rect.center(), vec2(6.0, 6.0));
+            p.rect_filled(mark, 1.0, theme.accent_dim.lerp_to_gamma(theme.accent, 0.4));
+        }
     }
     if playing {
         p.rect_stroke(

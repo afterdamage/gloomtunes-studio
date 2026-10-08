@@ -177,6 +177,33 @@ pub fn default_folder() -> std::path::PathBuf {
     std::env::current_dir().unwrap_or_default()
 }
 
+/// Where the user's Gloom Synth presets are saved: `%APPDATA%\GloomTunes Studio\Presets\Gloom
+/// Synth` on Windows, `$XDG_DATA_HOME/gloomtunes-studio/presets/gloom-synth` (default
+/// `~/.local/share/...`) elsewhere.
+pub fn synth_preset_folder() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    if cfg!(windows) {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata)
+                .join("GloomTunes Studio")
+                .join("Presets")
+                .join("Gloom Synth");
+        }
+    }
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|h| PathBuf::from(h).join(".local").join("share"))
+        })
+        .unwrap_or_default();
+    data.join("gloomtunes-studio")
+        .join("presets")
+        .join("gloom-synth")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

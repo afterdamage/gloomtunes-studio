@@ -4,19 +4,22 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use gt_core::{Project, SampleSource, TempoMap, Tick, MAX_CHANNELS, ROOT_KEY, STEP_TICKS};
+use gt_core::{
+    Instrument, Project, SampleSource, TempoMap, Tick, MAX_CHANNELS, ROOT_KEY, STEP_TICKS,
+};
 use gt_engine::{ChannelParams, EngineCommand, LoopRegion, SongSnapshot, TransportState};
-use gt_project::{ops, History};
+use gt_project::{ops, presets, History};
 use gt_ui::views::{
-    audio_panel, browser, channel_rack, piano_roll, sampler_panel, transport_bar, AudioAction,
-    AudioPanelModel, BrowserAction, BrowserModel, PianoRollAction, PianoRollState, PianoRollView,
-    PlayState, RackAction, RackState, RackView, SamplerPanelView, TransportAction, TransportModel,
+    audio_panel, browser, channel_rack, piano_roll, sampler_panel, synth_panel, transport_bar,
+    AudioAction, AudioPanelModel, BrowserAction, BrowserModel, PianoRollAction, PianoRollState,
+    PianoRollView, PlayState, RackAction, RackState, RackView, SamplerPanelView, SynthPanelAction,
+    SynthPanelView, TransportAction, TransportModel,
 };
 use gt_ui::widgets::MeterBallistics;
 use gt_ui::GloomTheme;
 
 use crate::audio_io::AudioIo;
-use crate::library::{default_folder, list_folder, Library};
+use crate::library::{default_folder, list_folder, synth_preset_folder, Library};
 
 /// Sample rate used for loading while no device is open.
 const FALLBACK_RATE: u32 = 48_000;
@@ -55,6 +58,13 @@ pub struct GloomApp {
     /// history once the gesture ends (no mouse button down, no text field focused).
     pending_edit: Option<&'static str>,
     humanize_seed: u64,
+
+    /// Slot the engine copies into the oscilloscope buffer (the selected synth channel).
+    scope_slot: Option<u16>,
+    scope: Vec<f32>,
+    preset_dir: std::path::PathBuf,
+    user_presets: Vec<(String, std::path::PathBuf)>,
+    preset_status: Option<String>,
 }
 
 impl GloomApp {
@@ -82,7 +92,13 @@ impl GloomApp {
             history,
             pending_edit: None,
             humanize_seed: 0x9E37_79B9_7F4A_7C15,
+            scope_slot: None,
+            scope: vec![0.0; gt_engine::SCOPE_LEN],
+            preset_dir: synth_preset_folder(),
+            user_presets: Vec::new(),
+            preset_status: None,
         };
+        app.refresh_presets();
         app.open_folder(default_folder());
         app.request_channel_samples();
         app
@@ -110,7 +126,7 @@ impl GloomApp {
     fn request_channel_samples(&mut self) {
         let rate = self.rate();
         for ch in &self.project.channels {
-            if let Some(src) = &ch.sampler.sample {
+            if let Some(src) = ch.sample() {
                 self.library.request(src, rate);
             }
         }
@@ -120,7 +136,7 @@ impl GloomApp {
     /// and the sample is sent when the load finishes, so a failed load never leaves the
     /// previous sample playing.
     fn push_sample(&mut self, i: usize) {
-        let sample = match &self.project.channels[i].sampler.sample {
+        let sample = match self.project.channels[i].sample() {
             None => None,
             Some(src) => match self.library.get(src) {
                 Some(l) => Some(std::sync::Arc::clone(&l.data)),
@@ -173,7 +189,7 @@ impl GloomApp {
     fn on_samples_ready(&mut self, ready: Vec<SampleSource>) {
         for src in ready {
             for i in 0..self.project.channels.len() {
-                if self.project.channels[i].sampler.sample.as_ref() == Some(&src) {
+                if self.project.channels[i].sample() == Some(&src) {
                     self.push_sample(i);
                 }
             }
@@ -206,19 +222,81 @@ impl GloomApp {
                 let Some(ch) = self.project.channels.get_mut(i) else {
                     return;
                 };
+                let fresh = ch.sample().is_none() && ch.name.starts_with("Sampler ");
+                let Some(sampler) = ch.sampler_mut() else {
+                    return; // a synth channel has no sample
+                };
+                sampler.sample = Some(src.clone());
                 // Name a fresh "Sampler N" channel after its first sample.
-                if ch.sampler.sample.is_none() && ch.name.starts_with("Sampler ") {
+                if fresh {
                     if let SampleSource::File(p) = &src {
                         if let Some(stem) = p.file_stem() {
                             ch.name = stem.to_string_lossy().into_owned();
                         }
                     }
                 }
-                ch.sampler.sample = Some(src);
                 self.push_sample(i);
                 self.pending_edit = Some("Load sample");
             }
             BrowserAction::Open(dir) => self.open_folder(dir),
+        }
+    }
+
+    fn refresh_presets(&mut self) {
+        self.user_presets = presets::list(&self.preset_dir)
+            .into_iter()
+            .map(|p| {
+                let name = p
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                (name, p)
+            })
+            .collect();
+    }
+
+    fn on_synth_panel(&mut self, action: SynthPanelAction) {
+        let i = self.rack.selected;
+        match action {
+            SynthPanelAction::Changed => {
+                self.push_all_params();
+                self.pending_edit = Some("Synth settings");
+            }
+            SynthPanelAction::LoadFile(path) => match presets::load(&path) {
+                Ok(patch) => {
+                    if let Some(p) = self.project.channels.get_mut(i).and_then(|c| c.synth_mut()) {
+                        *p = patch;
+                        self.preset_status = None;
+                        self.push_all_params();
+                        self.pending_edit = Some("Load preset");
+                    }
+                }
+                Err(e) => self.preset_status = Some(e.to_string()),
+            },
+            SynthPanelAction::Save => {
+                let Some(patch) = self.project.channels.get(i).and_then(|c| c.synth()) else {
+                    return;
+                };
+                self.preset_status = Some(match presets::save(&self.preset_dir, patch) {
+                    Ok(path) => format!("Saved {}", path.display()),
+                    Err(e) => format!("Could not save: {e}"),
+                });
+                self.refresh_presets();
+            }
+        }
+    }
+
+    /// Points the oscilloscope at the selected channel when it is a synth.
+    fn update_scope_slot(&mut self) {
+        let want = self
+            .project
+            .channels
+            .get(self.rack.selected)
+            .filter(|c| c.synth().is_some())
+            .map(|_| self.rack.selected as u16);
+        if want != self.scope_slot {
+            self.scope_slot = want;
+            self.send(EngineCommand::SetScopeChannel(want));
         }
     }
 
@@ -375,6 +453,7 @@ impl GloomApp {
         self.send(EngineCommand::SetTestTone(self.test_tone));
         self.slots_in_use = 0; // a new engine starts with empty slots
         self.push_channels();
+        self.send(EngineCommand::SetScopeChannel(self.scope_slot));
     }
 
     /// Draws the piano roll for the selected channel of the current pattern.
@@ -605,6 +684,7 @@ impl eframe::App for GloomApp {
             .project
             .channels
             .get(self.rack.selected)
+            .filter(|c| c.sampler().is_some())
             .map(|c| c.name.clone());
         let browser_actions = egui::Panel::left("browser")
             .resizable(true)
@@ -619,30 +699,50 @@ impl eframe::App for GloomApp {
             self.on_browser(a);
         }
 
-        let sampler_changed = egui::Panel::bottom("sampler")
+        // The oscilloscope follows the selected synth channel.
+        self.update_scope_slot();
+        if self.scope_slot.is_some() {
+            if let Some(engine) = self.audio.engine() {
+                engine.telemetry().read_scope(&mut self.scope);
+            }
+        }
+        let sample_rate = self.rate() as f32;
+        let (sampler_changed, synth_actions) = egui::Panel::bottom("instrument")
             .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(8))
             .show(ui, |ui| {
                 let Some(ch) = self.project.channels.get_mut(self.rack.selected) else {
                     ui.label(egui::RichText::new("No channel selected").color(theme.text_dim));
-                    return false;
+                    return (false, Vec::new());
                 };
-                let loaded = ch.sampler.sample.as_ref().and_then(|s| self.library.get(s));
-                let status = ch
-                    .sampler
-                    .sample
-                    .as_ref()
-                    .and_then(|s| self.library.status(s));
-                let view = SamplerPanelView {
-                    waveform: loaded.map(|l| l.overview.as_slice()),
-                    seconds: loaded.map(|l| l.data.seconds()),
-                    status: status.as_deref(),
-                };
-                sampler_panel(ui, &theme, ch, view)
+                match &mut ch.instrument {
+                    Instrument::Sampler(s) => {
+                        let loaded = s.sample.as_ref().and_then(|x| self.library.get(x));
+                        let status = s.sample.as_ref().and_then(|x| self.library.status(x));
+                        let view = SamplerPanelView {
+                            waveform: loaded.map(|l| l.overview.as_slice()),
+                            seconds: loaded.map(|l| l.data.seconds()),
+                            status: status.as_deref(),
+                        };
+                        (sampler_panel(ui, &theme, &mut ch.name, s, view), Vec::new())
+                    }
+                    Instrument::Synth(patch) => {
+                        let view = SynthPanelView {
+                            scope: &self.scope,
+                            user_presets: &self.user_presets,
+                            sample_rate,
+                            status: self.preset_status.as_deref(),
+                        };
+                        (false, synth_panel(ui, &theme, &mut ch.name, patch, view))
+                    }
+                }
             })
             .inner;
         if sampler_changed {
             self.push_all_params();
             self.pending_edit = Some("Sampler settings");
+        }
+        for a in synth_actions {
+            self.on_synth_panel(a);
         }
 
         let playing = self.transport.state == PlayState::Playing;

@@ -15,9 +15,9 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 1 | Workspace + hello audio | Done (2026-10-08) |
 | 2 | Engine core and transport | Done (2026-10-08) |
 | 3 | Sampler + channel rack | Done (2026-10-08) |
-| 4 | Piano roll | **In review** |
-| 5 | Gloom Synth | Next |
-| 6 | Mixer and effects | Planned |
+| 4 | Piano roll | Done (2026-10-08) |
+| 5 | Gloom Synth | **In review** |
+| 6 | Mixer and effects | Next |
 | 7 | Playlist / arrangement | Planned |
 | 8 | Automation and parameter system | Planned |
 | 9 | Save/load, export, recovery | Planned |
@@ -106,6 +106,20 @@ for schedule; Phase E is the riskiest technically.
 - criterion benchmarks; insta snapshot of a rendered patch.
 - **Milestone: first loop**, drums plus a synth line.
 - Cut if late: unison stereo spread, mod-matrix slots beyond 4.
+- Delivered (2026-10-08): everything above, nothing cut. Two oscillators (sine, PolyBLEP saw and
+  square, PolyBLAMP triangle) with pulse width, a sub one octave down, noise, up to 7 unison
+  copies with detune and stereo spread, a ZDF ladder with resonance, drive, envelope amount and
+  key tracking (D34), amp and mod ADSR, two LFOs (5 shapes), an 8-slot matrix (7 sources,
+  16 destinations), 16 voices with release-first stealing that retriggers from the current
+  level (D35), exponential glide, 7 factory presets and `.gloomsynth` JSON preset files (D36).
+  The demo gains a synth bass, so the **first loop** milestone is reached. Measured (release,
+  this container): 1 s of audio at 48 kHz takes 3.1 ms for one voice, 49 ms for 16 voices and
+  94 ms for 16 voices with 7 unison copies, i.e. about 10 % of one core in the worst case.
+  Known limits: no oversampling (ZDF instead, D34), so a screaming-resonance sweep near
+  Nyquist is cleaner than a naive filter but not alias-free; noise, unison phases and
+  sample-and-hold are seeded per synth and not yet reset on play, so offline export will
+  match real time only once Step 9 resets them (§7.5); synth parameters are not automatable or
+  MIDI-learnable yet (Step 8); a stolen voice retriggers rather than fading over 2 ms.
 
 ---
 

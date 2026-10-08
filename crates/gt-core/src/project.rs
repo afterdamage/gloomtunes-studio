@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::synth::SynthPatch;
 use crate::time::PPQ;
 
 /// Ticks per step of the channel rack: a 1/16 note.
@@ -154,8 +155,56 @@ pub struct Channel {
     pub mute: bool,
     /// Soloed. When any channel is soloed, only soloed channels sound.
     pub solo: bool,
-    /// Instrument settings.
-    pub sampler: SamplerSettings,
+    /// What makes the sound.
+    pub instrument: Instrument,
+}
+
+/// The sound source of a channel.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Instrument {
+    /// Plays a sample.
+    Sampler(SamplerSettings),
+    /// Gloom Synth.
+    Synth(Box<SynthPatch>),
+}
+
+impl Channel {
+    /// Sampler settings, if this is a sampler channel.
+    pub fn sampler(&self) -> Option<&SamplerSettings> {
+        match &self.instrument {
+            Instrument::Sampler(s) => Some(s),
+            Instrument::Synth(_) => None,
+        }
+    }
+
+    /// Mutable sampler settings, if this is a sampler channel.
+    pub fn sampler_mut(&mut self) -> Option<&mut SamplerSettings> {
+        match &mut self.instrument {
+            Instrument::Sampler(s) => Some(s),
+            Instrument::Synth(_) => None,
+        }
+    }
+
+    /// The synth patch, if this is a synth channel.
+    pub fn synth(&self) -> Option<&SynthPatch> {
+        match &self.instrument {
+            Instrument::Synth(p) => Some(p),
+            Instrument::Sampler(_) => None,
+        }
+    }
+
+    /// Mutable synth patch, if this is a synth channel.
+    pub fn synth_mut(&mut self) -> Option<&mut SynthPatch> {
+        match &mut self.instrument {
+            Instrument::Synth(p) => Some(p),
+            Instrument::Sampler(_) => None,
+        }
+    }
+
+    /// The sample this channel plays, if any.
+    pub fn sample(&self) -> Option<&SampleSource> {
+        self.sampler().and_then(|s| s.sample.as_ref())
+    }
 }
 
 impl Channel {
@@ -301,7 +350,8 @@ impl Project {
         p
     }
 
-    /// The starter project: the four built-in drums and a basic beat in "Pattern 1".
+    /// The starter project: the four built-in drums with a basic beat and a Gloom Synth bass line
+    /// in "Pattern 1".
     pub fn demo() -> Self {
         let mut p = Self::empty();
         let [kick, snare, hat, clap] = BuiltInSample::ALL.map(|b| {
@@ -326,6 +376,33 @@ impl Project {
         }
         pat.toggle_step(clap, 12);
         pat.set_step_velocity(clap, 12, 0.6);
+        // A one-bar bass line on Gloom Synth: (step, length in steps, key, velocity).
+        let bass_patch = SynthPatch::factory()
+            .into_iter()
+            .find(|x| x.name == "Gloom Bass")
+            .unwrap_or_default();
+        let bass = p
+            .add_synth_channel("Gloom Bass", bass_patch)
+            .expect("demo fits");
+        let line: [(i64, i64, u8, f32); 6] = [
+            (0, 2, 45, 0.9),
+            (3, 1, 45, 0.6),
+            (6, 2, 48, 0.8),
+            (8, 2, 43, 0.9),
+            (11, 1, 43, 0.6),
+            (14, 2, 40, 0.8),
+        ];
+        p.current_pattern_mut().notes.insert(
+            bass,
+            line.iter()
+                .map(|&(step, len, key, velocity)| Note {
+                    start: step * STEP_TICKS,
+                    length: len * STEP_TICKS,
+                    key,
+                    velocity,
+                })
+                .collect(),
+        );
         p
     }
 
@@ -337,6 +414,21 @@ impl Project {
 
     /// Adds a sampler channel at the bottom of the rack. `None` when the rack is full.
     pub fn add_channel(&mut self, name: &str, sample: Option<SampleSource>) -> Option<ChannelId> {
+        self.add_instrument(
+            name,
+            Instrument::Sampler(SamplerSettings {
+                sample,
+                ..SamplerSettings::default()
+            }),
+        )
+    }
+
+    /// Adds a Gloom Synth channel at the bottom of the rack. `None` when the rack is full.
+    pub fn add_synth_channel(&mut self, name: &str, patch: SynthPatch) -> Option<ChannelId> {
+        self.add_instrument(name, Instrument::Synth(Box::new(patch)))
+    }
+
+    fn add_instrument(&mut self, name: &str, instrument: Instrument) -> Option<ChannelId> {
         if self.channels.len() >= MAX_CHANNELS {
             return None;
         }
@@ -348,10 +440,7 @@ impl Project {
             pan: 0.0,
             mute: false,
             solo: false,
-            sampler: SamplerSettings {
-                sample,
-                ..SamplerSettings::default()
-            },
+            instrument,
         });
         Some(id)
     }
@@ -465,9 +554,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn demo_has_four_channels_and_a_beat() {
+    fn demo_has_drums_a_beat_and_a_synth_bass() {
         let p = Project::demo();
-        assert_eq!(p.channels.len(), 4);
+        assert_eq!(p.channels.len(), 5);
+        assert!(p.channels[..4].iter().all(|c| c.sampler().is_some()));
+        assert_eq!(
+            p.channels[4].synth().map(|s| s.name.as_str()),
+            Some("Gloom Bass")
+        );
+        assert_eq!(p.current_pattern().channel_notes(p.channels[4].id).len(), 6);
         let pat = p.current_pattern();
         assert_eq!(pat.channel_notes(p.channels[0].id).len(), 4);
         assert!(pat.step_note(p.channels[1].id, 4).is_some());
@@ -545,7 +640,7 @@ mod tests {
         let mut p = Project::demo();
         let id = p.channels[0].id;
         p.remove_channel(id);
-        assert_eq!(p.channels.len(), 3);
+        assert_eq!(p.channels.len(), 4);
         assert!(!p.current_pattern().notes.contains_key(&id));
     }
 }

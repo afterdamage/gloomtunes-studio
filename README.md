@@ -4,9 +4,10 @@ An original, open-source, pattern-based digital audio workstation written in Rus
 Windows 10/11 and Ubuntu 22.04+ from a single codebase. Channel rack, piano roll, mixer and
 playlist, with built-in instruments and effects, wrapped in a dark, moody "Gloom" interface.
 
-> **Status:** early development. Step 4 of the [roadmap](ROADMAP.md): a piano roll and undo/redo,
-> on top of a channel rack with a step sequencer, patterns, a sampler with ADSR, a sample browser
-> and four built-in drums, and a sample-accurate transport. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
+> **Status:** early development. Step 5 of the [roadmap](ROADMAP.md): Gloom Synth, a
+> subtractive polysynth with presets, on top of a piano roll with undo/redo, a channel rack with
+> a step sequencer, patterns, a sampler with ADSR, a sample browser, four built-in drums and a
+> sample-accurate transport. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 
 ## Goals
 
@@ -46,16 +47,26 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
 
 ### Using it
 
-- **Space** plays and pauses. The demo pattern (kick, snare, hat, clap) starts looping.
+- **Space** plays and pauses. The demo pattern (kick, snare, hat, clap and a Gloom Synth bass)
+  starts looping.
 - Click a step to toggle it; scroll over a lit step to change its velocity.
 - **M** and **S** mute and solo a channel; the two small knobs are volume and pan (drag up/down,
   Shift for fine, double-click to reset).
-- Hold a channel's name to hear it; right-click it to delete the channel. **+ Channel** adds one.
+- Hold a channel's name to hear it; right-click it to delete the channel. **+ Sampler** and
+  **+ Gloom Synth** add one. A small mark in a step means a note starts inside it (drawn in the
+  piano roll, off the step grid).
 - The pattern bar creates, clones, renames and selects patterns, and switches 16 or 32 steps and
   swing.
 - The browser on the left plays a sound when you click it and loads it into the selected channel
   when you double-click it (wav, flac, mp3, ogg). The panel at the bottom edits the selected
   channel's sample: pitch, start/end, one-shot or loop, and the ADSR envelope.
+- Select a Gloom Synth channel and the bottom panel shows the synth: two oscillators, sub, noise
+  and unison, the filter with its response curve, amp and mod envelopes, two LFOs, glide, an
+  8-slot modulation matrix (source, destination, amount) and an oscilloscope of that channel.
+  Knobs drag up/down (Shift for fine, double-click to reset). The **Preset** menu lists the
+  factory sounds and your own; **Save preset** writes the sound under the name beside it to
+  `%APPDATA%\GloomTunes Studio\Presets\Gloom Synth` on Windows or
+  `~/.local/share/gloomtunes-studio/presets/gloom-synth` on Linux, as a `.gloomsynth` JSON file.
 - **Audio** (top right) opens the device settings.
 - **Piano roll** (tab, **F7**, or right-click a channel name) edits the selected channel's notes
   in the current pattern; **F6** goes back to the channel rack.
@@ -78,6 +89,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 # Piano roll frame time with 10,000 notes (prints the median):
 cargo test --release -p gt-ui -- --ignored --nocapture
+# Gloom Synth benchmarks (1 s of audio per iteration):
+cargo bench -p gt-dsp
+# After an intended change to the synth's sound, review the rendered snapshot
+# (cargo install cargo-insta) or accept it directly:
+cargo insta review          # or: INSTA_UPDATE=always cargo test -p gt-dsp --test synth_snapshot
 ```
 
 ### Environment variables

@@ -2,7 +2,7 @@
 //! and the ADSR envelope.
 
 use egui::{pos2, vec2, RichText, Sense, Stroke, Ui};
-use gt_core::{Channel, LoopMode};
+use gt_core::{LoopMode, SamplerSettings};
 
 use crate::widgets::labeled_knob;
 use crate::GloomTheme;
@@ -27,7 +27,8 @@ pub struct SamplerPanelView<'a> {
 pub fn sampler_panel(
     ui: &mut Ui,
     theme: &GloomTheme,
-    ch: &mut Channel,
+    name: &mut String,
+    s: &mut SamplerSettings,
     view: SamplerPanelView<'_>,
 ) -> bool {
     let mut changed = false;
@@ -35,9 +36,9 @@ pub fn sampler_panel(
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.set_width(170.0);
-            ui.add(egui::TextEdit::singleline(&mut ch.name).desired_width(160.0))
+            ui.add(egui::TextEdit::singleline(name).desired_width(160.0))
                 .on_hover_text("Channel name");
-            let sample = ch.sampler.sample.as_ref().map_or_else(
+            let sample = s.sample.as_ref().map_or_else(
                 || "No sample: pick one in the browser".to_owned(),
                 |s| s.display_name(),
             );
@@ -61,23 +62,22 @@ pub fn sampler_panel(
                         "Repeat start..end while the note is held",
                     ),
                 ] {
-                    let on = ch.sampler.loop_mode == mode;
+                    let on = s.loop_mode == mode;
                     if ui
                         .add(egui::Button::selectable(on, label))
                         .on_hover_text(tip)
                         .clicked()
                         && !on
                     {
-                        ch.sampler.loop_mode = mode;
+                        s.loop_mode = mode;
                         changed = true;
                     }
                 }
             });
         });
 
-        waveform(ui, theme, ch, view.waveform);
+        waveform(ui, theme, s, view.waveform);
 
-        let s = &mut ch.sampler;
         changed |= labeled_knob(ui, theme, "Pitch", &mut s.pitch, -24.0..=24.0, 0.0, |v| {
             format!("{v:+.2} semitones")
         })
@@ -142,7 +142,7 @@ fn time_knob(
     }
 }
 
-fn waveform(ui: &mut Ui, theme: &GloomTheme, ch: &Channel, cols: Option<&[(f32, f32)]>) {
+fn waveform(ui: &mut Ui, theme: &GloomTheme, s: &SamplerSettings, cols: Option<&[(f32, f32)]>) {
     let (rect, _) = ui.allocate_exact_size(vec2(260.0, 64.0), Sense::hover());
     let p = ui.painter_at(rect);
     let radius = f32::from(theme.radius);
@@ -150,7 +150,6 @@ fn waveform(ui: &mut Ui, theme: &GloomTheme, ch: &Channel, cols: Option<&[(f32, 
     let Some(cols) = cols.filter(|c| !c.is_empty()) else {
         return;
     };
-    let s = &ch.sampler;
     let x_of = |f: f32| rect.left() + f.clamp(0.0, 1.0) * rect.width();
     let mid = rect.center().y;
     let half = rect.height() * 0.5 - 2.0;

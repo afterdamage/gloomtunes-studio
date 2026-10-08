@@ -11,3 +11,11 @@ repository.workspace = true
 [lints]
 workspace = true
 
+
+[dev-dependencies]
+criterion.workspace = true
+insta.workspace = true
+
+[[bench]]
+name = "synth"
+harness = false
