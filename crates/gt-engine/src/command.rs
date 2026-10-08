@@ -65,6 +65,9 @@ pub enum EngineCommand {
         /// New settings (the box comes back as garbage).
         params: Box<ChannelParams>,
     },
+    /// Choose the channel whose output feeds the oscilloscope buffer in [`crate::Telemetry`]
+    /// (none: the buffer is left alone).
+    SetScopeChannel(Option<u16>),
     /// Replace a channel's sample. Its playing voices stop.
     SetChannelSample {
         /// Channel slot.

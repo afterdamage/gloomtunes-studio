@@ -145,6 +145,11 @@ pub struct Delay;  pub struct Reverb;  pub struct Chorus;  pub struct Waveshaper
 pub struct Limiter;  pub struct StereoWidth;
 ```
 
+> **As built (Step 5, D32-D34):** the oscillator is a function, `blep_sample(wave, phase, dt, pw)`,
+> over a `Phase` accumulator rather than a struct, so unison copies share one code path; `Lfo`,
+> `Noise` (xorshift32), `Ladder` (+ `ladder_response` for the UI) and `GloomSynth` exist as
+> sketched. Dev-dependencies added: criterion, insta (and their permissive transitive crates).
+
 Instruments in gt-dsp take a slice of `(offset, NoteEvent)` for the current block and render up to
 each offset in turn, so they are sample-accurate without knowing about the engine.
 
@@ -739,6 +744,13 @@ exponential decay/release reaching 1 % at the set time) and, for one-shots, a 2 
 end point. Velocity maps to gain as `v²`; pan is equal-power (-3 dB at centre). The engine
 quantum is planar stereo (D19).
 
+Step 5 status: each channel slot also preallocates a boxed `GloomSynth` (16 voices × up to 7
+unison copies) and dispatches notes to it when the channel's instrument is a synth. The synth
+follows the allocation order above, release-first included; instead of a 2 ms fade, a stolen
+voice keeps its oscillator and filter state and restarts its envelopes from their current level
+(D35). Modulation and filter coefficients run at a 16-frame control rate with per-sample linear
+ramps of filter `g` and output gains (D33).
+
 ### 7.4 Parameters, smoothing and automation
 
 - The engine holds a flat array of `ParamState { target, smoother }` indexed by `ParamSlot`.
@@ -854,6 +866,12 @@ polled), and float determinism across compilers.
 | D29 | A pattern's length is its step count, extended to whole 4/4 bars so every note fits | Notes drawn past the grid in the piano roll play instead of being cut, as in other pattern-based DAWs | Prompt 7 (playlist) may add an explicit pattern length |
 | D30 | Piano roll keeps each channel's notes sorted by (start, key); drawing visits only notes found by binary search from `view start - longest note` to the view end, for notes and ghosts alike. Selection is a `Vec<bool>` parallel to the notes, re-sorted with them | O(log n + visible) per frame without a separate cache that could go stale; measured ~4 ms for 10,000 visible notes | Cache tessellated meshes keyed by a document generation if the playlist (Prompt 7) needs it |
 | D31 | Piano roll shortcuts (pointer over the roll): Delete/Backspace, Ctrl+A, Ctrl+C/X/V, Ctrl+D duplicate after the selection, arrows move by snap / a semitone, Shift+Up/Down an octave, Q quantize, P draw, E select; app-wide Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y, F6 rack, F7 piano roll. Copy puts a text marker on the system clipboard, because the desktop only sends a paste event when it holds text | Familiar from FL-style DAWs; keys only act where the pointer is, so they never fight text fields | Prompt 10 may add a keymap file |
+| D32 | A synth patch is a flat `[f32; N]` of plain values indexed by `SynthParam`, with a `ParamInfo` table (key, range, curve, unit, display) in gt-core, plus 8 `ModSlot`s. gt-dsp has its own typed `SynthSettings`; `gt_engine::synth_settings` maps one to the other. gt-ui now depends on gt-dsp only to draw the filter response with the same formula the filter uses | Keeps gt-core and gt-dsp independent (§2); one table drives knobs, formatting, presets and later automation (Step 8) | Move `ParamInfo` to a shared parameter registry in Step 8 |
+| D33 | Gloom Synth computes modulation, pitch and filter coefficients every 16 frames and ramps filter `g` and the per-voice gains linearly across the block | 16 voices × 7 unison × matrix per sample is too costly; 16 frames (0.33 ms) is below audible stepping for LFOs and envelopes | Lower to 8 frames if fast envelope snaps sound stepped |
+| D34 | Filter: 4-pole zero-delay-feedback ladder (Zavalishin) solved per sample, `tanh` (Padé) on the input after feedback, input gain `1 + k/2` to keep the passband level, `k ≤ 4`, cutoff clamped to 10 Hz..0.45 fs. No oversampling | ZDF stays stable and in tune up to Nyquist without oversampling, at about 2 ms per second of audio per voice; the UI curve uses the same analytic response | Add 2× oversampling of the nonlinearity behind a quality switch if aliasing at high drive is audible |
+| D35 | Voice stealing: free voice, else oldest releasing, else oldest; a stolen voice keeps its state and its envelopes restart from the current level (`Adsr::retrigger`) | Avoids the click of a hard cut without a second voice for a 2 ms fade | Revisit with a fade if retriggered tails sound wrong on pads |
+| D36 | Presets are JSON files (`.gloomsynth`, format `gloomtunes-synth-preset` v1) keyed by stable parameter keys, loaded tolerantly (unknown keys ignored, missing keys default, values clamped). Folder: `%APPDATA%\GloomTunes Studio\Presets\Gloom Synth`, or `$XDG_DATA_HOME`/`~/.local/share/gloomtunes-studio/presets/gloom-synth`. Factory presets live in code | Human-readable, survives added or renamed parameters, shareable as single files | Project files (Step 9) embed the same key/value map |
+| D37 | The oscilloscope is a 4096-sample ring of `AtomicF32` in `Telemetry`, fed with the mono mix of one channel chosen by `SetScopeChannel` | No queue or lock; tearing between quanta only affects a picture | Move to the mixer's metering taps in Step 6 |
 
 ---
 
@@ -872,12 +890,12 @@ GPL-3.0-or-later. **Flagged** entries are copyleft or have special terms.
 | symphonia 0.6 (`mp3` feature on) | decoding wav/flac/mp3/ogg | **MPL-2.0 (flag: file-level copyleft; compatible with GPL-3.0)**; added in Step 3 | 3 |
 | rubato 5 (+ audioadapter crates) | resampling | MIT OR Apache-2.0; added in Step 3 | 3 |
 | hound | WAV writing (Step 3: test-only dev-dependency) | Apache-2.0 | 3/9 |
-| serde, serde_json | serialization | MIT OR Apache-2.0 | 3/9 |
+| serde, serde_json | serialization; added in Step 5 for presets | MIT OR Apache-2.0 | 5/9 |
 | zip | project container | MIT | 9 |
 | midir | MIDI I/O | MIT | 10 |
 | midly | SMF import/export | Unlicense | 10 |
-| criterion | benchmarks (dev) | MIT OR Apache-2.0 | 5 |
-| insta | snapshot tests (dev) | Apache-2.0 | 5 |
+| criterion 0.8 (`cargo_bench_support` only, no plotters) | benchmarks (dev); added in Step 5 | MIT OR Apache-2.0 | 5 |
+| insta | snapshot tests (dev); added in Step 5 | Apache-2.0 | 5 |
 | puffin | profiling | MIT OR Apache-2.0 | 4/12 |
 | audio_thread_priority | RT priority on Linux | **MPL-2.0 (flag)** | 12 |
 | clack-host | CLAP hosting | MIT OR Apache-2.0 (verify at Prompt 11) | 11 |

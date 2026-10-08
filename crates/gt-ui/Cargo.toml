@@ -13,4 +13,5 @@ workspace = true
 
 [dependencies]
 gt-core.workspace = true
+gt-dsp.workspace = true
 egui.workspace = true

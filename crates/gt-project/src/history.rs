@@ -259,6 +259,7 @@ mod tests {
     fn structural_edits_are_whole_and_selection_is_not_undone() {
         let mut p = Project::demo();
         let mut h = History::new(&p);
+        let channels = p.channels.len();
         let first = p.current_pattern;
         let second = p.new_pattern();
         p.select_pattern(second);
@@ -269,7 +270,7 @@ mod tests {
         p.select_pattern(first);
         assert!(!h.commit(&p, "Select"));
         h.undo(&mut p);
-        assert_eq!(p.channels.len(), 4);
+        assert_eq!(p.channels.len(), channels);
         assert_eq!(p.current_pattern, first, "selection kept");
         h.redo(&mut p);
         p.select_pattern(second);

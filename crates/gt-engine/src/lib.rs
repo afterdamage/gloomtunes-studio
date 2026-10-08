@@ -27,7 +27,7 @@ pub use channel::VOICES_PER_CHANNEL;
 pub use command::{EngineCommand, EngineEvent, Garbage, LoopRegion, TransportState};
 pub use gt_core::MAX_CHANNELS;
 pub use processor::{AudioProcessor, PREVIEW_GAIN, TEST_TONE_DBFS, TEST_TONE_HZ};
-pub use song::{ChannelParams, NoteKind, SongEvent, SongSnapshot};
+pub use song::{synth_settings, ChannelParams, InstrumentKind, NoteKind, SongEvent, SongSnapshot};
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -78,7 +78,15 @@ pub struct Telemetry {
     pub events_dropped: AtomicU32,
     /// Peak output level per channel slot since the UI last reset it (activity lights).
     pub channel_peaks: [AtomicF32; MAX_CHANNELS],
+    /// Oscilloscope ring: the last [`SCOPE_LEN`] samples of the scope channel (mono, before
+    /// channel volume). Written in place; `scope_write` is the next index to be written.
+    pub scope: [AtomicF32; SCOPE_LEN],
+    /// Total samples written to `scope` (index = value % `SCOPE_LEN`).
+    pub scope_write: AtomicU64,
 }
+
+/// Length of the oscilloscope ring buffer in samples.
+pub const SCOPE_LEN: usize = 4096;
 
 impl Default for Telemetry {
     fn default() -> Self {
@@ -93,11 +101,25 @@ impl Default for Telemetry {
             frames_rendered: AtomicU64::default(),
             events_dropped: AtomicU32::default(),
             channel_peaks: std::array::from_fn(|_| AtomicF32::default()),
+            scope: std::array::from_fn(|_| AtomicF32::default()),
+            scope_write: AtomicU64::default(),
         }
     }
 }
 
 impl Telemetry {
+    /// Copies the newest `out.len()` scope samples (oldest first). Samples may tear between
+    /// quanta, which only matters for a picture.
+    pub fn read_scope(&self, out: &mut [f32]) {
+        let n = out.len().min(SCOPE_LEN);
+        let end = self.scope_write.load(Ordering::Relaxed);
+        let start = end.saturating_sub(n as u64);
+        for (i, o) in out.iter_mut().enumerate().take(n) {
+            *o = self.scope[((start + i as u64) % SCOPE_LEN as u64) as usize]
+                .load(Ordering::Relaxed);
+        }
+    }
+
     /// The transport state.
     pub fn transport_state(&self) -> TransportState {
         TransportState::from_u8(self.transport_state.load(Ordering::Relaxed))
