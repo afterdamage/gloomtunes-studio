@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+authors = ["Vasil Vasilev"]
+repository = "https://github.com/afterdamage/gloomtunes-studio"
+
+[workspace.dependencies]
+gt-core = { path = "crates/gt-core" }
+gt-dsp = { path = "crates/gt-dsp" }
+gt-engine = { path = "crates/gt-engine" }
+gt-project = { path = "crates/gt-project" }
+gt-ui = { path = "crates/gt-ui" }
+
+cpal = "0.18"
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "glow", "wayland", "x11"] }
+egui = "0.36"
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+assert_no_alloc = "1.1"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.dev.package."*"]
+# Dependencies optimized even in debug builds, so audio and UI stay smooth while developing.
+opt-level = 2
+
+[profile.release]
+debug = 1

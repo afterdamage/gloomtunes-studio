@@ -11,9 +11,9 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 | Step | Name | Status |
 |---|---|---|
-| 0 | Architecture and plan | **In review** |
-| 1 | Workspace + hello audio | Next |
-| 2 | Engine core and transport | Planned |
+| 0 | Architecture and plan | Done (2026-10-08) |
+| 1 | Workspace + hello audio | **In review** |
+| 2 | Engine core and transport | Next |
 | 3 | Sampler + channel rack | Planned |
 | 4 | Piano roll | Planned |
 | 5 | Gloom Synth | Planned |
