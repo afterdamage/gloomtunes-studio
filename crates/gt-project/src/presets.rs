@@ -94,6 +94,14 @@ pub fn from_json(text: &str) -> Result<SynthPatch, PresetError> {
             file.format
         )));
     }
+    // Only v1 exists. A later version may rename or reshape fields, which the tolerant reading
+    // below would silently default; older versions get a migration here when there are any.
+    if file.version != VERSION {
+        return Err(PresetError::Format(format!(
+            "version {} (this build reads version {VERSION})",
+            file.version
+        )));
+    }
     let mut patch = SynthPatch {
         name: file.name,
         ..SynthPatch::default()
@@ -185,6 +193,8 @@ mod tests {
         assert_eq!(p.mods[0].amount, 1.0);
         assert!(from_json("{}").is_err());
         assert!(from_json(r#"{"format":"other","version":1,"name":"","params":{}}"#).is_err());
+        let future = r#"{"format":"gloomtunes-synth-preset","version":2,"name":"","params":{}}"#;
+        assert!(from_json(future).is_err());
     }
 
     #[test]

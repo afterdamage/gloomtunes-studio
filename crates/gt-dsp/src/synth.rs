@@ -106,7 +106,7 @@ pub enum ModSource {
     AmpEnv,
     /// Note velocity, 0 to 1.
     Velocity,
-    /// Key position, -1 to 1 around middle C (60), ±5 octaves.
+    /// Key position around middle C (60), -1 to 1 over ±5 octaves (clamped above key 120).
     Note,
     /// A random value per note, -1 to 1.
     Random,
@@ -429,7 +429,7 @@ impl Voice {
                 ModSource::ModEnv => self.menv.level(),
                 ModSource::AmpEnv => self.amp.level(),
                 ModSource::Velocity => self.velocity,
-                ModSource::Note => (f32::from(self.key) - 60.0) / 60.0,
+                ModSource::Note => ((f32::from(self.key) - 60.0) / 60.0).clamp(-1.0, 1.0),
                 ModSource::Random => self.random,
             };
             m[slot.dest as usize] += slot.amount * s;
