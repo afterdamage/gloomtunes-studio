@@ -4,7 +4,9 @@ An original, open-source, pattern-based digital audio workstation written in Rus
 Windows 10/11 and Ubuntu 22.04+ from a single codebase. Channel rack, piano roll, mixer and
 playlist, with built-in instruments and effects, wrapped in a dark, moody "Gloom" interface.
 
-> **Status:** early development. Step 8 of the [roadmap](ROADMAP.md): every knob and fader can
+> **Status:** v0.1 alpha, Step 9 of the [roadmap](ROADMAP.md): projects save to `.gloom` files
+> (optionally with their samples inside), autosave guards against crashes, and songs, loop
+> regions or per-track stems export to WAV. Every knob and fader can
 > be automated with curved automation clips or modulated by LFOs and envelope followers, in a
 > playlist that arranges pattern, audio and automation clips on unlimited tracks, with tempo and
 > time-signature changes, markers and a loop region, on top of a mixer with 64 inserts, 4 send buses and eight built-in
@@ -127,6 +129,23 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
     phase; followers track any mixer strip's level with attack, release and gain. The depth is
     in percent of the control's travel; negative inverts (a follower at -50 % ducks).
   - The demo pans the hat with a one-bar LFO and ducks the reverb bus under the kick.
+- **File** (top left):
+  - **New** (Ctrl+N), **Open** (Ctrl+O), **Save** (Ctrl+S) and **Save as** (Ctrl+Shift+S).
+    Projects are `.gloom` files; tick **Embed samples** in Save as to put copies of every
+    audio file inside, so the project opens on another computer. Without embedding, sample
+    paths are stored relative to the project file, so moving the project folder keeps working.
+    `gloomtunes path/to/song.gloom` opens a project at start.
+  - If a sample cannot be found on opening, **Missing samples** lets you pick a folder to
+    search (with its subfolders) or locate each file. The title bar shows `*` while there are
+    unsaved edits; New, Open and closing the window ask to save them first.
+  - Every 60 s with unsaved edits, the app autosaves to `recovery/` in its data folder
+    (`%APPDATA%\GloomTunes Studio` or `~/.local/share/gloomtunes-studio`). If the app crashed,
+    the next start offers **Recover**.
+  - **Export audio** (Ctrl+Shift+E) writes WAV: 16-bit, 24-bit or 32-bit float, 44.1 to
+    96 kHz, optional dither (16/24-bit), optional normalization to a peak level, the whole song
+    or the loop region, the reverb and delay tail until it fades (up to 10 s), and
+    optionally one file per track ("stems", named `<file> - 01 <track>.wav`). It runs in the
+    background with a progress bar and Cancel.
 - **Undo** and **Redo** (top right, Ctrl+Z and Ctrl+Shift+Z or Ctrl+Y) cover notes, steps,
   channels, patterns, the mixer, the playlist, modulators, tempo and time signatures and settings.
 
@@ -136,6 +155,8 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+# Golden export test on its own (exports a stored reference project and checks its hash):
+cargo test -p gt-export --test golden
 # Piano roll frame time with 10,000 notes (prints the median):
 cargo test --release -p gt-ui -- --ignored --nocapture
 # Engine cost of the demo song, as a share of real time:

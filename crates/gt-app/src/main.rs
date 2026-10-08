@@ -6,6 +6,7 @@
 
 mod app;
 mod audio_io;
+mod files;
 mod library;
 
 fn main() -> eframe::Result {
@@ -37,6 +38,10 @@ fn run(renderer: eframe::Renderer) -> eframe::Result {
     eframe::run_native(
         "GloomTunes Studio",
         options,
-        Box::new(|cc| Ok(Box::new(app::GloomApp::new(&cc.egui_ctx)))),
+        Box::new(|cc| {
+            // A project file given on the command line opens at start.
+            let open = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+            Ok(Box::new(app::GloomApp::new(&cc.egui_ctx, open)))
+        }),
     )
 }

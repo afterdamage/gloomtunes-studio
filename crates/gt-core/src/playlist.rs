@@ -307,6 +307,23 @@ impl Playlist {
         id
     }
 
+    /// The next track or clip identity (saved so ids are never reused).
+    pub fn id_counter(&self) -> u32 {
+        self.next_id
+    }
+
+    /// Restores the identity counter after loading; never at or below an id in use.
+    pub fn set_id_counter(&mut self, next: u32) {
+        let used = self
+            .tracks
+            .iter()
+            .map(|t| t.id.0)
+            .chain(self.clips.iter().map(|c| c.id.0))
+            .max()
+            .unwrap_or(0);
+        self.next_id = next.max(used + 1);
+    }
+
     /// Adds a track "Track N" at the bottom, with the next palette colour.
     pub fn add_track(&mut self) -> TrackId {
         let id = TrackId(self.next_id());

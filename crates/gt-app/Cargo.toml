@@ -19,12 +19,14 @@ path = "src/main.rs"
 gt-core.workspace = true
 gt-dsp.workspace = true
 gt-engine.workspace = true
+gt-export.workspace = true
 gt-project.workspace = true
 gt-ui.workspace = true
 cpal.workspace = true
 eframe.workspace = true
 egui.workspace = true
 log.workspace = true
+rfd.workspace = true
 env_logger.workspace = true
 
 [features]

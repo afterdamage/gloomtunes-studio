@@ -1,8 +1,10 @@
 //! The eframe application: owns the device layer, the project document and the transport
 //! settings, and draws the UI.
 
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gt_core::{
     ClipKind, EffectKind, Instrument, ModSourceKind, Modulator, ParamId, Project, SampleSource,
@@ -26,7 +28,8 @@ use gt_ui::widgets::MeterBallistics;
 use gt_ui::GloomTheme;
 
 use crate::audio_io::AudioIo;
-use crate::library::{default_folder, list_folder, synth_preset_folder, Library};
+use crate::files::{self, Dialog, DialogAction, ExportForm, Then};
+use crate::library::{data_folder, default_folder, list_folder, synth_preset_folder, Library};
 
 /// Sample rate used for loading while no device is open.
 const FALLBACK_RATE: u32 = 48_000;
@@ -100,7 +103,30 @@ pub struct GloomApp {
     sent_mods: Option<Vec<(Modulator, Option<ParamDest>, f32)>>,
     show_modulators: bool,
     modulators: ModulatorsState,
+
+    /// Where the project was opened from or last saved to.
+    doc_path: Option<PathBuf>,
+    /// Embed samples on plain Save (the last choice made in Save as).
+    embed_samples: bool,
+    /// Undo steps recorded so far, and the count at the last save and autosave: the project
+    /// has unsaved changes while they differ.
+    edits: u64,
+    saved_edits: u64,
+    autosaved_edits: u64,
+    last_autosave: Instant,
+    dialog: Option<Dialog>,
+    /// Remembered export settings.
+    export_form: Option<ExportForm>,
+    export_job: Option<std::thread::JoinHandle<Result<Vec<PathBuf>, gt_export::ExportError>>>,
+    /// A short message shown at the bottom right, and when it appeared.
+    toast: Option<(String, Instant)>,
+    /// The user confirmed quitting (or there was nothing to save).
+    quit_confirmed: bool,
+    window_title: String,
 }
+
+/// How often unsaved work is written to the recovery file.
+const AUTOSAVE_EVERY: Duration = Duration::from_secs(60);
 
 /// The strip a new envelope follower listens to: insert 1 (the demo's kick), or insert 2 when
 /// the target is on insert 1 itself.
@@ -122,7 +148,7 @@ fn effect_of(dest: &ParamDest) -> Option<(usize, usize, usize)> {
 }
 
 impl GloomApp {
-    pub fn new(ctx: &egui::Context) -> Self {
+    pub fn new(ctx: &egui::Context, open: Option<PathBuf>) -> Self {
         let theme = GloomTheme::default();
         theme.apply(ctx);
         let project = Project::demo();
@@ -167,10 +193,26 @@ impl GloomApp {
             sent_mods: None,
             show_modulators: false,
             modulators: ModulatorsState::default(),
+            doc_path: None,
+            embed_samples: false,
+            edits: 0,
+            saved_edits: 0,
+            autosaved_edits: 0,
+            last_autosave: Instant::now(),
+            dialog: None,
+            export_form: None,
+            export_job: None,
+            toast: None,
+            quit_confirmed: false,
+            window_title: String::new(),
         };
         app.refresh_presets();
         app.open_folder(default_folder());
         app.request_channel_samples();
+        app.check_recovery();
+        if let Some(path) = open {
+            app.open_path(&path);
+        }
         app
     }
 
@@ -523,7 +565,9 @@ impl GloomApp {
             || self.roll.is_dragging()
             || self.playlist.is_dragging();
         if !busy {
-            self.history.commit(&self.project, label);
+            if self.history.commit(&self.project, label) {
+                self.edits += 1;
+            }
             self.pending_edit = None;
         }
     }
@@ -541,7 +585,9 @@ impl GloomApp {
         self.playlist.cancel();
         // Finish the current gesture first so it becomes its own step.
         if let Some(label) = self.pending_edit.take() {
-            self.history.commit(&self.project, label);
+            if self.history.commit(&self.project, label) {
+                self.edits += 1;
+            }
         }
         let done = if redo {
             self.history.redo(&mut self.project)
@@ -549,6 +595,7 @@ impl GloomApp {
             self.history.undo(&mut self.project)
         };
         if done.is_some() {
+            self.edits += 1;
             self.roll.selected.clear();
             let n = self.project.channels.len();
             self.rack.selected = self.rack.selected.min(n.saturating_sub(1));
@@ -954,7 +1001,604 @@ impl GloomApp {
     }
 }
 
+/// The project file: new, open, save, export, autosave and recovery.
+impl GloomApp {
+    fn is_dirty(&self) -> bool {
+        self.edits != self.saved_edits || self.pending_edit.is_some()
+    }
+
+    /// The project's name: its file name without extension, or "Untitled".
+    fn doc_name(&self) -> String {
+        self.doc_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map_or_else(
+                || "Untitled".to_owned(),
+                |s| s.to_string_lossy().into_owned(),
+            )
+    }
+
+    fn toast(&mut self, text: impl Into<String>) {
+        self.toast = Some((text.into(), Instant::now()));
+    }
+
+    fn recovery_dir(&self) -> PathBuf {
+        data_folder().join("recovery")
+    }
+
+    /// Replaces the document: stops playback, clears undo history (it lives only within a
+    /// session and a document) and sends everything to the engine.
+    fn replace_project(&mut self, project: gt_core::Project, path: Option<PathBuf>) {
+        self.send(EngineCommand::Stop);
+        self.send(EngineCommand::Locate(Tick(0)));
+        self.cancel_roll_gesture();
+        self.playlist.cancel();
+        self.pending_edit = None;
+        self.project = project;
+        self.history = History::new(&self.project);
+        self.edits = 0;
+        self.saved_edits = 0;
+        self.autosaved_edits = 0;
+        self.doc_path = path;
+        self.rack.selected = 0;
+        self.roll.selected.clear();
+        self.playlist = PlaylistState::default();
+        self.modulators = ModulatorsState::default();
+        self.sent_mods = None;
+        self.transport.position = Tick(0);
+        self.request_channel_samples();
+        self.push_channels();
+        self.push_timing();
+    }
+
+    /// Opens a project file, reporting problems in the Open dialog or the relink dialog.
+    fn open_path(&mut self, path: &std::path::Path) {
+        match gt_project::file::load(path, &data_folder().join("embedded")) {
+            Ok(loaded) => {
+                for w in &loaded.warnings {
+                    log::warn!("{}: {w}", path.display());
+                }
+                let missing = loaded.missing.clone();
+                self.replace_project(loaded.project, Some(path.to_path_buf()));
+                self.embed_samples = loaded.extracted > 0;
+                self.dialog = None;
+                let mut msg = format!("Opened {}", self.doc_name());
+                if !loaded.warnings.is_empty() {
+                    msg.push_str(&format!(
+                        " ({} item{} repaired, see the log)",
+                        loaded.warnings.len(),
+                        if loaded.warnings.len() == 1 { "" } else { "s" }
+                    ));
+                }
+                self.toast(msg);
+                if !missing.is_empty() {
+                    let folder = path
+                        .parent()
+                        .map_or_else(default_folder, std::path::Path::to_path_buf);
+                    self.dialog = Some(Dialog::Relink {
+                        missing,
+                        folder: folder.display().to_string(),
+                        message: None,
+                    });
+                }
+            }
+            Err(e) => {
+                self.dialog = Some(Dialog::Open {
+                    path: path.display().to_string(),
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    /// Saves to `path`. Returns false (with the reason in the Save as dialog) if it failed.
+    fn save_to(&mut self, path: PathBuf, embed: bool, then: Then) -> bool {
+        // An edit still in progress belongs to the saved state.
+        if let Some(label) = self.pending_edit.take() {
+            if self.history.commit(&self.project, label) {
+                self.edits += 1;
+            }
+        }
+        match gt_project::file::save(
+            &self.project,
+            &path,
+            gt_project::file::SaveOptions {
+                embed_samples: embed,
+            },
+        ) {
+            Ok(report) => {
+                self.doc_path = Some(path);
+                self.embed_samples = embed;
+                self.saved_edits = self.edits;
+                let mut msg = format!("Saved {}", self.doc_name());
+                if report.embedded > 0 {
+                    msg.push_str(&format!(" with {} embedded samples", report.embedded));
+                }
+                if !report.unreadable.is_empty() {
+                    msg.push_str(&format!(
+                        "; {} sample file(s) could not be read to embed",
+                        report.unreadable.len()
+                    ));
+                }
+                self.toast(msg);
+                self.dialog = None;
+                self.then(then);
+                true
+            }
+            Err(e) => {
+                self.dialog = Some(Dialog::SaveAs {
+                    path: path.display().to_string(),
+                    embed,
+                    error: Some(format!("Could not save: {e}")),
+                    then,
+                });
+                false
+            }
+        }
+    }
+
+    /// Save: to the current file, or ask where.
+    fn save(&mut self, then: Then) {
+        match self.doc_path.clone() {
+            Some(p) => {
+                self.save_to(p, self.embed_samples, then);
+            }
+            None => self.save_as(then),
+        }
+    }
+
+    fn save_as(&mut self, then: Then) {
+        let path = self.doc_path.clone().unwrap_or_else(|| {
+            default_folder().join(format!("Untitled.{}", gt_project::file::EXTENSION))
+        });
+        self.dialog = Some(Dialog::SaveAs {
+            path: path.display().to_string(),
+            embed: self.embed_samples,
+            error: None,
+            then,
+        });
+    }
+
+    /// New, Open or Quit: asks to save unsaved changes first.
+    fn request(&mut self, then: Then) {
+        if self.is_dirty() {
+            self.dialog = Some(Dialog::Unsaved {
+                name: self.doc_name(),
+                then,
+            });
+        } else {
+            self.then(then);
+        }
+    }
+
+    fn then(&mut self, then: Then) {
+        match then {
+            Then::Stay => {}
+            Then::New => self.replace_project(gt_core::Project::empty(), None),
+            Then::Open => {
+                let dir = self
+                    .doc_path
+                    .as_ref()
+                    .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+                    .unwrap_or_else(default_folder);
+                self.dialog = Some(Dialog::Open {
+                    path: format!("{}{}", dir.display(), std::path::MAIN_SEPARATOR),
+                    error: None,
+                });
+            }
+            Then::Quit => self.quit_confirmed = true,
+        }
+    }
+
+    fn show_export(&mut self) {
+        let form = self.export_form.clone().unwrap_or_else(|| {
+            let dir = self
+                .doc_path
+                .as_ref()
+                .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+                .unwrap_or_else(default_folder);
+            ExportForm::new(dir.join(format!("{}.wav", self.doc_name())))
+        });
+        self.dialog = Some(Dialog::Export(form));
+    }
+
+    fn start_export(&mut self, path: PathBuf) {
+        let Some(Dialog::Export(form)) = &mut self.dialog else {
+            return;
+        };
+        let t = &self.transport;
+        let settings = form.settings((t.loop_start.0, t.loop_end.0));
+        if gt_export::range_ticks(&self.project, settings.range).is_none() {
+            form.message = Some(if form.loop_only {
+                "The loop region is empty or has no clips in it.".to_owned()
+            } else {
+                "The playlist is empty: add clips first.".to_owned()
+            });
+            return;
+        }
+        let progress = Arc::new(gt_export::Progress::default());
+        form.running = Some(Arc::clone(&progress));
+        form.message = None;
+        let project = self.project.clone();
+        self.export_job = Some(std::thread::spawn(move || {
+            gt_export::export(&project, &settings, &path, &progress)
+        }));
+    }
+
+    /// Picks up a finished export.
+    fn poll_export(&mut self) {
+        if !self.export_job.as_ref().is_some_and(|j| j.is_finished()) {
+            return;
+        }
+        let Some(job) = self.export_job.take() else {
+            return;
+        };
+        let result = job
+            .join()
+            .unwrap_or_else(|_| Err(gt_export::ExportError::Io(std::io::Error::other("crashed"))));
+        let msg = match result {
+            Ok(files) if files.len() == 1 => format!("Exported {}", files[0].display()),
+            Ok(files) => format!(
+                "Exported {} stems to {}",
+                files.len(),
+                files[0]
+                    .parent()
+                    .map_or_else(String::new, |p| p.display().to_string())
+            ),
+            Err(e) => format!("Export failed: {e}"),
+        };
+        if let Some(Dialog::Export(form)) = &mut self.dialog {
+            form.running = None;
+            form.message = Some(msg.clone());
+            self.export_form = Some(form.clone());
+        }
+        self.toast(msg);
+    }
+
+    fn on_dialog(&mut self, action: DialogAction) {
+        match action {
+            DialogAction::Open(path) => {
+                let path = files::with_project_extension(path);
+                self.open_path(&path);
+            }
+            DialogAction::SaveAs { path, embed, then } => {
+                self.save_to(path, embed, then);
+            }
+            DialogAction::Export { path } => self.start_export(path),
+            DialogAction::CancelExport => {
+                if let Some(Dialog::Export(form)) = &self.dialog {
+                    if let Some(p) = &form.running {
+                        p.cancel.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+            DialogAction::RelinkSearch(dir) => {
+                let Some(Dialog::Relink { missing, .. }) = &self.dialog else {
+                    return;
+                };
+                let found = gt_project::file::find_by_name(&dir, missing, 6);
+                let n = found.len();
+                for (from, to) in &found {
+                    gt_project::file::relink(&mut self.project, from, to);
+                }
+                if n > 0 {
+                    self.pending_edit = Some("Relink samples");
+                    self.request_channel_samples();
+                    self.push_channels();
+                }
+                if let Some(Dialog::Relink {
+                    missing, message, ..
+                }) = &mut self.dialog
+                {
+                    missing.retain(|m| !found.contains_key(m));
+                    *message = Some(format!("Found {n} in {}.", dir.display()));
+                    if missing.is_empty() {
+                        self.dialog = None;
+                        self.toast(format!(
+                            "Relinked {n} sample{}",
+                            if n == 1 { "" } else { "s" }
+                        ));
+                    }
+                }
+            }
+            DialogAction::RelinkFile { from, to } => {
+                gt_project::file::relink(&mut self.project, &from, &to);
+                self.pending_edit = Some("Relink samples");
+                self.request_channel_samples();
+                self.push_channels();
+                if let Some(Dialog::Relink { missing, .. }) = &mut self.dialog {
+                    missing.retain(|m| *m != from);
+                    if missing.is_empty() {
+                        self.dialog = None;
+                    }
+                }
+            }
+            DialogAction::Recover => self.recover(),
+            DialogAction::DiscardRecovery => {
+                self.clear_recovery();
+                self.dialog = None;
+            }
+            DialogAction::Unsaved { save, then } => {
+                self.dialog = None;
+                if save {
+                    self.save(then);
+                } else {
+                    self.then(then);
+                }
+            }
+            DialogAction::Close => {
+                if let Some(Dialog::Export(form)) = self.dialog.take() {
+                    self.export_form = Some(form);
+                }
+            }
+        }
+    }
+
+    /// At start-up: if the last session did not exit cleanly and left an autosave, offer it.
+    /// Then mark this session as running.
+    fn check_recovery(&mut self) {
+        let dir = self.recovery_dir();
+        let lock = dir.join("session.lock");
+        let autosave = dir.join(format!("autosave.{}", gt_project::file::EXTENSION));
+        if lock.is_file() && autosave.is_file() {
+            let when = std::fs::metadata(&autosave)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map_or_else(
+                    || "the last session".to_owned(),
+                    |d| match d.as_secs() {
+                        s if s < 120 => format!("{s} seconds ago"),
+                        s if s < 7200 => format!("{} minutes ago", s / 60),
+                        s => format!("{} hours ago", s / 3600),
+                    },
+                );
+            self.dialog = Some(Dialog::Recover { when });
+        }
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let _ = std::fs::write(&lock, std::process::id().to_string());
+        }
+    }
+
+    fn recover(&mut self) {
+        let dir = self.recovery_dir();
+        let autosave = dir.join(format!("autosave.{}", gt_project::file::EXTENSION));
+        let original = std::fs::read_to_string(dir.join("autosave-path.txt"))
+            .ok()
+            .map(|s| PathBuf::from(s.trim()))
+            .filter(|p| !p.as_os_str().is_empty());
+        match gt_project::file::load(&autosave, &data_folder().join("embedded")) {
+            Ok(loaded) => {
+                let missing = loaded.missing.clone();
+                self.replace_project(loaded.project, original);
+                // Recovered work is not saved anywhere yet.
+                self.edits = 1;
+                self.dialog = None;
+                self.toast("Recovered the autosaved project; save it to keep it");
+                if !missing.is_empty() {
+                    self.dialog = Some(Dialog::Relink {
+                        missing,
+                        folder: default_folder().display().to_string(),
+                        message: None,
+                    });
+                }
+            }
+            Err(e) => {
+                self.dialog = None;
+                self.toast(format!("Could not recover: {e}"));
+            }
+        }
+    }
+
+    fn clear_recovery(&self) {
+        let dir = self.recovery_dir();
+        let _ = std::fs::remove_file(dir.join(format!("autosave.{}", gt_project::file::EXTENSION)));
+        let _ = std::fs::remove_file(dir.join("autosave-path.txt"));
+    }
+
+    /// Writes the recovery file every minute while there are unsaved changes.
+    fn autosave(&mut self) {
+        if self.edits == self.autosaved_edits
+            || self.pending_edit.is_some()
+            || self.last_autosave.elapsed() < AUTOSAVE_EVERY
+        {
+            return;
+        }
+        self.last_autosave = Instant::now();
+        if !self.is_dirty() {
+            // Saved since: nothing to recover.
+            self.autosaved_edits = self.edits;
+            self.clear_recovery();
+            return;
+        }
+        let dir = self.recovery_dir();
+        let path = dir.join(format!("autosave.{}", gt_project::file::EXTENSION));
+        let result = std::fs::create_dir_all(&dir)
+            .map_err(gt_project::file::FileError::from)
+            .and_then(|()| gt_project::file::save(&self.project, &path, Default::default()));
+        match result {
+            Ok(_) => {
+                let original = self
+                    .doc_path
+                    .as_ref()
+                    .map_or_else(String::new, |p| p.display().to_string());
+                let _ = std::fs::write(dir.join("autosave-path.txt"), original);
+                self.autosaved_edits = self.edits;
+                log::info!("autosaved to {}", path.display());
+            }
+            Err(e) => log::warn!("autosave failed: {e}"),
+        }
+    }
+
+    /// Clean exit: no recovery needed next time.
+    fn end_session(&self) {
+        self.clear_recovery();
+        let _ = std::fs::remove_file(self.recovery_dir().join("session.lock"));
+    }
+
+    /// File menu and shortcuts.
+    fn file_menu(&mut self, ui: &mut egui::Ui) {
+        let mut pick = None;
+        ui.menu_button("File", |ui| {
+            for (label, then, keys) in [
+                ("New", Some(Then::New), "Ctrl+N"),
+                ("Open…", Some(Then::Open), "Ctrl+O"),
+            ] {
+                if ui
+                    .add(egui::Button::new(label).shortcut_text(keys))
+                    .clicked()
+                {
+                    pick = then.map(FileCmd::Request);
+                }
+            }
+            ui.separator();
+            if ui
+                .add(egui::Button::new("Save").shortcut_text("Ctrl+S"))
+                .clicked()
+            {
+                pick = Some(FileCmd::Save);
+            }
+            if ui
+                .add(egui::Button::new("Save as…").shortcut_text("Ctrl+Shift+S"))
+                .clicked()
+            {
+                pick = Some(FileCmd::SaveAs);
+            }
+            ui.separator();
+            if ui
+                .add(egui::Button::new("Export audio…").shortcut_text("Ctrl+Shift+E"))
+                .clicked()
+            {
+                pick = Some(FileCmd::Export);
+            }
+        });
+        if let Some(cmd) = pick {
+            self.file_cmd(cmd);
+        }
+    }
+
+    fn file_cmd(&mut self, cmd: FileCmd) {
+        if self.export_job.is_some() {
+            self.toast("Wait for the export to finish");
+            return;
+        }
+        match cmd {
+            FileCmd::Request(then) => self.request(then),
+            FileCmd::Save => self.save(Then::Stay),
+            FileCmd::SaveAs => self.save_as(Then::Stay),
+            FileCmd::Export => self.show_export(),
+        }
+    }
+
+    /// Ctrl+N/O/S, Ctrl+Shift+S and Ctrl+Shift+E.
+    fn file_shortcuts(&mut self, ctx: &egui::Context) {
+        use egui::{Key, Modifiers};
+        let cs = Modifiers::COMMAND | Modifiers::SHIFT;
+        let key = |m, k| ctx.input_mut(|i| i.consume_key(m, k));
+        let cmd = if key(cs, Key::S) {
+            Some(FileCmd::SaveAs)
+        } else if key(cs, Key::E) {
+            Some(FileCmd::Export)
+        } else if key(Modifiers::COMMAND, Key::S) {
+            Some(FileCmd::Save)
+        } else if key(Modifiers::COMMAND, Key::O) {
+            Some(FileCmd::Request(Then::Open))
+        } else if key(Modifiers::COMMAND, Key::N) {
+            Some(FileCmd::Request(Then::New))
+        } else {
+            None
+        };
+        if let Some(c) = cmd {
+            self.file_cmd(c);
+        }
+    }
+
+    /// Dialogs, the export job, autosave, the window title, closing and the toast.
+    fn document_frame(&mut self, ctx: &egui::Context, theme: &GloomTheme) {
+        self.poll_export();
+        if let Some(mut d) = self.dialog.take() {
+            let action = files::show(ctx, theme, &mut d);
+            self.dialog = Some(d);
+            if let Some(a) = action {
+                self.on_dialog(a);
+            }
+        }
+        if self.export_job.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        self.autosave();
+
+        // Closing the window: ask about unsaved changes first.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quit_confirmed {
+            if self.is_dirty() || self.export_job.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                if self.export_job.is_none() {
+                    self.request(Then::Quit);
+                }
+            } else {
+                self.quit_confirmed = true;
+            }
+        }
+        if self.quit_confirmed && !ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
+        let title = format!(
+            "{}{} - GloomTunes Studio",
+            self.doc_name(),
+            if self.is_dirty() { " *" } else { "" }
+        );
+        if title != self.window_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.window_title = title;
+        }
+
+        if let Some((text, at)) = &self.toast {
+            let age = at.elapsed().as_secs_f32();
+            if age > 5.0 {
+                self.toast = None;
+            } else {
+                egui::Area::new(egui::Id::new("toast"))
+                    .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -16.0))
+                    .interactable(false)
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            // Short messages stay on one line; long ones (errors with paths)
+                            // wrap at a fixed width instead of the area's shrunken one.
+                            let wrap = if text.chars().count() > 90 {
+                                ui.set_width(480.0);
+                                egui::TextWrapMode::Wrap
+                            } else {
+                                egui::TextWrapMode::Extend
+                            };
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(text.as_str()).color(theme.text),
+                                )
+                                .wrap_mode(wrap),
+                            );
+                        });
+                    });
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
+        }
+    }
+}
+
+/// A File menu command.
+#[derive(Debug, Clone, Copy)]
+enum FileCmd {
+    Request(Then),
+    Save,
+    SaveAs,
+    Export,
+}
+
 impl eframe::App for GloomApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.end_session();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.audio.poll();
@@ -1025,6 +1669,9 @@ impl eframe::App for GloomApp {
                 self.main_view = MainView::Mixer;
             }
         }
+        if self.dialog.is_none() {
+            self.file_shortcuts(&ctx);
+        }
 
         let theme = self.theme.clone();
         let mut undo_clicked = None;
@@ -1040,6 +1687,8 @@ impl eframe::App for GloomApp {
             .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(8))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    self.file_menu(ui);
+                    ui.separator();
                     let a =
                         transport_bar(ui, &theme, &mut self.transport, &self.project.signatures);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1321,6 +1970,7 @@ impl eframe::App for GloomApp {
             self.cancel_roll_gesture();
         }
         self.commit_if_idle(&ctx);
+        self.document_frame(&ctx, &theme);
 
         // Repaint at display rate while anything moves; idle otherwise.
         let lights = self.activity.iter().any(|&a| a > 0.0)
