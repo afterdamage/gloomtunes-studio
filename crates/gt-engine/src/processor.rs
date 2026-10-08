@@ -3,18 +3,22 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use gt_core::Tick;
+use gt_core::{Tick, MAX_CHANNELS, ROOT_KEY};
 use gt_dsp::{db_to_gain, Click, LinearRamp, SineOsc};
 use rtrb::{Consumer, Producer};
 
-use crate::command::{EngineCommand, EngineEvent, Garbage};
-use crate::transport::{EventBuf, EventKind, Transport};
+use crate::channel::ChannelSlot;
+use crate::command::{EngineCommand, EngineEvent, Garbage, TransportState};
+use crate::song::{ChannelParams, SongSnapshot};
+use crate::transport::{EventBuf, EventKind, ScheduledEvent, Transport};
 use crate::{EngineConfig, Telemetry, FADE_SECONDS, RENDER_QUANTUM};
 
 /// Frequency of the device test tone (concert A).
 pub const TEST_TONE_HZ: f32 = 440.0;
 /// Level of the device test tone. -12 dBFS leaves headroom and is comfortable on speakers.
 pub const TEST_TONE_DBFS: f32 = -12.0;
+/// Linear gain of the sample-browser preview voice.
+pub const PREVIEW_GAIN: f32 = 0.7;
 
 /// Metronome levels and pitches. The downbeat is higher so bar starts are audible.
 const CLICK_DBFS: f32 = -9.0;
@@ -33,17 +37,30 @@ pub struct AudioProcessor {
     commands: Consumer<EngineCommand>,
     events: Producer<EngineEvent>,
     garbage: Producer<Garbage>,
-    channels: usize,
+    out_channels: usize,
 
     transport: Transport,
     scheduled: EventBuf,
     /// Engine frame at the start of the next quantum.
     frame_clock: u64,
 
-    /// The current quantum (mono for now; ARCHITECTURE.md's stereo buses come with the mixer).
-    quantum: [f32; Q],
-    /// Read position inside `quantum`; `Q` means "render the next one".
+    /// The current quantum, stereo (planar).
+    quantum_l: [f32; Q],
+    quantum_r: [f32; Q],
+    /// Read position inside the quantum; `Q` means "render the next one".
     fifo_pos: usize,
+    /// Mono scratch for the metronome and test tone.
+    mono: [f32; Q],
+    /// Per-channel scratch, reused for each channel in turn.
+    scratch_l: [f32; Q],
+    scratch_r: [f32; Q],
+
+    song: Option<Box<SongSnapshot>>,
+    /// `MAX_CHANNELS` slots, allocated once in `new`.
+    channels: Vec<ChannelSlot>,
+    preview: ChannelSlot,
+    /// Increments with every note-on; orders voices for stealing.
+    voice_age: u64,
 
     click: Click,
     click_gain: f32,
@@ -61,7 +78,7 @@ pub struct AudioProcessor {
 impl std::fmt::Debug for AudioProcessor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AudioProcessor")
-            .field("channels", &self.channels)
+            .field("out_channels", &self.out_channels)
             .field("frame_clock", &self.frame_clock)
             .field("transport", &self.transport)
             .finish_non_exhaustive()
@@ -77,17 +94,30 @@ impl AudioProcessor {
         garbage: Producer<Garbage>,
     ) -> Self {
         let sr = config.sample_rate.max(1) as f32;
+        let mut preview = ChannelSlot::new(sr);
+        preview.set_params_now(ChannelParams {
+            gain: PREVIEW_GAIN,
+            ..ChannelParams::default()
+        });
         Self {
             telemetry,
             commands,
             events,
             garbage,
-            channels: config.out_channels.max(1),
+            out_channels: config.out_channels.max(1),
             transport: Transport::new(config.sample_rate, Box::default()),
             scheduled: EventBuf::default(),
             frame_clock: 0,
-            quantum: [0.0; Q],
+            quantum_l: [0.0; Q],
+            quantum_r: [0.0; Q],
             fifo_pos: Q,
+            mono: [0.0; Q],
+            scratch_l: [0.0; Q],
+            scratch_r: [0.0; Q],
+            song: None,
+            channels: (0..MAX_CHANNELS).map(|_| ChannelSlot::new(sr)).collect(),
+            preview,
+            voice_age: 0,
             click: Click::new(sr),
             click_gain: db_to_gain(CLICK_DBFS),
             metronome: true,
@@ -106,10 +136,11 @@ impl AudioProcessor {
     }
 
     /// Fills `out`, an interleaved buffer of `frames * out_channels` samples, from the stream of
-    /// fixed-size quanta. A trailing partial frame (which a correct device never delivers) is
-    /// zeroed.
+    /// fixed-size quanta. Left and right go to the first two device channels (further channels
+    /// get silence); a mono device gets their average. A trailing partial frame (which a correct
+    /// device never delivers) is zeroed.
     pub fn process(&mut self, out: &mut [f32]) {
-        let ch = self.channels;
+        let ch = self.out_channels;
         let frames = out.len() / ch;
         let mut peak = 0.0_f32;
         let mut written = 0;
@@ -119,11 +150,20 @@ impl AudioProcessor {
                 self.fifo_pos = 0;
             }
             let n = (Q - self.fifo_pos).min(frames - written);
-            let src = &self.quantum[self.fifo_pos..self.fifo_pos + n];
+            let range = self.fifo_pos..self.fifo_pos + n;
+            let src = self.quantum_l[range.clone()]
+                .iter()
+                .zip(&self.quantum_r[range]);
             let dst = &mut out[written * ch..(written + n) * ch];
-            for (frame, &s) in dst.chunks_exact_mut(ch).zip(src) {
-                frame.fill(s);
-                peak = peak.max(s.abs());
+            for (frame, (&l, &r)) in dst.chunks_exact_mut(ch).zip(src) {
+                if let [mono] = frame {
+                    *mono = 0.5 * (l + r);
+                } else {
+                    frame[0] = l;
+                    frame[1] = r;
+                    frame[2..].fill(0.0);
+                }
+                peak = peak.max(l.abs()).max(r.abs());
             }
             self.fifo_pos += n;
             written += n;
@@ -136,52 +176,113 @@ impl AudioProcessor {
         t.peak.fetch_max(peak, Ordering::Relaxed);
     }
 
-    /// Renders the next `RENDER_QUANTUM` frames into `self.quantum`.
+    /// Renders the next `RENDER_QUANTUM` frames into the quantum buffers.
     fn render_quantum(&mut self) {
         self.apply_commands();
 
-        self.quantum.fill(0.0);
-        self.transport
-            .schedule(self.frame_clock, Q as u32, &mut self.scheduled);
+        self.quantum_l.fill(0.0);
+        self.quantum_r.fill(0.0);
+        self.mono.fill(0.0);
+        self.transport.schedule(
+            self.frame_clock,
+            Q as u32,
+            self.song.as_deref(),
+            &mut self.scheduled,
+        );
 
-        // Sample-accurate events: render up to each event's offset, apply it, continue.
+        // Metronome, sample-accurate: render up to each beat, trigger, continue.
         let mut cursor = 0;
-        for i in 0..self.scheduled.as_slice().len() {
-            let e = self.scheduled.as_slice()[i];
+        for e in self.scheduled.as_slice() {
+            let EventKind::Beat { downbeat } = e.kind else {
+                continue;
+            };
             let at = (e.offset as usize).min(Q);
-            self.click.add_to(&mut self.quantum[cursor..at]);
+            self.click.add_to(&mut self.mono[cursor..at]);
             cursor = at;
-            match e.kind {
-                EventKind::Beat { downbeat } if self.metronome => {
-                    let hz = if downbeat {
-                        CLICK_DOWNBEAT_HZ
-                    } else {
-                        CLICK_HZ
-                    };
-                    self.click.trigger(hz, self.click_gain);
-                }
-                EventKind::Beat { .. } => {}
+            if self.metronome {
+                let hz = if downbeat {
+                    CLICK_DOWNBEAT_HZ
+                } else {
+                    CLICK_HZ
+                };
+                self.click.trigger(hz, self.click_gain);
             }
         }
-        self.click.add_to(&mut self.quantum[cursor..]);
+        self.click.add_to(&mut self.mono[cursor..]);
+
+        for slot in 0..self.channels.len() {
+            self.render_channel(slot);
+        }
+        if self.preview.is_active() {
+            self.scratch_l.fill(0.0);
+            self.scratch_r.fill(0.0);
+            self.preview
+                .render_voices(&mut self.scratch_l, &mut self.scratch_r);
+            self.preview.mix_into(
+                (&self.scratch_l, &self.scratch_r),
+                (&mut self.quantum_l, &mut self.quantum_r),
+            );
+        }
 
         let tone_idle = !self.tone_on && self.tone_ramp.is_settled();
-        for s in &mut self.quantum {
+        for i in 0..Q {
+            let mut m = self.mono[i];
             if !tone_idle {
-                *s += self.tone.next_sample() * self.tone_ramp.next_value();
+                m += self.tone.next_sample() * self.tone_ramp.next_value();
             }
-            *s *= self.master.next_value();
+            let g = self.master.next_value();
+            self.quantum_l[i] = (self.quantum_l[i] + m) * g;
+            self.quantum_r[i] = (self.quantum_r[i] + m) * g;
         }
 
         self.frame_clock += Q as u64;
         self.publish();
     }
 
+    /// Renders one channel: its voices split at the channel's note events (sample-accurate),
+    /// then gain and pan, mixed into the quantum. Idle channels cost one scan of the events.
+    fn render_channel(&mut self, slot: usize) {
+        let touches = |e: &&ScheduledEvent| match e.kind {
+            EventKind::Wrap => true,
+            k => k.slot() == Some(slot as u16),
+        };
+        let events = self.scheduled.as_slice();
+        let ch = &mut self.channels[slot];
+        if !ch.is_active() && !events.iter().any(|e| touches(&e)) {
+            return;
+        }
+        let (sl, sr) = (&mut self.scratch_l, &mut self.scratch_r);
+        sl.fill(0.0);
+        sr.fill(0.0);
+        let mut cursor = 0;
+        for e in events.iter().filter(touches) {
+            let at = (e.offset as usize).min(Q);
+            ch.render_voices(&mut sl[cursor..at], &mut sr[cursor..at]);
+            cursor = at;
+            match e.kind {
+                EventKind::NoteOn { key, velocity, .. } => {
+                    self.voice_age += 1;
+                    ch.note_on(key, velocity, self.voice_age);
+                }
+                EventKind::NoteOff { key, .. } => ch.note_off(key),
+                EventKind::Wrap => ch.release_all(),
+                EventKind::Beat { .. } => {}
+            }
+        }
+        ch.render_voices(&mut sl[cursor..], &mut sr[cursor..]);
+        let peak = ch.mix_into((sl, sr), (&mut self.quantum_l, &mut self.quantum_r));
+        self.telemetry.channel_peaks[slot].fetch_max(peak, Ordering::Relaxed);
+    }
+
     fn apply_commands(&mut self) {
         for _ in 0..MAX_COMMANDS_PER_QUANTUM {
-            // A tempo swap hands the old map back; only take it if there is room for that, so
-            // the audio thread never has to free it. Otherwise retry next quantum.
-            let needs_gc = matches!(self.commands.peek(), Ok(EngineCommand::SetTempoMap(_)));
+            // Commands that hand something back are only taken if the garbage queue has room
+            // for it, so the audio thread never has to free anything. Otherwise retry next
+            // quantum.
+            let needs_gc = self
+                .commands
+                .peek()
+                .is_ok_and(EngineCommand::returns_garbage);
             if needs_gc && self.garbage.slots() == 0 {
                 break;
             }
@@ -192,6 +293,12 @@ impl AudioProcessor {
         }
     }
 
+    fn release_all_channels(&mut self) {
+        for ch in &mut self.channels {
+            ch.release_all();
+        }
+    }
+
     fn apply(&mut self, cmd: EngineCommand) {
         let now = self.frame_clock;
         let before = self.transport.state();
@@ -199,7 +306,10 @@ impl AudioProcessor {
             EngineCommand::Play => self.transport.play(now),
             EngineCommand::Pause => self.transport.pause(now),
             EngineCommand::Stop => self.transport.stop(),
-            EngineCommand::Locate(t) => self.transport.locate(t, now),
+            EngineCommand::Locate(t) => {
+                self.transport.locate(t, now);
+                self.release_all_channels();
+            }
             EngineCommand::SetLoop(region) => self.transport.set_loop(region),
             EngineCommand::SetTimeSig(sig) => self.transport.set_time_sig(sig),
             EngineCommand::SetTempoMap(map) => {
@@ -218,10 +328,65 @@ impl AudioProcessor {
             }
             EngineCommand::FadeOut => self.master.set_target(0.0, self.fade_frames),
             EngineCommand::FadeIn => self.master.set_target(1.0, self.fade_frames),
+            EngineCommand::SetSong(song) => {
+                // Note-offs of the old pattern may never come; release what it started.
+                self.release_all_channels();
+                if let Some(old) = self.song.replace(song) {
+                    self.retire(Garbage::Song(old));
+                }
+            }
+            EngineCommand::SetChannelParams { slot, params } => {
+                if let Some(ch) = self.channels.get_mut(usize::from(slot)) {
+                    if ch.is_active() {
+                        ch.set_params(*params);
+                    } else {
+                        ch.set_params_now(*params);
+                    }
+                }
+                self.retire(Garbage::Params(params));
+            }
+            EngineCommand::SetChannelSample { slot, sample } => {
+                let old = match self.channels.get_mut(usize::from(slot)) {
+                    Some(ch) => ch.set_sample(sample),
+                    None => sample,
+                };
+                if let Some(old) = old {
+                    self.retire(Garbage::Sample(old));
+                }
+            }
+            EngineCommand::NoteOn {
+                slot,
+                key,
+                velocity,
+            } => {
+                self.voice_age += 1;
+                if let Some(ch) = self.channels.get_mut(usize::from(slot)) {
+                    ch.note_on(key, velocity, self.voice_age);
+                }
+            }
+            EngineCommand::NoteOff { slot, key } => {
+                if let Some(ch) = self.channels.get_mut(usize::from(slot)) {
+                    ch.note_off(key);
+                }
+            }
+            EngineCommand::PreviewSample(sample) => {
+                let start = sample.is_some();
+                if let Some(old) = self.preview.set_sample(sample) {
+                    self.retire(Garbage::Sample(old));
+                }
+                if start {
+                    self.voice_age += 1;
+                    self.preview.note_on(ROOT_KEY, 1.0, self.voice_age);
+                }
+            }
         }
-        if before != self.transport.state() {
+        let after = self.transport.state();
+        if before == TransportState::Playing && after != TransportState::Playing {
+            self.release_all_channels();
+        }
+        if before != after {
             self.post(EngineEvent::TransportChanged {
-                state: self.transport.state(),
+                state: after,
                 position: Tick(self.transport.position_at(now).floor() as i64),
             });
         }
@@ -294,6 +459,147 @@ mod tests {
         for f in buf.chunks_exact(2) {
             assert_eq!(f[0], f[1]);
         }
+    }
+
+    fn impulse_sample(sr: u32) -> std::sync::Arc<gt_core::SampleData> {
+        let mut v = vec![0.0; 4800];
+        v[0] = 1.0;
+        std::sync::Arc::new(gt_core::SampleData::mono(sr, v))
+    }
+
+    fn full_params() -> Box<crate::ChannelParams> {
+        Box::new(crate::ChannelParams {
+            gain: 1.0,
+            ..crate::ChannelParams::default()
+        })
+    }
+
+    #[test]
+    fn audition_note_plays_the_sample_panned() {
+        let (mut h, mut p) = engine(48_000, 2);
+        h.send(EngineCommand::SetChannelSample {
+            slot: 3,
+            sample: Some(impulse_sample(48_000)),
+        })
+        .unwrap();
+        h.send(EngineCommand::SetChannelParams {
+            slot: 3,
+            params: Box::new(crate::ChannelParams {
+                gain: 1.0,
+                pan: 1.0,
+                ..crate::ChannelParams::default()
+            }),
+        })
+        .unwrap();
+        h.send(EngineCommand::NoteOn {
+            slot: 3,
+            key: 60,
+            velocity: 1.0,
+        })
+        .unwrap();
+        let mut buf = vec![0.0; 2 * 128];
+        p.process(&mut buf);
+        assert!(buf[0].abs() < 1e-6, "hard right: left is silent");
+        assert!((buf[1] - 1.0).abs() < 1e-6, "{}", buf[1]);
+        assert!(buf[2..].iter().all(|&s| s == 0.0));
+        let peak = h.telemetry().channel_peaks[3].load(Ordering::Relaxed);
+        assert!((peak - 1.0).abs() < 1e-6);
+        assert_eq!(h.collect_garbage(), 1, "the params box comes back");
+    }
+
+    #[test]
+    fn velocity_is_squared_and_mute_ramps_to_silence() {
+        let (mut h, mut p) = engine(48_000, 1);
+        let s = std::sync::Arc::new(gt_core::SampleData::mono(48_000, vec![1.0; 48_000]));
+        h.send(EngineCommand::SetChannelSample {
+            slot: 0,
+            sample: Some(s),
+        })
+        .unwrap();
+        h.send(EngineCommand::SetChannelParams {
+            slot: 0,
+            params: full_params(),
+        })
+        .unwrap();
+        h.send(EngineCommand::NoteOn {
+            slot: 0,
+            key: 60,
+            velocity: 0.5,
+        })
+        .unwrap();
+        let mut buf = vec![0.0; 64];
+        p.process(&mut buf);
+        // Centre pan is -3 dB per side; a mono device averages the sides.
+        let want = 0.25 * std::f32::consts::FRAC_1_SQRT_2;
+        assert!((buf[10] - want).abs() < 1e-6, "{}", buf[10]);
+        h.send(EngineCommand::SetChannelParams {
+            slot: 0,
+            params: Box::new(crate::ChannelParams::default()),
+        })
+        .unwrap();
+        let mut buf = vec![0.0; 4800];
+        p.process(&mut buf);
+        let steps = buf
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f32::max);
+        assert!(steps < 1e-3, "gain change is smoothed: {steps}");
+        assert_eq!(buf[4799], 0.0);
+    }
+
+    #[test]
+    fn preview_plays_and_replaced_samples_come_back() {
+        let (mut h, mut p) = engine(48_000, 2);
+        h.send(EngineCommand::PreviewSample(Some(impulse_sample(48_000))))
+            .unwrap();
+        let mut buf = vec![0.0; 2 * 64];
+        p.process(&mut buf);
+        let g = crate::PREVIEW_GAIN * std::f32::consts::FRAC_1_SQRT_2;
+        assert!((buf[0] - g).abs() < 1e-6, "{}", buf[0]);
+        h.send(EngineCommand::PreviewSample(None)).unwrap();
+        p.process(&mut buf);
+        assert_eq!(h.collect_garbage(), 1);
+        // Out-of-range slots are ignored, and their payload still comes back.
+        h.send(EngineCommand::SetChannelSample {
+            slot: 999,
+            sample: Some(impulse_sample(48_000)),
+        })
+        .unwrap();
+        p.process(&mut buf);
+        assert_eq!(h.collect_garbage(), 1);
+    }
+
+    #[test]
+    fn stop_releases_looped_voices() {
+        let (mut h, mut p) = engine(48_000, 1);
+        let s = std::sync::Arc::new(gt_core::SampleData::mono(48_000, vec![1.0; 100]));
+        h.send(EngineCommand::SetChannelSample {
+            slot: 0,
+            sample: Some(s),
+        })
+        .unwrap();
+        h.send(EngineCommand::SetChannelParams {
+            slot: 0,
+            params: Box::new(crate::ChannelParams {
+                gain: 1.0,
+                looped: true,
+                ..crate::ChannelParams::default()
+            }),
+        })
+        .unwrap();
+        h.send(EngineCommand::Play).unwrap();
+        h.send(EngineCommand::NoteOn {
+            slot: 0,
+            key: 60,
+            velocity: 1.0,
+        })
+        .unwrap();
+        let mut buf = vec![0.0; 48_000];
+        p.process(&mut buf);
+        assert!(buf[47_999] > 0.5, "loop keeps sounding while held");
+        h.send(EngineCommand::Stop).unwrap();
+        p.process(&mut buf);
+        assert_eq!(buf[47_999], 0.0, "released by stop");
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 mod app;
 mod audio_io;
+mod library;
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -29,8 +30,8 @@ fn run(renderer: eframe::Renderer) -> eframe::Result {
         renderer,
         viewport: egui::ViewportBuilder::default()
             .with_title("GloomTunes Studio")
-            .with_inner_size([880.0, 340.0])
-            .with_min_inner_size([780.0, 280.0]),
+            .with_inner_size([1240.0, 720.0])
+            .with_min_inner_size([960.0, 520.0]),
         ..Default::default()
     };
     eframe::run_native(
