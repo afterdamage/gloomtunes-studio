@@ -8,8 +8,10 @@ use std::path::PathBuf;
 
 use crate::effects::{EffectKind, EffectSlot};
 use crate::mixer::{Mixer, StripKind, FIRST_SEND, FX_SLOTS, INSERTS, MASTER};
-use crate::playlist::{AutoPoint, AutoTarget, Automation, ClipKind, Playlist};
-use crate::synth::SynthPatch;
+use crate::modulation::{ModSourceKind, Modulator, ModulatorId, MAX_MODULATORS};
+use crate::params::ParamId;
+use crate::playlist::{AutoPoint, Automation, ClipKind, Curve, Playlist};
+use crate::synth::{SynthParam, SynthPatch};
 use crate::time::{TempoMap, TimeSigMap, PPQ};
 
 /// Ticks per step of the channel rack: a 1/16 note.
@@ -339,6 +341,8 @@ pub struct Project {
     pub tempo: TempoMap,
     /// Time signatures over the timeline.
     pub signatures: TimeSigMap,
+    /// LFOs and envelope followers on parameters, at most [`MAX_MODULATORS`].
+    pub modulators: Vec<Modulator>,
     next_id: u32,
 }
 
@@ -360,6 +364,7 @@ impl Project {
             playlist: Playlist::new(),
             tempo: TempoMap::default(),
             signatures: TimeSigMap::default(),
+            modulators: Vec::new(),
             next_id: 1,
         };
         let id = p.new_pattern();
@@ -422,7 +427,63 @@ impl Project {
         );
         p.demo_mix(bass);
         p.demo_arrangement(bass);
+        p.demo_modulation();
         p
+    }
+
+    /// The hat drifts across the stereo field with a one-bar LFO, and the reverb bus ducks
+    /// under the kick through an envelope follower.
+    fn demo_modulation(&mut self) {
+        let insert_of = |p: &Self, name: &str| {
+            p.channels
+                .iter()
+                .find(|c| c.name == name)
+                .map_or(MASTER, |c| c.insert)
+        };
+        let (hat, kick) = (insert_of(self, "Hat"), insert_of(self, "Kick"));
+        if let Some(id) = self.add_modulator(
+            ParamId::strip_pan(hat),
+            ModSourceKind::Lfo {
+                shape: crate::modulation::LfoShape::Sine,
+                rate: crate::modulation::LfoRate::Sync(2),
+                phase: 0.0,
+            },
+        ) {
+            self.modulator_mut(id).expect("just added").amount = 0.3;
+        }
+        if let Some(id) = self.add_modulator(
+            ParamId::strip_volume(FIRST_SEND),
+            ModSourceKind::default_follower(kick),
+        ) {
+            self.modulator_mut(id).expect("just added").amount = -0.35;
+        }
+    }
+
+    /// Attaches a modulator (amount 0.5, enabled) to `target`. `None` when the project already
+    /// has [`MAX_MODULATORS`].
+    pub fn add_modulator(&mut self, target: ParamId, source: ModSourceKind) -> Option<ModulatorId> {
+        if self.modulators.len() >= MAX_MODULATORS {
+            return None;
+        }
+        let id = ModulatorId(self.next_id());
+        self.modulators.push(Modulator {
+            id,
+            target,
+            source,
+            amount: 0.5,
+            enabled: true,
+        });
+        Some(id)
+    }
+
+    /// The modulator with this id.
+    pub fn modulator_mut(&mut self, id: ModulatorId) -> Option<&mut Modulator> {
+        self.modulators.iter_mut().find(|m| m.id == id)
+    }
+
+    /// Removes a modulator.
+    pub fn remove_modulator(&mut self, id: ModulatorId) {
+        self.modulators.retain(|m| m.id != id);
     }
 
     /// "Intro" (kick and hat) and "Break" (bass and hat) patterns, and an arrangement: intro,
@@ -460,24 +521,52 @@ impl Project {
         pl.add_clip(t_main, 2 * BAR, 4 * BAR, ClipKind::Pattern(main));
         pl.add_clip(t_break, 6 * BAR, 2 * BAR, ClipKind::Pattern(brk));
         pl.add_clip(t_main, 8 * BAR, 4 * BAR, ClipKind::Pattern(main));
-        let delay = FIRST_SEND + 1;
-        let rest = crate::playlist::volume_to_norm(self.mixer.strips[delay].volume);
+        let delay = ParamId::strip_volume(FIRST_SEND + 1);
+        let cutoff = ParamId::Synth {
+            channel: bass,
+            param: SynthParam::Cutoff,
+        };
+        let rest = delay.normalized(self);
+        let hz = |f: f32| cutoff.info().to_normalized(f);
+        let pl = &mut self.playlist;
         pl.add_clip(
             t_auto,
             6 * BAR,
             2 * BAR,
             ClipKind::Automation(Automation {
-                target: AutoTarget::StripVolume(delay),
+                target: delay,
                 points: vec![
-                    AutoPoint { at: 0, value: rest },
                     AutoPoint {
-                        at: 2 * BAR - PPQ,
-                        value: 1.0,
-                    },
-                    AutoPoint {
-                        at: 2 * BAR,
+                        at: 0,
                         value: rest,
+                        curve: Curve::Bezier(-0.6),
                     },
+                    AutoPoint::new(2 * BAR - PPQ, 1.0),
+                    AutoPoint::new(2 * BAR, rest),
+                ],
+            }),
+        );
+        // The bass filter opens over the drop, then snaps shut.
+        pl.tracks[4].name = "Bass filter".to_owned();
+        let t_filter = pl.tracks[4].id;
+        pl.add_clip(
+            t_filter,
+            2 * BAR,
+            4 * BAR,
+            ClipKind::Automation(Automation {
+                target: cutoff,
+                points: vec![
+                    AutoPoint {
+                        at: 0,
+                        value: hz(500.0),
+                        curve: Curve::Smooth,
+                    },
+                    AutoPoint {
+                        at: 3 * BAR,
+                        value: hz(4000.0),
+                        curve: Curve::Bezier(0.7),
+                    },
+                    AutoPoint::new(4 * BAR, hz(900.0)),
                 ],
             }),
         );
@@ -602,9 +691,10 @@ impl Project {
         Some(id)
     }
 
-    /// Removes a channel and its notes from every pattern.
+    /// Removes a channel, its notes from every pattern and the modulators on its parameters.
     pub fn remove_channel(&mut self, id: ChannelId) {
         self.channels.retain(|c| c.id != id);
+        self.modulators.retain(|m| m.target.channel() != Some(id));
         for p in &mut self.patterns {
             p.notes.remove(&id);
         }
@@ -806,7 +896,7 @@ mod tests {
             .clips
             .iter()
             .any(|c| matches!(&c.kind, ClipKind::Automation(a)
-            if a.target.is_valid(&p.mixer))));
+            if a.target.is_valid(&p))));
     }
 
     #[test]

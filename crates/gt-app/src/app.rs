@@ -5,20 +5,22 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use gt_core::{
-    ClipKind, EffectKind, Instrument, Project, SampleSource, SigChange, TempoPoint, Tick,
-    TimeSigMap, FX_SLOTS, MAX_CHANNELS, ROOT_KEY, STEP_TICKS, STRIPS,
+    ClipKind, EffectKind, Instrument, ModSourceKind, Modulator, ParamId, Project, SampleSource,
+    SigChange, TempoPoint, Tick, TimeSigMap, FX_SLOTS, MAX_CHANNELS, ROOT_KEY, STEP_TICKS, STRIPS,
 };
 use gt_engine::{
-    create_effect, AutoDest, ChannelParams, EngineCommand, LoopRegion, MixerParams, SongSnapshot,
-    TransportState,
+    create_effect, ChannelParams, EngineCommand, LoopRegion, MixerParams, ModPlan, ParamDest,
+    SongSnapshot, TransportState,
 };
 use gt_project::{ops, presets, History};
+use gt_ui::param_ui::{self, ParamMarks, ParamRequest};
 use gt_ui::views::{
-    audio_panel, browser, channel_rack, mixer_view, piano_roll, playlist, sampler_panel,
-    synth_panel, transport_bar, AudioAction, AudioPanelModel, BrowserAction, BrowserModel,
-    MixerState, MixerView, PianoRollAction, PianoRollState, PianoRollView, PlayState,
-    PlaylistAction, PlaylistState, PlaylistView, RackAction, RackState, RackView, SamplerPanelView,
-    StripMeter, SynthPanelAction, SynthPanelView, TransportAction, TransportModel,
+    add_automation, audio_panel, browser, channel_rack, mixer_view, modulators_panel, piano_roll,
+    playlist, sampler_panel, synth_panel, transport_bar, AudioAction, AudioPanelModel,
+    BrowserAction, BrowserModel, MixerState, MixerView, ModulatorsState, PianoRollAction,
+    PianoRollState, PianoRollView, PlayState, PlaylistAction, PlaylistState, PlaylistView,
+    RackAction, RackState, RackView, SamplerPanelView, StripMeter, SynthPanelAction,
+    SynthPanelView, TransportAction, TransportModel,
 };
 use gt_ui::widgets::MeterBallistics;
 use gt_ui::GloomTheme;
@@ -89,9 +91,34 @@ pub struct GloomApp {
     fx_meters: Vec<[f32; FX_SLOTS]>,
 
     playlist: PlaylistState,
-    /// Effect parameters the last song sent automates; their document values are sent again
-    /// when that song is replaced.
-    automated_fx: Vec<(usize, usize, usize)>,
+    /// Effect parameters the last song automates and the last modulation plan modulates. The
+    /// engine sets them every control period; when neither drives one any more, its document
+    /// value is sent again.
+    lane_fx: Vec<(usize, usize, usize)>,
+    mod_fx: Vec<(usize, usize, usize)>,
+    /// What the last modulation plan was built from (none: send it).
+    sent_mods: Option<Vec<(Modulator, Option<ParamDest>, f32)>>,
+    show_modulators: bool,
+    modulators: ModulatorsState,
+}
+
+/// The strip a new envelope follower listens to: insert 1 (the demo's kick), or insert 2 when
+/// the target is on insert 1 itself.
+fn follower_source(target: &ParamId) -> usize {
+    match *target {
+        ParamId::Strip { strip: 1, .. } | ParamId::Effect { strip: 1, .. } => 2,
+        _ => 1,
+    }
+}
+
+/// Effect parameter (strip, slot, index) behind a destination.
+fn effect_of(dest: &ParamDest) -> Option<(usize, usize, usize)> {
+    match *dest {
+        ParamDest::Effect { strip, slot, index } => {
+            Some((usize::from(strip), usize::from(slot), usize::from(index)))
+        }
+        _ => None,
+    }
 }
 
 impl GloomApp {
@@ -135,7 +162,11 @@ impl GloomApp {
             strip_view: vec![StripMeter::default(); STRIPS],
             fx_meters: vec![[0.0; FX_SLOTS]; STRIPS],
             playlist: PlaylistState::default(),
-            automated_fx: Vec::new(),
+            lane_fx: Vec::new(),
+            mod_fx: Vec::new(),
+            sent_mods: None,
+            show_modulators: false,
+            modulators: ModulatorsState::default(),
         };
         app.refresh_presets();
         app.open_folder(default_folder());
@@ -228,23 +259,11 @@ impl GloomApp {
         let automated: Vec<(usize, usize, usize)> = song
             .automation
             .iter()
-            .filter_map(|l| match l.dest {
-                AutoDest::Effect {
-                    strip, slot, index, ..
-                } => Some((usize::from(strip), usize::from(slot), usize::from(index))),
-                _ => None,
-            })
+            .filter_map(|l| effect_of(&l.dest))
             .collect();
         if self.try_send(EngineCommand::SetSong(Box::new(song))) {
-            // Parameters the old song automated go back to their document values (faders are
-            // reset by the engine itself).
-            for (strip, slot, index) in std::mem::replace(&mut self.automated_fx, automated) {
-                if let Some(Some(e)) = self.sent_fx.get_mut(strip).and_then(|s| s.get_mut(slot)) {
-                    if let Some(v) = e.params.get_mut(index) {
-                        *v = f32::NAN;
-                    }
-                }
-            }
+            let old = std::mem::replace(&mut self.lane_fx, automated);
+            self.release_fx(old);
         }
         // The song's end is the loop in song mode.
         self.send(EngineCommand::SetLoop(self.loop_region()));
@@ -622,6 +641,104 @@ impl GloomApp {
         }
     }
 
+    /// Effect parameters in `old` that neither the song nor a modulator drives any more go
+    /// back to their document values on the next mixer sync. (Channel and strip controls are
+    /// reset by the engine itself.)
+    fn release_fx(&mut self, old: Vec<(usize, usize, usize)>) {
+        for (strip, slot, index) in old {
+            if self.lane_fx.contains(&(strip, slot, index))
+                || self.mod_fx.contains(&(strip, slot, index))
+            {
+                continue;
+            }
+            if let Some(Some(e)) = self.sent_fx.get_mut(strip).and_then(|s| s.get_mut(slot)) {
+                if let Some(v) = e.params.get_mut(index) {
+                    *v = f32::NAN;
+                }
+            }
+        }
+    }
+
+    /// Sends the modulation plan when a modulator, a modulated parameter's value or where it
+    /// lives (channel order, effect slots) changed since the last one.
+    fn sync_modulation(&mut self) {
+        if self.audio.engine().is_none() {
+            return;
+        }
+        let p = &self.project;
+        let key: Vec<(Modulator, Option<ParamDest>, f32)> = p
+            .modulators
+            .iter()
+            .map(|m| (*m, ParamDest::resolve(&m.target, p), m.target.normalized(p)))
+            .collect();
+        if self.sent_mods.as_ref() == Some(&key) {
+            return;
+        }
+        let plan = ModPlan::compile(p);
+        let modulated: Vec<(usize, usize, usize)> = plan
+            .targets
+            .iter()
+            .filter_map(|t| effect_of(&t.dest))
+            .collect();
+        if self.try_send(EngineCommand::SetModulation(Box::new(plan))) {
+            self.sent_mods = Some(key);
+            let old = std::mem::replace(&mut self.mod_fx, modulated);
+            self.release_fx(old);
+        }
+    }
+
+    /// Which parameters automation clips and enabled modulators drive, for the markers.
+    fn param_marks(&self) -> ParamMarks {
+        let mut marks = ParamMarks::default();
+        for c in &self.project.playlist.clips {
+            if let ClipKind::Automation(a) = &c.kind {
+                marks.automated.insert(a.target);
+            }
+        }
+        for m in self.project.modulators.iter().filter(|m| m.enabled) {
+            marks.modulated.insert(m.target);
+        }
+        marks
+    }
+
+    /// Carries out a choice from a control's right-click menu.
+    fn on_param_request(&mut self, req: ParamRequest) {
+        match req {
+            ParamRequest::Automate(target) => {
+                let sigs = &self.project.signatures;
+                let start = sigs.bar_start(sigs.bar_of(self.transport.position.0));
+                add_automation(&mut self.project, &mut self.playlist, target, start);
+                self.main_view = MainView::Playlist;
+                // The clip only plays in song mode.
+                self.transport.song_mode = true;
+                self.push_song();
+                self.pending_edit = Some("Create automation clip");
+            }
+            ParamRequest::AddLfo(target) | ParamRequest::AddFollower(target) => {
+                let source = if matches!(req, ParamRequest::AddLfo(_)) {
+                    ModSourceKind::default_lfo()
+                } else {
+                    ModSourceKind::default_follower(follower_source(&target))
+                };
+                if let Some(id) = self.project.add_modulator(target, source) {
+                    if let (ModSourceKind::Follower { .. }, Some(m)) =
+                        (source, self.project.modulator_mut(id))
+                    {
+                        // Followers mostly duck: louder source, lower target.
+                        m.amount = -0.5;
+                    }
+                    self.pending_edit = Some("Add modulator");
+                }
+                self.show_modulators = true;
+                self.modulators.focus = Some(target);
+            }
+            ParamRequest::ShowModulators(target) => {
+                self.show_modulators = true;
+                self.modulators.focus = Some(target);
+            }
+        }
+    }
+
     /// Reads the strip and effect meters from the engine and applies peak ballistics.
     fn read_meters(&mut self, dt: f32) {
         let Some(engine) = self.audio.engine() else {
@@ -668,7 +785,9 @@ impl GloomApp {
         // A new engine has an empty mixer.
         self.sent_mixer = None;
         self.sent_fx = vec![Default::default(); STRIPS];
-        self.automated_fx.clear();
+        self.lane_fx.clear();
+        self.mod_fx.clear();
+        self.sent_mods = None;
     }
 
     /// Draws the piano roll for the selected channel of the current pattern.
@@ -871,6 +990,7 @@ impl eframe::App for GloomApp {
         // The tempo and signature shown are the ones at the playhead.
         self.transport.bpm = self.project.tempo.bpm_at(self.transport.position);
         self.transport.time_sig = self.project.signatures.sig_at(self.transport.position);
+        param_ui::set_marks(&ctx, std::sync::Arc::new(self.param_marks()));
 
         // Space toggles play. Consumed before any widget runs, so a focused button does not
         // also react to it; left alone while a text field (e.g. typing a BPM) has focus.
@@ -1022,6 +1142,7 @@ impl eframe::App for GloomApp {
                         ui.label(egui::RichText::new("No channel selected").color(theme.text_dim));
                         return (false, Vec::new());
                     };
+                    let channel = Some(ch.id);
                     match &mut ch.instrument {
                         Instrument::Sampler(s) => {
                             let loaded = s.sample.as_ref().and_then(|x| self.library.get(x));
@@ -1030,6 +1151,7 @@ impl eframe::App for GloomApp {
                                 waveform: loaded.map(|l| l.overview.as_slice()),
                                 seconds: loaded.map(|l| l.data.seconds()),
                                 status: status.as_deref(),
+                                channel,
                             };
                             (sampler_panel(ui, &theme, &mut ch.name, s, view), Vec::new())
                         }
@@ -1039,6 +1161,7 @@ impl eframe::App for GloomApp {
                                 user_presets: &self.user_presets,
                                 sample_rate,
                                 status: self.preset_status.as_deref(),
+                                channel,
                             };
                             (false, synth_panel(ui, &theme, &mut ch.name, patch, view))
                         }
@@ -1086,6 +1209,22 @@ impl eframe::App for GloomApp {
                         {
                             self.main_view = v;
                         }
+                    }
+                    ui.separator();
+                    let n = self.project.modulators.len();
+                    let label = if n > 0 {
+                        format!("Modulators ({n})")
+                    } else {
+                        "Modulators".to_owned()
+                    };
+                    if ui
+                        .add(egui::Button::selectable(self.show_modulators, label))
+                        .on_hover_text(
+                            "LFOs and envelope followers. Right-click any knob or fader to add one",
+                        )
+                        .clicked()
+                    {
+                        self.show_modulators = !self.show_modulators;
                     }
                 });
                 ui.separator();
@@ -1156,7 +1295,27 @@ impl eframe::App for GloomApp {
         if mixer_changed {
             self.pending_edit = Some("Mixer");
         }
+        if self.show_modulators {
+            let mut open = true;
+            let mut changed = false;
+            egui::Window::new("Modulators")
+                .open(&mut open)
+                .default_width(560.0)
+                .min_width(560.0)
+                .default_pos(ctx.content_rect().center() - egui::vec2(280.0, 100.0))
+                .show(&ctx, |ui| {
+                    changed = modulators_panel(ui, &theme, &mut self.project, &mut self.modulators);
+                });
+            self.show_modulators = open;
+            if changed {
+                self.pending_edit = Some("Modulators");
+            }
+        }
+        if let Some(req) = param_ui::take_request(&ctx) {
+            self.on_param_request(req);
+        }
         self.sync_mixer();
+        self.sync_modulation();
         if self.main_view != MainView::PianoRoll {
             // Hidden mid-gesture (F6, tab click): the roll never sees the release.
             self.cancel_roll_gesture();

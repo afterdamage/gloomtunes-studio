@@ -5,13 +5,13 @@
 //!
 //! - a pattern clip repeats its pattern for as long as the clip is;
 //! - an audio clip plays a sample file once, at its own speed, into the track's mixer strip;
-//! - an automation clip moves one mixer parameter along its points.
+//! - an automation clip moves one parameter (any [`ParamId`]) along its points.
 //!
 //! Slip edit changes `offset` only, so the content moves inside a clip that stays put. All
 //! positions are ticks.
 
-use crate::effects::EffectKind;
-use crate::mixer::{Mixer, MixerStrip, StripKind, FX_SLOTS, MASTER, STRIPS};
+use crate::mixer::{MixerStrip, MASTER};
+use crate::params::ParamId;
 use crate::project::{PatternId, SampleSource};
 
 /// Stable identity of a playlist track. Never reused within a project.
@@ -56,139 +56,85 @@ pub struct Track {
     pub insert: usize,
 }
 
-/// What an automation clip moves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AutoTarget {
-    /// A strip's fader.
-    StripVolume(usize),
-    /// A strip's balance.
-    StripPan(usize),
-    /// One parameter of the effect in a slot. Ignored while the slot holds another kind.
-    EffectParam {
-        /// Strip index.
-        strip: usize,
-        /// Slot index.
-        slot: usize,
-        /// Effect the parameter belongs to.
-        kind: EffectKind,
-        /// Parameter index in [`EffectKind::params`].
-        index: usize,
-    },
+/// Shape of an automation segment, from one point to the next.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Curve {
+    /// Stays at the point's value until the next point, then jumps.
+    Hold,
+    /// Straight line.
+    #[default]
+    Linear,
+    /// S-curve (half a cosine): eases out of one point and into the next.
+    Smooth,
+    /// Single bend set by a tension from -1 to 1: positive rises fast then levels off,
+    /// negative starts slowly; 0 is a straight line. A quadratic Bézier through both points.
+    Bezier(f32),
 }
 
-impl AutoTarget {
-    /// Display name, e.g. "Delay · Volume" or "Bass · EQ · B1 freq".
-    pub fn name(&self, mixer: &Mixer) -> String {
-        let strip = |i: usize| {
-            mixer
-                .strips
-                .get(i)
-                .map_or_else(|| StripKind::of(i).short(), |s| s.name.clone())
-        };
-        match *self {
-            Self::StripVolume(s) => format!("{} · Volume", strip(s)),
-            Self::StripPan(s) => format!("{} · Pan", strip(s)),
-            Self::EffectParam {
-                strip: s,
-                kind,
-                index,
-                ..
-            } => {
-                let p = kind.params().get(index).map_or("?", |p| p.name);
-                format!("{} · {} · {}", strip(s), kind.name(), p)
-            }
+impl Curve {
+    /// Menu names, in the order of [`Curve::from_index`].
+    pub const NAMES: [&'static str; 4] = ["Hold", "Linear", "Smooth", "Bézier"];
+
+    /// Index into [`Curve::NAMES`].
+    pub fn index(self) -> usize {
+        match self {
+            Self::Hold => 0,
+            Self::Linear => 1,
+            Self::Smooth => 2,
+            Self::Bezier(_) => 3,
         }
     }
 
-    /// True if the target exists in `mixer` (the strip and slot exist and the slot holds the
-    /// effect kind the target was made for).
-    pub fn is_valid(&self, mixer: &Mixer) -> bool {
-        match *self {
-            Self::StripVolume(s) | Self::StripPan(s) => s < STRIPS,
-            Self::EffectParam {
-                strip,
-                slot,
-                kind,
-                index,
-            } => {
-                strip < STRIPS
-                    && slot < FX_SLOTS
-                    && index < kind.params().len()
-                    && mixer.strips[strip].slots[slot]
-                        .as_ref()
-                        .is_some_and(|s| s.kind == kind)
-            }
+    /// The curve for a menu index (a new Bézier gets tension 0.5).
+    pub fn from_index(i: usize) -> Self {
+        match i {
+            0 => Self::Hold,
+            2 => Self::Smooth,
+            3 => Self::Bezier(0.5),
+            _ => Self::Linear,
         }
     }
 
-    /// Normalized value (0..1) of the target's current setting in `mixer`.
-    pub fn current(&self, mixer: &Mixer) -> f32 {
-        match *self {
-            Self::StripVolume(s) => mixer
-                .strips
-                .get(s)
-                .map_or(0.0, |x| volume_to_norm(x.volume)),
-            Self::StripPan(s) => mixer.strips.get(s).map_or(0.5, |x| (x.pan + 1.0) * 0.5),
-            Self::EffectParam {
-                strip,
-                slot,
-                kind,
-                index,
-            } => {
-                let info = kind.params().get(index);
-                let value = mixer
-                    .strips
-                    .get(strip)
-                    .and_then(|s| s.slots.get(slot)?.as_ref())
-                    .filter(|s| s.kind == kind)
-                    .and_then(|s| s.params.get(index).copied());
-                match (info, value) {
-                    (Some(i), Some(v)) => i.to_normalized(v),
-                    (Some(i), None) => i.to_normalized(i.default),
-                    _ => 0.0,
-                }
-            }
-        }
-    }
-
-    /// Text for a normalized value, e.g. "-3.2 dB", "L 40 %", "1.20 kHz".
-    pub fn format(&self, t: f32) -> String {
-        match *self {
-            Self::StripVolume(_) => {
-                let g = norm_to_volume(t);
-                if g <= 1e-5 {
-                    "-inf dB".to_owned()
+    /// Fraction of the way from the first value to the second at `x` (0..1) of the segment.
+    pub fn shape(self, x: f32) -> f32 {
+        let x = x.clamp(0.0, 1.0);
+        match self {
+            Self::Hold => {
+                if x < 1.0 {
+                    0.0
                 } else {
-                    format!("{:+.1} dB", 20.0 * g.log10())
+                    1.0
                 }
             }
-            Self::StripPan(_) => {
-                let p = t * 2.0 - 1.0;
-                if p.abs() < 0.005 {
-                    "C".to_owned()
-                } else if p < 0.0 {
-                    format!("L {:.0} %", -p * 100.0)
+            Self::Linear => x,
+            Self::Smooth => 0.5 - 0.5 * (std::f32::consts::PI * x).cos(),
+            Self::Bezier(tension) => {
+                // Control point (cx, cy) on the anti-diagonal: (0.5, 0.5) is a straight line.
+                let t = if tension.is_finite() {
+                    tension.clamp(-1.0, 1.0)
                 } else {
-                    format!("R {:.0} %", p * 100.0)
-                }
+                    0.0
+                };
+                let (cx, cy) = (0.5 * (1.0 - t), 0.5 * (1.0 + t));
+                // Solve x(s) = (1 - 2cx)s² + 2cx·s for s, then evaluate y(s).
+                let a = 1.0 - 2.0 * cx;
+                let b = 2.0 * cx;
+                let s = if a.abs() < 1e-6 {
+                    x / b
+                } else {
+                    (-b + (b * b + 4.0 * a * x).max(0.0).sqrt()) / (2.0 * a)
+                };
+                let s = s.clamp(0.0, 1.0);
+                2.0 * s * (1.0 - s) * cy + s * s
             }
-            Self::EffectParam { kind, index, .. } => kind
-                .params()
-                .get(index)
-                .map_or_else(String::new, |i| i.format(i.from_normalized(t))),
         }
     }
-}
 
-/// Fader position (0..1) to strip gain: `MixerStrip::MAX_VOLUME · t³` (unity at about 79 %).
-pub fn norm_to_volume(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    MAX_VOLUME * t * t * t
-}
-
-/// Inverse of [`norm_to_volume`].
-pub fn volume_to_norm(gain: f32) -> f32 {
-    (gain.max(0.0) / MAX_VOLUME).cbrt().clamp(0.0, 1.0)
+    /// True if a piece cut out of the middle of a segment keeps this shape (so cutting at an
+    /// arbitrary point needs no resampling).
+    pub fn cuts_cleanly(self) -> bool {
+        matches!(self, Self::Hold | Self::Linear) || matches!(self, Self::Bezier(t) if t == 0.0)
+    }
 }
 
 /// A breakpoint of an automation clip.
@@ -198,13 +144,26 @@ pub struct AutoPoint {
     pub at: i64,
     /// Normalized value, 0 to 1.
     pub value: f32,
+    /// Shape of the segment from this point to the next.
+    pub curve: Curve,
+}
+
+impl AutoPoint {
+    /// A point with a linear segment after it.
+    pub fn new(at: i64, value: f32) -> Self {
+        Self {
+            at,
+            value,
+            curve: Curve::Linear,
+        }
+    }
 }
 
 /// The source of an automation clip: a target and a line through points.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Automation {
     /// What moves.
-    pub target: AutoTarget,
+    pub target: ParamId,
     /// Breakpoints sorted by `at`; values between points are interpolated linearly, and the
     /// first and last values hold before and after.
     pub points: Vec<AutoPoint>,
@@ -216,21 +175,28 @@ impl Automation {
         value_at(&self.points, at)
     }
 
-    /// Inserts a point, keeping the list sorted; returns its index.
+    /// Inserts a point, keeping the list sorted; returns its index. A point that splits a
+    /// segment takes that segment's curve, so the shape on either side keeps its kind.
     pub fn insert_point(&mut self, p: AutoPoint) -> usize {
         let i = self.points.partition_point(|q| q.at <= p.at);
+        let curve = match i.checked_sub(1).and_then(|k| self.points.get(k)) {
+            Some(prev) if i < self.points.len() => prev.curve,
+            _ => p.curve,
+        };
         self.points.insert(
             i,
             AutoPoint {
                 at: p.at,
                 value: p.value.clamp(0.0, 1.0),
+                curve,
             },
         );
         i
     }
 }
 
-/// Linear interpolation through sorted points; holds the end values outside them.
+/// Value through sorted points, each segment shaped by its first point's curve; holds the end
+/// values outside them.
 pub fn value_at(points: &[AutoPoint], at: f64) -> f32 {
     let Some(first) = points.first() else {
         return 0.0;
@@ -248,7 +214,7 @@ pub fn value_at(points: &[AutoPoint], at: f64) -> f32 {
         return b.value;
     }
     let f = ((at - a.at as f64) / span) as f32;
-    a.value + (b.value - a.value) * f
+    a.value + (b.value - a.value) * a.curve.shape(f)
 }
 
 /// What a clip plays.
@@ -263,7 +229,7 @@ pub enum ClipKind {
         /// Linear gain.
         gain: f32,
     },
-    /// Automation of one mixer parameter.
+    /// Automation of one parameter.
     Automation(Automation),
 }
 
@@ -516,6 +482,13 @@ impl Playlist {
                     } else {
                         0.0
                     };
+                    if let Curve::Bezier(t) = &mut p.curve {
+                        *t = if t.is_finite() {
+                            t.clamp(-1.0, 1.0)
+                        } else {
+                            0.0
+                        };
+                    }
                 }
             }
             if let ClipKind::Audio { gain, .. } = &mut c.kind {
@@ -617,15 +590,9 @@ mod tests {
     #[test]
     fn automation_interpolates_and_holds() {
         let pts = [
-            AutoPoint { at: 0, value: 0.0 },
-            AutoPoint {
-                at: 100,
-                value: 1.0,
-            },
-            AutoPoint {
-                at: 200,
-                value: 0.5,
-            },
+            AutoPoint::new(0, 0.0),
+            AutoPoint::new(100, 1.0),
+            AutoPoint::new(200, 0.5),
         ];
         assert_eq!(value_at(&pts, -5.0), 0.0);
         assert_eq!(value_at(&pts, 50.0), 0.5);
@@ -633,45 +600,71 @@ mod tests {
         assert_eq!(value_at(&pts, 900.0), 0.5);
         assert_eq!(value_at(&[], 3.0), 0.0);
         let mut a = Automation {
-            target: AutoTarget::StripVolume(1),
+            target: crate::params::MASTER_VOLUME,
             points: pts.to_vec(),
         };
-        assert_eq!(
-            a.insert_point(AutoPoint {
-                at: 150,
-                value: 2.0
-            }),
-            2
-        );
+        a.points[1].curve = Curve::Hold;
+        assert_eq!(a.insert_point(AutoPoint::new(150, 2.0)), 2);
         assert_eq!(a.points[2].value, 1.0, "clamped");
+        assert_eq!(
+            a.points[2].curve,
+            Curve::Hold,
+            "takes the split segment's curve"
+        );
+        assert_eq!(a.insert_point(AutoPoint::new(300, 0.0)), 4);
+        assert_eq!(
+            a.points[4].curve,
+            Curve::Linear,
+            "past the end: its own curve"
+        );
     }
 
     #[test]
-    fn volume_law_round_trips() {
-        for g in [0.0, 0.1, 0.5, 1.0, MAX_VOLUME] {
-            assert!((norm_to_volume(volume_to_norm(g)) - g).abs() < 1e-5);
+    fn curves_join_their_points_and_bend_the_right_way() {
+        for c in [
+            Curve::Linear,
+            Curve::Smooth,
+            Curve::Bezier(0.8),
+            Curve::Bezier(-0.8),
+            Curve::Bezier(0.0),
+            Curve::Bezier(1.0),
+            Curve::Bezier(-1.0),
+        ] {
+            assert!(c.shape(0.0).abs() < 1e-6, "{c:?}");
+            assert!((c.shape(1.0) - 1.0).abs() < 1e-6, "{c:?}");
+            // Monotonic.
+            let mut last = 0.0;
+            for k in 1..=100 {
+                let y = c.shape(k as f32 / 100.0);
+                assert!(y >= last - 1e-6, "{c:?} at {k}");
+                last = y;
+            }
         }
-        let t = AutoTarget::StripVolume(0);
-        assert_eq!(t.format(volume_to_norm(1.0)), "+0.0 dB");
-        assert_eq!(AutoTarget::StripPan(0).format(0.5), "C");
-        assert_eq!(AutoTarget::StripPan(0).format(0.0), "L 100 %");
-    }
-
-    #[test]
-    fn effect_targets_follow_the_slot() {
-        let mut m = Mixer::new();
-        let t = AutoTarget::EffectParam {
-            strip: 3,
-            slot: 1,
-            kind: EffectKind::Delay,
-            index: 0,
-        };
-        assert!(!t.is_valid(&m));
-        m.strips[3].slots[1] = Some(crate::EffectSlot::new(EffectKind::Delay));
-        assert!(t.is_valid(&m));
-        assert!(t.name(&m).contains("Delay"));
-        m.strips[3].slots[1] = Some(crate::EffectSlot::new(EffectKind::Chorus));
-        assert!(!t.is_valid(&m));
+        assert_eq!(Curve::Hold.shape(0.99), 0.0);
+        assert!((Curve::Smooth.shape(0.5) - 0.5).abs() < 1e-6);
+        assert!(Curve::Smooth.shape(0.1) < 0.1, "eases out");
+        assert!(
+            (Curve::Bezier(0.0).shape(0.3) - 0.3).abs() < 1e-5,
+            "0 is straight"
+        );
+        assert!(Curve::Bezier(0.8).shape(0.3) > 0.5, "positive rises fast");
+        assert!(
+            Curve::Bezier(-0.8).shape(0.3) < 0.15,
+            "negative starts slowly"
+        );
+        let pts = [
+            AutoPoint {
+                at: 0,
+                value: 0.2,
+                curve: Curve::Hold,
+            },
+            AutoPoint::new(100, 0.8),
+        ];
+        assert_eq!(value_at(&pts, 99.0), 0.2);
+        assert_eq!(value_at(&pts, 100.0), 0.8);
+        for i in 0..4 {
+            assert_eq!(Curve::from_index(i).index(), i);
+        }
     }
 
     #[test]

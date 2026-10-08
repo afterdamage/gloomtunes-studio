@@ -18,9 +18,9 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 4 | Piano roll | Done (2026-10-08) |
 | 5 | Gloom Synth | Done (2026-10-08) |
 | 6 | Mixer and effects | Done (2026-10-08) |
-| 7 | Playlist / arrangement | **In review** |
-| 8 | Automation and parameter system | Next |
-| 9 | Save/load, export, recovery | Planned |
+| 7 | Playlist / arrangement | Done (2026-10-08) |
+| 8 | Automation and parameter system | **In review** |
+| 9 | Save/load, export, recovery | Next |
 | 10 | MIDI input and recording | Planned |
 | 11 | CLAP plugin hosting | Planned (can move after v1.0) |
 | 12 | Performance, polish, packaging | Planned |
@@ -170,7 +170,8 @@ for schedule; Phase E is the riskiest technically.
   clips with them to the exact frame (D45); signature changes move bars, the metronome and
   snap (D46). Waveform peaks are built on the loader thread (D49). Automation clips drive
   mixer volume, pan and every effect parameter (D47). The demo is now a 12-bar arrangement.
-  Known limits: automation is linear between points and evaluated every 64 frames; locating
+  Known limits (Step 8 lifted the first and last-but-two): automation is linear between points
+  and evaluated every 64 frames; locating
   mid-song does not chase notes already playing; audio clips are not time-stretched, start
   abruptly when you locate into their middle and stop without a fade; the mixer view does not
   show automated fader positions; automation can only target mixer and effect parameters (all
@@ -183,6 +184,26 @@ for schedule; Phase E is the riskiest technically.
 - LFO and envelope-follower modulation; 32-frame control rate with smoothing, trade-off documented.
 - **Milestone: first song**, arranged, mixed and automated.
 - Cut if late: bezier curves, envelope follower.
+- Delivered (2026-10-08): everything above, nothing cut; the milestone is reached (the demo is
+  a 12-bar song with a filter sweep, a delay swell, an auto-panned hat and the reverb ducking
+  under the kick). Every channel, sampler, Gloom Synth (knobs and mod-matrix amounts), mixer
+  (fader, pan, sends) and effect parameter has a stable `ParamId` with a text key such as
+  `channel/3/synth/filter.cutoff` or `mixer/5/fx/2/eq/b1.freq`, a range, a taper and display
+  formatting (D52). Right-click any knob or fader for **Create automation clip**, **Add LFO**
+  or **Add envelope follower**; a ring marks automated controls and a dot modulated ones. The
+  playlist's + Automation menu lists every parameter. Each automation segment has a curve:
+  hold, linear, smooth or bezier; right-click a segment to pick one, Ctrl+drag it to bend it
+  (D53). The **Modulators** window lists LFOs (six shapes, free in Hz or synced from 4 bars to
+  1/16 triplets, start phase) and envelope followers (any strip, attack, release, gain), each
+  with a signed depth (D54, D56). Control runs every 32 frames; gains ramp across each period
+  so faders move sample by sample, everything else updates per period and smooths (D51, D55).
+  Undo covers modulators.
+  Known limits: knobs and faders show the document value, not the automated or modulated one;
+  automation only plays in song mode (modulators run in both); an envelope follower hears the
+  previous 32 frames (0.7 ms late) and only post-fader strip levels; synth parameters change
+  for all voices at once (no per-voice modulation); a modulated synth or sampler pitch moves
+  by retuning playing voices, which a sampler's loop points do not follow; modulators cannot
+  modulate each other; nothing is saved yet (Step 9).
 
 ---
 

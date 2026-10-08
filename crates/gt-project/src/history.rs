@@ -188,6 +188,7 @@ fn diff(a: &Project, b: &Project) -> Vec<Edit> {
     let same_shape = a.channels == b.channels
         && a.swing == b.swing
         && a.mixer == b.mixer
+        && a.modulators == b.modulators
         && a.playlist == b.playlist
         && a.tempo == b.tempo
         && a.signatures == b.signatures
@@ -284,6 +285,26 @@ mod tests {
         assert_eq!(p.patterns.len(), Project::demo().patterns.len());
         assert_eq!(p.current_pattern, first, "deleted selection falls back");
         assert!(h.undo(&mut p).is_none());
+    }
+
+    #[test]
+    fn modulator_edits_are_undone() {
+        let mut p = Project::demo();
+        let mut h = History::new(&p);
+        let before = p.clone();
+        let id = p
+            .add_modulator(
+                gt_core::MASTER_VOLUME,
+                gt_core::ModSourceKind::default_lfo(),
+            )
+            .unwrap();
+        assert!(h.commit(&p, "Add LFO"));
+        p.modulator_mut(id).unwrap().amount = -0.3;
+        assert!(h.commit(&p, "Modulators"));
+        h.undo(&mut p);
+        assert_eq!(p.modulator_mut(id).unwrap().amount, 0.5);
+        h.undo(&mut p);
+        assert_eq!(p, before);
     }
 
     #[test]

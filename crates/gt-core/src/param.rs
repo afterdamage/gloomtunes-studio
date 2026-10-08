@@ -1,4 +1,4 @@
-//! Parameter descriptions shared by synth patches and mixer effects.
+//! Parameter descriptions shared by synth patches, the sampler, the mixer and its effects.
 //!
 //! A [`ParamInfo`] gives a parameter's stable key, range, default, knob taper and display
 //! format, so the UI, preset files and the engine agree on them.
@@ -23,6 +23,8 @@ pub enum ParamUnit {
     Percent,
     /// Bipolar fraction shown as a signed percentage.
     SignedPercent,
+    /// Stereo position from -1 (left) to 1 (right), shown as "L 40 %", "C" or "R 100 %".
+    Pan,
     /// Frequency in Hz.
     Hz,
     /// Time in milliseconds.
@@ -113,6 +115,11 @@ impl ParamInfo {
         match self.unit {
             ParamUnit::Percent => format!("{:.0} %", v * 100.0),
             ParamUnit::SignedPercent => format!("{:+.0} %", v * 100.0),
+            ParamUnit::Pan => match (v * 100.0).round() as i32 {
+                0 => "C".to_owned(),
+                p if p < 0 => format!("L {} %", -p),
+                p => format!("R {p} %"),
+            },
             ParamUnit::Hz if v >= 1000.0 => format!("{:.2} kHz", v / 1000.0),
             ParamUnit::Hz if v < 10.0 => format!("{v:.2} Hz"),
             ParamUnit::Hz => format!("{v:.0} Hz"),

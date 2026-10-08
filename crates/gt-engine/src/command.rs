@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use gt_core::{SampleData, TempoMap, Tick, TimeSigMap};
 
+use crate::control::ModPlan;
 use crate::mixer::{EffectBox, MixerParams};
 use crate::song::{ChannelParams, SongSnapshot};
 
@@ -58,8 +59,10 @@ pub enum EngineCommand {
     /// Undo `FadeOut`.
     FadeIn,
     /// Replace what plays (a pattern, or the arrangement). Held notes are released and
-    /// automation overrides of faders are dropped.
+    /// automation values are dropped (the new song's lanes set them again while playing).
     SetSong(Box<SongSnapshot>),
+    /// Replace the modulators. Running LFOs and followers keep their state (by modulator id).
+    SetModulation(Box<ModPlan>),
     /// Replace a channel's settings. Gain and pan glide; the rest applies to new notes.
     SetChannelParams {
         /// Channel slot (rack index), below `MAX_CHANNELS`.
@@ -129,6 +132,7 @@ impl EngineCommand {
             Self::SetTempoMap(_)
                 | Self::SetSignatures(_)
                 | Self::SetSong(_)
+                | Self::SetModulation(_)
                 | Self::SetChannelParams { .. }
                 | Self::SetChannelSample { .. }
                 | Self::PreviewSample(_)
@@ -186,6 +190,8 @@ pub enum Garbage {
     Signatures(Box<TimeSigMap>),
     /// A replaced song.
     Song(Box<SongSnapshot>),
+    /// A replaced (or empty) modulation plan.
+    Modulation(Box<ModPlan>),
     /// A channel-settings box, already copied into the channel.
     Params(Box<ChannelParams>),
     /// A sample no longer used by a channel or the preview voice.

@@ -128,6 +128,13 @@ impl SamplerVoice {
         self.active && !self.env.is_releasing()
     }
 
+    /// Multiplies the read step (retunes a sounding voice; 2 is an octave up).
+    pub fn scale_step(&mut self, ratio: f64) {
+        if ratio.is_finite() && ratio > 0.0 {
+            self.step *= ratio;
+        }
+    }
+
     /// The key that started the voice.
     pub fn key(&self) -> u8 {
         self.key

@@ -5,8 +5,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod param_ui;
 pub mod theme;
 pub mod views;
 pub mod widgets;
 
+pub use param_ui::{ParamMarks, ParamRequest};
 pub use theme::GloomTheme;

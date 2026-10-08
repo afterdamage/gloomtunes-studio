@@ -2,8 +2,9 @@
 //! and the ADSR envelope.
 
 use egui::{pos2, vec2, RichText, Sense, Stroke, Ui};
-use gt_core::{LoopMode, SamplerSettings};
+use gt_core::{ChannelId, ChannelParam, LoopMode, ParamId, SamplerSettings};
 
+use crate::param_ui::param_menu;
 use crate::widgets::labeled_knob;
 use crate::GloomTheme;
 
@@ -21,6 +22,8 @@ pub struct SamplerPanelView<'a> {
     pub seconds: Option<f64>,
     /// Loading or error message.
     pub status: Option<&'a str>,
+    /// The channel, so knobs get the automation and modulation menu.
+    pub channel: Option<ChannelId>,
 }
 
 /// Draws the panel. Returns true when a sound parameter changed.
@@ -33,6 +36,12 @@ pub fn sampler_panel(
 ) -> bool {
     let mut changed = false;
     let dim = |s: &str| RichText::new(s).color(theme.text_dim);
+    let menu = |r: egui::Response, param: ChannelParam| {
+        if let Some(channel) = view.channel {
+            param_menu(theme, &r, ParamId::Channel { channel, param });
+        }
+        r.changed()
+    };
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.set_width(170.0);
@@ -78,31 +87,48 @@ pub fn sampler_panel(
 
         waveform(ui, theme, s, view.waveform);
 
-        changed |= labeled_knob(ui, theme, "Pitch", &mut s.pitch, -24.0..=24.0, 0.0, |v| {
-            format!("{v:+.2} semitones")
-        })
-        .changed();
-        changed |= labeled_knob(ui, theme, "Start", &mut s.start, 0.0..=1.0, 0.0, |v| {
-            format!("Start {:.1} %", v * 100.0)
-        })
-        .changed();
-        changed |= labeled_knob(ui, theme, "End", &mut s.end, 0.0..=1.0, 1.0, |v| {
-            format!("End {:.1} %", v * 100.0)
-        })
-        .changed();
+        changed |= menu(
+            labeled_knob(ui, theme, "Pitch", &mut s.pitch, -24.0..=24.0, 0.0, |v| {
+                format!("{v:+.2} semitones")
+            }),
+            ChannelParam::Pitch,
+        );
+        changed |= menu(
+            labeled_knob(ui, theme, "Start", &mut s.start, 0.0..=1.0, 0.0, |v| {
+                format!("Start {:.1} %", v * 100.0)
+            }),
+            ChannelParam::Start,
+        );
+        changed |= menu(
+            labeled_knob(ui, theme, "End", &mut s.end, 0.0..=1.0, 1.0, |v| {
+                format!("End {:.1} %", v * 100.0)
+            }),
+            ChannelParam::End,
+        );
         if s.end <= s.start {
             s.end = (s.start + 0.001).min(1.0);
             s.start = s.start.min(s.end - 0.001);
         }
         ui.separator();
         let a = &mut s.adsr;
-        changed |= time_knob(ui, theme, "Attack", &mut a.attack_ms, MAX_AD_MS, 0.0);
-        changed |= time_knob(ui, theme, "Decay", &mut a.decay_ms, MAX_AD_MS, 0.0);
-        changed |= labeled_knob(ui, theme, "Sustain", &mut a.sustain, 0.0..=1.0, 1.0, |v| {
-            format!("Sustain {:.0} %", v * 100.0)
-        })
-        .changed();
-        changed |= time_knob(ui, theme, "Release", &mut a.release_ms, MAX_R_MS, 50.0);
+        changed |= menu(
+            time_knob(ui, theme, "Attack", &mut a.attack_ms, MAX_AD_MS, 0.0),
+            ChannelParam::Attack,
+        );
+        changed |= menu(
+            time_knob(ui, theme, "Decay", &mut a.decay_ms, MAX_AD_MS, 0.0),
+            ChannelParam::Decay,
+        );
+        changed |= menu(
+            labeled_knob(ui, theme, "Sustain", &mut a.sustain, 0.0..=1.0, 1.0, |v| {
+                format!("Sustain {:.0} %", v * 100.0)
+            }),
+            ChannelParam::Sustain,
+        );
+        changed |= menu(
+            time_knob(ui, theme, "Release", &mut a.release_ms, MAX_R_MS, 50.0),
+            ChannelParam::Release,
+        );
     });
     changed
 }
@@ -116,7 +142,7 @@ fn time_knob(
     ms: &mut f32,
     max: f32,
     default: f32,
-) -> bool {
+) -> egui::Response {
     let mut t = (*ms / max).clamp(0.0, 1.0).sqrt();
     let r = labeled_knob(
         ui,
@@ -136,10 +162,8 @@ fn time_knob(
     );
     if r.changed() {
         *ms = t * t * max;
-        true
-    } else {
-        false
     }
+    r
 }
 
 fn waveform(ui: &mut Ui, theme: &GloomTheme, s: &SamplerSettings, cols: Option<&[(f32, f32)]>) {

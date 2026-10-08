@@ -4,9 +4,10 @@ An original, open-source, pattern-based digital audio workstation written in Rus
 Windows 10/11 and Ubuntu 22.04+ from a single codebase. Channel rack, piano roll, mixer and
 playlist, with built-in instruments and effects, wrapped in a dark, moody "Gloom" interface.
 
-> **Status:** early development. Step 7 of the [roadmap](ROADMAP.md): a playlist that arranges
-> pattern, audio and automation clips on unlimited tracks, with tempo and time-signature changes,
-> markers and a loop region, on top of a mixer with 64 inserts, 4 send buses and eight built-in
+> **Status:** early development. Step 8 of the [roadmap](ROADMAP.md): every knob and fader can
+> be automated with curved automation clips or modulated by LFOs and envelope followers, in a
+> playlist that arranges pattern, audio and automation clips on unlimited tracks, with tempo and
+> time-signature changes, markers and a loop region, on top of a mixer with 64 inserts, 4 send buses and eight built-in
 > effects, Gloom Synth (a subtractive polysynth with presets), a piano roll with undo/redo, a
 > channel rack with a step sequencer, a sampler, a sample browser, four built-in drums and a
 > sample-accurate transport. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
@@ -62,8 +63,10 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
     selection) and **M** (mute clips) work while the mouse is over the playlist.
   - Drag a file from the browser onto a track to add an audio clip; its waveform appears once it
     has loaded. The track's "audio to" box picks the mixer insert its audio goes to.
-  - **+ Automation** adds a clip for a mixer fader, pan or any effect knob. Click inside it to add
-    a point, drag points, right-click one to delete it.
+  - **+ Automation** adds a clip for any parameter (channels, synth knobs, mixer, effects).
+    Click inside it to add a point, drag points, right-click one to delete it. Right-click
+    between two points to pick that segment's curve (hold, linear, smooth, bezier); Ctrl+drag
+    between them to bend it.
   - Track names are editable; M and S mute and solo a track; right-click a header for colours,
     insert and delete. **+ Track** adds one; there is no limit.
   - The ruler: click the bars row to move the playhead, drag it to set the loop. Right-click to
@@ -114,8 +117,18 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
   - The demo mix sends snare and clap to a reverb bus and the hat to a delay bus, ducks the bass
     with the kick and has a limiter on the master. Latency added by the limiter is compensated on
     every path and shown on the master strip.
+- **Automation and modulation from any control:** right-click a knob or fader (rack volume and
+  pan, sampler, Gloom Synth knobs and mod-matrix amounts, mixer faders, pans, sends and effect
+  knobs) for **Create automation clip** (a four-bar clip at the playhead, in the Playlist),
+  **Add LFO** or **Add envelope follower**. A ring on a control means automation drives it, a dot
+  means a modulator does.
+  - **Modulators** (button next to the view tabs) lists every LFO and envelope follower. LFOs
+    have six shapes, a rate in Hz or synced to the song (4 bars to 1/16 triplets) and a start
+    phase; followers track any mixer strip's level with attack, release and gain. The depth is
+    in percent of the control's travel; negative inverts (a follower at -50 % ducks).
+  - The demo pans the hat with a one-bar LFO and ducks the reverb bus under the kick.
 - **Undo** and **Redo** (top right, Ctrl+Z and Ctrl+Shift+Z or Ctrl+Y) cover notes, steps,
-  channels, patterns, the mixer, the playlist, tempo and time signatures and settings.
+  channels, patterns, the mixer, the playlist, modulators, tempo and time signatures and settings.
 
 ### Checks
 
@@ -125,6 +138,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 # Piano roll frame time with 10,000 notes (prints the median):
 cargo test --release -p gt-ui -- --ignored --nocapture
+# Engine cost of the demo song, as a share of real time:
+cargo run --release -p gt-engine --example render_cost
 # Gloom Synth and effect benchmarks (1 s of audio per iteration):
 cargo bench -p gt-dsp
 cargo bench -p gt-dsp --bench fx

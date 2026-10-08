@@ -9,8 +9,9 @@ use rtrb::{Consumer, Producer};
 
 use crate::channel::ChannelSlot;
 use crate::command::{EngineCommand, EngineEvent, Garbage, TransportState};
+use crate::control::{beats_of, ModClock, ModPlan, ParamDest};
 use crate::mixer::MixerEngine;
-use crate::song::{AutoDest, ChannelParams, SongSnapshot};
+use crate::song::{ChannelParams, SongSnapshot};
 use crate::transport::{EventBuf, EventKind, ScheduledEvent, Transport};
 use crate::{EngineConfig, Telemetry, FADE_SECONDS, RENDER_QUANTUM, SCOPE_LEN};
 
@@ -61,6 +62,10 @@ pub struct AudioProcessor {
     scratch_r: [f32; Q],
 
     song: Option<Box<SongSnapshot>>,
+    /// Song tick where the last control step ended (NaN when stopped).
+    control_tick: f64,
+    /// Modulators, grouped by parameter.
+    mods: Option<Box<ModPlan>>,
     /// `MAX_CHANNELS` slots, allocated once in `new`.
     channels: Vec<ChannelSlot>,
     preview: ChannelSlot,
@@ -125,6 +130,8 @@ impl AudioProcessor {
             scratch_l: [0.0; Q],
             scratch_r: [0.0; Q],
             song: None,
+            control_tick: f64::NAN,
+            mods: None,
             channels: (0..MAX_CHANNELS).map(|_| ChannelSlot::new(sr)).collect(),
             preview,
             voice_age: 0,
@@ -222,11 +229,11 @@ impl AudioProcessor {
         }
         self.click.add_to(&mut self.mono[cursor..]);
 
+        self.apply_controls();
         for slot in 0..self.channels.len() {
             self.render_channel(slot);
         }
         self.render_audio_clips();
-        self.apply_automation();
         let bpm = self.transport.bpm_at(self.frame_clock) as f32;
         self.mixer.process(
             &mut self.scratch_l,
@@ -368,33 +375,123 @@ impl AudioProcessor {
     /// Moves automated mixer parameters to their values at the start of this quantum (song
     /// mode, while playing). Faders and balances glide over the mixer's ramp; effect
     /// parameters glide in the effect's own smoothing.
-    fn apply_automation(&mut self) {
-        let Some(song) = self.song.as_deref() else {
-            return;
-        };
-        let Some(seg) = self.scheduled.segments().first() else {
-            return;
-        };
-        if song.automation.is_empty() {
+    /// Evaluates automation lanes (while the song plays) and modulators (always) at the end
+    /// of this quantum and writes the values to their parameters. Gains ramp to them across
+    /// the quantum, so between control points they move sample by sample.
+    fn apply_controls(&mut self) {
+        let song = self.song.as_deref();
+        let has_lanes = song.is_some_and(|s| !s.repeat && !s.automation.is_empty());
+        if !has_lanes && self.mods.is_none() {
             return;
         }
-        let tick = self.transport.tick_at_seconds(seg.seconds);
-        for lane in &song.automation {
-            let x = lane
-                .dest
-                .plain(gt_core::playlist::value_at(&lane.points, tick));
-            match lane.dest {
-                AutoDest::StripVolume(s) => self.mixer.automate(usize::from(s), Some(x), None),
-                AutoDest::StripPan(s) => self.mixer.automate(usize::from(s), None, Some(x)),
-                AutoDest::Effect {
-                    strip, slot, index, ..
-                } => self.mixer.set_effect_param(
-                    usize::from(strip),
-                    usize::from(slot),
-                    usize::from(index),
-                    x,
-                ),
+        // Song tick at the start and end of the quantum, while playing.
+        let segs = self.scheduled.segments();
+        let start = segs
+            .first()
+            .map(|seg| self.transport.tick_at_seconds(seg.seconds));
+        let tick = segs.last().map(|seg| {
+            self.transport
+                .tick_at_seconds(seg.seconds + f64::from(seg.frames) / self.sample_rate)
+        });
+        // Playback started, located or wrapped exactly here: lanes jump to their value at the
+        // new position first, so the first ramp does not start from wherever they were.
+        let jump =
+            start.filter(|t| (t - self.control_tick).abs() > 0.5 || self.control_tick.is_nan());
+        self.control_tick = tick.unwrap_or(f64::NAN);
+        let lane_tick = tick.filter(|_| has_lanes);
+        let ramp = Q as u32;
+        if let (Some(t), Some(song)) = (lane_tick, song) {
+            for lane in song.automation.iter().filter(|l| !l.modulated) {
+                for (at, frames) in jump.map(|j| (j, 0)).into_iter().chain([(t, ramp)]) {
+                    let v = gt_core::playlist::value_at(&lane.points, at);
+                    apply_param(
+                        &mut self.channels,
+                        &mut self.mixer,
+                        lane.dest,
+                        lane.info.from_normalized(v),
+                        frames,
+                    );
+                }
             }
+        }
+        if let Some(plan) = self.mods.as_deref_mut() {
+            let clock = ModClock {
+                dt: Q as f64 / self.sample_rate,
+                bpm: self.transport.bpm_at(self.frame_clock),
+                beats: tick.map(beats_of),
+            };
+            for target in &mut plan.targets {
+                let base_at = |t: Option<f64>| match (target.lane, t.filter(|_| has_lanes), song) {
+                    (Some(i), Some(t), Some(song)) => song
+                        .automation
+                        .get(i)
+                        .map_or(target.base, |l| gt_core::playlist::value_at(&l.points, t)),
+                    _ => target.base,
+                };
+                if jump.is_some() && target.lane.is_some() {
+                    let prev: f32 = target
+                        .mods
+                        .iter()
+                        .map(|m| m.amount * m.state.output())
+                        .sum();
+                    apply_param(
+                        &mut self.channels,
+                        &mut self.mixer,
+                        target.dest,
+                        target
+                            .info
+                            .from_normalized((base_at(jump) + prev).clamp(0.0, 1.0)),
+                        0,
+                    );
+                }
+                let mut v = base_at(lane_tick);
+                for m in &mut target.mods {
+                    let mixer = &self.mixer;
+                    v += m.amount * m.state.step(&m.source, &clock, |s| mixer.strip_peak(s));
+                }
+                apply_param(
+                    &mut self.channels,
+                    &mut self.mixer,
+                    target.dest,
+                    target.info.from_normalized(v.clamp(0.0, 1.0)),
+                    ramp,
+                );
+            }
+        }
+        for ch in &mut self.channels {
+            ch.flush_controls();
+        }
+    }
+
+    /// Marks the song's lanes that a modulator target also drives, and points those targets
+    /// at their lane. Called whenever the song or the modulation plan changes.
+    fn link_lanes(&mut self) {
+        let song = self.song.as_deref_mut();
+        let lanes = match song {
+            Some(s) => {
+                for l in &mut s.automation {
+                    l.modulated = false;
+                }
+                &mut s.automation[..]
+            }
+            None => &mut [],
+        };
+        if let Some(plan) = self.mods.as_deref_mut() {
+            for t in &mut plan.targets {
+                t.lane = lanes.iter().position(|l| l.dest == t.dest);
+                if let Some(i) = t.lane {
+                    lanes[i].modulated = true;
+                }
+            }
+        }
+    }
+
+    /// Drops every automation and modulation value so the document's settings apply again
+    /// (the next `apply_controls` sets the ones still driven).
+    fn clear_controls(&mut self) {
+        self.mixer.clear_automation();
+        for ch in &mut self.channels {
+            ch.clear_controls();
         }
     }
 
@@ -469,11 +566,27 @@ impl AudioProcessor {
             EngineCommand::SetSong(song) => {
                 // Note-offs of the old pattern may never come; release what it started.
                 self.release_all_channels();
-                // Faders follow the document again until the new song's automation moves them.
-                self.mixer.clear_automation();
+                // Parameters follow the document again until the new song's automation moves
+                // them (in this same quantum, while playing).
+                self.clear_controls();
                 if let Some(old) = self.song.replace(song) {
                     self.retire(Garbage::Song(old));
                 }
+                self.link_lanes();
+            }
+            EngineCommand::SetModulation(mut plan) => {
+                self.clear_controls();
+                if let Some(old) = self.mods.take() {
+                    plan.inherit(&old);
+                    self.retire(Garbage::Modulation(old));
+                }
+                // An empty plan is dropped right away: nothing to run.
+                if plan.targets.is_empty() {
+                    self.retire(Garbage::Modulation(plan));
+                } else {
+                    self.mods = Some(plan);
+                }
+                self.link_lanes();
             }
             EngineCommand::SetChannelParams { slot, params } => {
                 if let Some(ch) = self.channels.get_mut(usize::from(slot)) {
@@ -604,6 +717,48 @@ impl AudioProcessor {
         if dropped > 0 {
             t.events_dropped.fetch_max(dropped, Ordering::Relaxed);
         }
+    }
+}
+
+/// Writes a plain value to a parameter. Gains ramp to it over `ramp` frames.
+fn apply_param(
+    channels: &mut [ChannelSlot],
+    mixer: &mut MixerEngine,
+    dest: ParamDest,
+    value: f32,
+    ramp: u32,
+) {
+    use gt_core::StripParam;
+    match dest {
+        ParamDest::Channel { slot, param } => {
+            if let Some(ch) = channels.get_mut(usize::from(slot)) {
+                ch.control(param, value, ramp);
+            }
+        }
+        ParamDest::Synth { slot, index } => {
+            if let Some(ch) = channels.get_mut(usize::from(slot)) {
+                ch.control_synth(usize::from(index), value);
+            }
+        }
+        ParamDest::SynthMod { slot, row } => {
+            if let Some(ch) = channels.get_mut(usize::from(slot)) {
+                ch.control_synth_mod(usize::from(row), value);
+            }
+        }
+        ParamDest::Strip { strip, param } => {
+            let s = usize::from(strip);
+            match param {
+                StripParam::Volume => mixer.automate(s, Some(value), None, ramp),
+                StripParam::Pan => mixer.automate(s, None, Some(value), ramp),
+                StripParam::Send(k) => mixer.automate_send(s, k, value, ramp),
+            }
+        }
+        ParamDest::Effect { strip, slot, index } => mixer.set_effect_param(
+            usize::from(strip),
+            usize::from(slot),
+            usize::from(index),
+            value,
+        ),
     }
 }
 

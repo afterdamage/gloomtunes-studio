@@ -2,8 +2,9 @@
 //! step grid.
 
 use egui::{vec2, RichText, Sense, Stroke, Ui};
-use gt_core::{Channel, Pattern, Project};
+use gt_core::{Channel, ChannelParam, ParamId, Pattern, Project};
 
+use crate::param_ui::param_menu;
 use crate::widgets::{format_gain, format_pan, knob};
 use crate::GloomTheme;
 
@@ -183,7 +184,7 @@ fn channel_row(
     }
 
     let mut vol = ch.volume;
-    if knob(
+    let r = knob(
         ui,
         theme,
         &mut vol,
@@ -191,18 +192,22 @@ fn channel_row(
         Channel::DEFAULT_VOLUME,
         20.0,
         |v| format!("Volume {}", format_gain(v)),
-    )
-    .changed()
-    {
+    );
+    let target = |param| ParamId::Channel {
+        channel: ch.id,
+        param,
+    };
+    param_menu(theme, &r, target(ChannelParam::Volume));
+    if r.changed() {
         ch.volume = vol;
         actions.push(RackAction::ParamsChanged);
     }
     let mut pan = ch.pan;
-    if knob(ui, theme, &mut pan, -1.0..=1.0, 0.0, 20.0, |p| {
+    let r = knob(ui, theme, &mut pan, -1.0..=1.0, 0.0, 20.0, |p| {
         format!("Pan {}", format_pan(p))
-    })
-    .changed()
-    {
+    });
+    param_menu(theme, &r, target(ChannelParam::Pan));
+    if r.changed() {
         ch.pan = pan;
         actions.push(RackAction::ParamsChanged);
     }

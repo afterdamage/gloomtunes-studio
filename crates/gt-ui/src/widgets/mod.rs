@@ -9,7 +9,7 @@ pub use knob::knob;
 pub use meter::{level_meter, MeterBallistics};
 
 use egui::{RichText, Ui};
-use gt_core::ParamInfo;
+use gt_core::{ParamId, ParamInfo};
 
 use crate::GloomTheme;
 
@@ -37,7 +37,8 @@ pub fn labeled_knob(
 }
 
 /// A labelled knob for a described parameter, with the knob's travel following the
-/// parameter's taper. `id_salt` must be unique among the knobs drawn in the same `Ui`.
+/// parameter's taper. `id_salt` must be unique among the knobs drawn in the same `Ui`. With a
+/// `target` the knob gets the automation and modulation menu ([`crate::param_ui::param_menu`]).
 /// Returns true if the value changed.
 pub fn param_knob(
     ui: &mut Ui,
@@ -45,6 +46,7 @@ pub fn param_knob(
     id_salt: impl std::hash::Hash + std::fmt::Debug,
     info: &ParamInfo,
     value: &mut f32,
+    target: Option<ParamId>,
 ) -> bool {
     // Stepped parameters round their value, so while dragging keep the unrounded knob position
     // or small drags would never move it.
@@ -65,6 +67,9 @@ pub fn param_knob(
         ui.data_mut(|d| d.insert_temp(id, t));
     } else if stored.is_some() {
         ui.data_mut(|d| d.remove::<f32>(id));
+    }
+    if let Some(target) = target {
+        crate::param_ui::param_menu(theme, &resp, target);
     }
     if resp.changed() {
         *value = info.from_normalized(t);
