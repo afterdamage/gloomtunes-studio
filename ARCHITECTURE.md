@@ -1,6 +1,6 @@
 # GloomTunes Studio: Architecture
 
-Status: **design baseline (Prompt 0)**. No code exists yet. This document is the contract that
+Status: **design baseline (Prompt 0), Step 1 implemented** (workspace, test tone, device panel, CI). This document is the contract that
 Prompts 1 to 12 implement; when an implementation step has to deviate, the step updates this file
 and adds an entry to the [decision log](#9-decision-log).
 
@@ -748,6 +748,8 @@ nodes from Prompt 6 even if all latencies are zero.
 | Thread priority | Verify cpal's MMCSS registration; add it in gt-app if missing | Request RT priority via rtkit (`audio_thread_priority` crate, MPL-2.0) |
 | MIDI | WinMM via midir | ALSA sequencer via midir |
 | Build deps | MSVC toolchain | `libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev pkg-config` (+ `libjack-jackd2-dev` for JACK) |
+| Runtime libs | none beyond the OS | `libxkbcommon-x11-0` on X11 sessions (present on standard desktop installs) |
+| Renderer | wgpu (DX12/Vulkan); automatic fallback to OpenGL (glow) if wgpu cannot start; `GT_RENDERER=glow` forces it | same |
 
 ---
 
@@ -789,6 +791,9 @@ polled), and float determinism across compilers.
 | D11 | `catch_unwind` around the audio callback, release keeps `panic = "unwind"` | Last-resort protection; output silence instead of tearing down the process | If it costs measurable CPU (it should not) |
 | D12 | Rust edition 2021, stable toolchain | As specified in the project instructions | Edition 2024 migration can be a standalone chore later |
 | D13 | License GPL-3.0-or-later | Project instructions say GPL-3.0; "or later" is the FSF-recommended form | Owner may prefer GPL-3.0-only |
+| D14 | Step 1 controls the engine with two atomics (`tone_on`, telemetry) instead of the `rtrb` command queue | The only command is start/stop; the queue arrives with real commands in Step 2 | Step 2 (planned replacement) |
+| D15 | Ship both eframe renderers: wgpu by default, glow (OpenGL) as automatic fallback | Machines without Vulkan/DX12 drivers (VMs, old GPUs, remote desktops) still get a window | If glow is never needed in practice, drop it in Step 12 to save binary size |
+| D16 | cpal 0.18 and eframe/egui 0.36 | Current releases at Step 1 | Upgrade deliberately, one step at a time |
 
 ---
 

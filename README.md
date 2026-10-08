@@ -4,8 +4,8 @@ An original, open-source, pattern-based digital audio workstation written in Rus
 Windows 10/11 and Ubuntu 22.04+ from a single codebase. Channel rack, piano roll, mixer and
 playlist, with built-in instruments and effects, wrapped in a dark, moody "Gloom" interface.
 
-> **Status:** design stage. No code yet. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design
-> and [ROADMAP.md](ROADMAP.md) for the plan and progress.
+> **Status:** early development. Step 1 of the [roadmap](ROADMAP.md) plays a test tone through
+> your audio device. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 
 ## Goals
 
@@ -15,11 +15,49 @@ playlist, with built-in instruments and effects, wrapped in a dark, moody "Gloom
 - Built-in instruments (sampler, Gloom Synth) and effects; CLAP plugin hosting later.
 - All code, UI, sounds and presets original or CC0.
 
-## Building
+## Building and running
 
-Build instructions arrive with the first code milestone (Step 1 in the roadmap). You will need a
-stable Rust toolchain; on Ubuntu also `libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev
-pkg-config`.
+You need a stable Rust toolchain from [rustup.rs](https://rustup.rs) (the repository pins
+`stable` with rustfmt and clippy in `rust-toolchain.toml`).
+
+### Ubuntu 22.04+
+
+```sh
+sudo apt install build-essential pkg-config libasound2-dev libudev-dev \
+                 libxkbcommon-dev libwayland-dev libxkbcommon-x11-0
+cargo run --release -p gt-app
+```
+
+Audio goes through ALSA, which reaches PipeWire or PulseAudio through their ALSA plugins on a
+standard desktop. Optional backends: `--features jack` (needs `libjack-jackd2-dev`) or
+`--features pipewire` (needs `libpipewire-0.3-dev`), then select with `GT_AUDIO_HOST=jack`.
+
+### Windows 10/11
+
+Install Rust with the MSVC toolchain (rustup offers the Visual Studio Build Tools), then:
+
+```powershell
+cargo run --release -p gt-app
+```
+
+Audio goes through WASAPI (shared mode). ASIO is an optional feature (`--features asio`) that
+needs the Steinberg ASIO SDK, which is not shipped with this project.
+
+### Checks
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+### Environment variables
+
+| Variable | Effect |
+|---|---|
+| `GT_RENDERER=glow` | Use OpenGL instead of wgpu (wgpu falls back to OpenGL automatically if it cannot start). |
+| `GT_AUDIO_HOST=<name>` | Pick a compiled-in audio host, e.g. `jack`, `pipewire`, `asio`. |
+| `RUST_LOG=debug` | More log output on the console. |
 
 ## License
 

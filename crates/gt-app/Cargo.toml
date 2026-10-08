@@ -1,0 +1,31 @@
+[package]
+name = "gt-app"
+description = "GloomTunes Studio: the desktop application."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "gloomtunes"
+path = "src/main.rs"
+
+[dependencies]
+gt-engine.workspace = true
+gt-ui.workspace = true
+cpal.workspace = true
+eframe.workspace = true
+egui.workspace = true
+log.workspace = true
+env_logger.workspace = true
+
+[features]
+# Optional audio backends. Each needs extra system libraries; see README.md.
+asio = ["cpal/asio"]          # Windows: needs the Steinberg ASIO SDK (not shipped)
+jack = ["cpal/jack"]          # Linux: needs libjack-jackd2-dev
+pipewire = ["cpal/pipewire"]  # Linux: needs libpipewire-0.3-dev

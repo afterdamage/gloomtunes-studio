@@ -1,0 +1,18 @@
+[package]
+name = "gt-engine"
+description = "GloomTunes Studio: real-time audio engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gt-dsp.workspace = true
+
+[dev-dependencies]
+assert_no_alloc.workspace = true
