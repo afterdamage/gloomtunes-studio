@@ -19,9 +19,9 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 5 | Gloom Synth | Done (2026-10-08) |
 | 6 | Mixer and effects | Done (2026-10-08) |
 | 7 | Playlist / arrangement | Done (2026-10-08) |
-| 8 | Automation and parameter system | **In review** |
-| 9 | Save/load, export, recovery | Next |
-| 10 | MIDI input and recording | Planned |
+| 8 | Automation and parameter system | Done (2026-10-08) |
+| 9 | Save/load, export, recovery | **In review** |
+| 10 | MIDI input and recording | Next |
 | 11 | CLAP plugin hosting | Planned (can move after v1.0) |
 | 12 | Performance, polish, packaging | Planned |
 
@@ -217,6 +217,31 @@ for schedule; Phase E is the riskiest technically.
 - Golden-file test: reference project export matches a stored hash per platform.
 - **Milestone: v0.1 alpha**, the first build worth giving to someone else.
 - Cut if late: per-track stems, normalization.
+- Delivered (2026-10-08): everything above, nothing cut; the milestone is reached. **File**
+  menu: New (Ctrl+N), Open (Ctrl+O), Save (Ctrl+S), Save as (Ctrl+Shift+S, with "Embed
+  samples") and Export audio (Ctrl+Shift+E); a project path on the command line opens it. A
+  `.gloom` file is a zip holding `project.json` (format tag, schema version, app version, the
+  project with every parameter, effect, curve and LFO stored by text key) and, when embedding,
+  the original audio files under `samples/` (D57, D58, D60). Loading looks for each sample at
+  its relative path, then its old absolute path, then the embedded copy (D59); anything still
+  missing opens **Missing samples**, which searches a folder and its subfolders by file name or
+  locates files one by one. Older schema versions upgrade through a migration chain; newer
+  ones are refused with a clear message (D61). Damaged values are repaired on load and listed.
+  Every 60 s with unsaved edits the app writes `recovery/autosave.gloom`; after a crash the
+  next start offers **Recover** (D64). The title shows `*` for unsaved edits, and closing,
+  New or Open with unsaved edits asks first (D65). Undo history lives only within a session.
+  **Export audio** renders offline in the background with a progress bar and Cancel: WAV
+  16-bit, 24-bit or 32-bit float; 44.1, 48, 88.2 or 96 kHz; TPDF dither for 16/24-bit;
+  normalize to a peak (one gain for all files of an export); whole song or loop region; tail
+  rendered until it falls silent (capped); optional one file per track (stems) (D62, D63). The
+  golden test exports bars 3 to 4 of a stored reference project and compares the file hash.
+  Known limits: one recovery slot shared by all running instances; autosave never embeds
+  samples; undoing back to the saved state still shows `*`; a loop-region export does not
+  pick up notes or audio clips that started before the region; the golden hash is per OS
+  (floating-point maths differs in the last bit between math libraries); on Linux the Browse…
+  buttons need the desktop file-chooser portal (typing a path always works); a stem is a track
+  played alone through the full mixer, so shared reverb or sidechain ducking from other tracks
+  is not in it.
 
 ### Step 10: MIDI input and recording (2 to 4 weeks)
 - midir input with polled hot-plug, MIDI learn, live recording with count-in, latency setting,

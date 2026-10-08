@@ -1,13 +1,14 @@
 //! Editing, loading and saving of GloomTunes Studio projects.
 //!
 //! Step 3 added the sample loader; Step 4 undo/redo ([`History`]) and note operations; Step 5
-//! Gloom Synth preset files ([`presets`]).
-//! Project persistence arrives in Step 9 (ARCHITECTURE.md §2.4).
+//! Gloom Synth preset files ([`presets`]); Step 9 the project file ([`file`], [`migrate`]).
 
 #![forbid(unsafe_code)]
 
+pub mod file;
 pub mod history;
 pub mod loader;
+pub mod migrate;
 pub mod ops;
 pub mod presets;
 

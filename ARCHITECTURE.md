@@ -1,6 +1,6 @@
 # GloomTunes Studio: Architecture
 
-Status: **design baseline (Prompt 0); Steps 1 and 2 implemented** (workspace, device panel, CI, command queue, transport, scheduler, metronome). This document is the contract that
+Status: **design baseline (Prompt 0); Steps 1 to 9 implemented** (see ROADMAP.md for what each delivered). This document is the contract that
 Prompts 1 to 12 implement; when an implementation step has to deviate, the step updates this file
 and adds an entry to the [decision log](#9-decision-log).
 
@@ -55,10 +55,11 @@ gloomtunes-studio/
 │   ├── gt-dsp/                # pure DSP building blocks, instruments and effects
 │   ├── gt-engine/             # graph, transport, scheduler, mixer, voices, offline render
 │   ├── gt-project/            # edits + undo/redo, save/load, migrations, validation
+│   ├── gt-export/             # offline render to WAV (song, loop region, stems), Step 9
 │   ├── gt-ui/                 # egui widgets, views, theme.rs
 │   ├── gt-plugin-host/        # CLAP hosting (Prompt 11; absent until then)
 │   └── gt-app/                # the binary: device I/O (cpal), MIDI I/O (midir), wiring
-├── tests/fixtures/            # golden projects and expected render hashes
+├── crates/gt-export/tests/fixtures/  # golden reference project (hash lives in tests/golden.rs)
 └── .github/workflows/         # CI: build, test, clippy, fmt on windows-latest + ubuntu-22.04
 ```
 
@@ -72,6 +73,8 @@ gloomtunes-studio/
 gt-project |  gt-engine ──┘
        \   |   /    \
         gt-core     gt-dsp
+
+gt-export -> gt-engine, gt-project, gt-dsp, gt-core   (used by gt-app; Step 9)
 ```
 
 - `gt-dsp` depends on **nothing** in the workspace. It knows samples and parameters, not
@@ -80,6 +83,8 @@ gt-project |  gt-engine ──┘
   **not** depend on cpal: it exposes a `process(&mut [f32])` function and the device layer in
   `gt-app` calls it. Offline export and unit tests drive the same function with no device.
 - `gt-project` depends only on `gt-core` plus serialization crates.
+- `gt-export` (Step 9) runs a private `gt-engine` offline and writes WAV files. It sits beside
+  `gt-app` so the golden test and the app share one export path (D62).
 - `gt-ui` depends on `gt-core`, `gt-project` and `gt-engine` (for the `EngineHandle` telemetry
   types). It contains no cpal or midir code.
 - `gt-app` is the only crate that touches audio/MIDI devices, the window, the filesystem
@@ -229,6 +234,13 @@ pub mod migrate { pub const CURRENT: u32; pub fn upgrade(v: serde_json::Value) -
 > `gt_project::ops` holds quantize and humanize. Validation-on-apply arrives with the mixer
 > graph (Prompt 6), where an `Edit`-style API can still sit on top of the same history.
 
+> **As built (Step 9, D57-D61):** the `io` sketch above is `gt_project::file`:
+> `save(&Project, path, SaveOptions { embed_samples }) -> SaveReport` and
+> `load(path, extract_dir) -> Loaded { project, missing, extracted, warnings, schema_version }`,
+> plus `relink`, `find_by_name` (relink search) and `sample_files`. `gt_project::migrate` holds
+> `CURRENT`, the `MIGRATIONS` chain and `upgrade`. Loading ends with `Project::sanitize`, which
+> repairs anything out of range or dangling instead of refusing the file.
+
 Undo history is per session (not saved), as Prompt 9 specifies. Edits that would create a mixer
 routing cycle are rejected in `apply`, so the engine never sees an invalid graph.
 
@@ -267,6 +279,9 @@ designed but not implemented (§10 covers licensing).
 - `sync`: after each UI frame, takes `Document::take_dirty()`, compiles what changed and sends it
   to the engine (§4.4).
 - `settings`: audio/MIDI/UI preferences in the OS config directory.
+- `files` (Step 9): the File menu's dialogs (Open, Save as, Export audio, Missing samples,
+  Recover, Unsaved changes), with native pickers from `rfd`. `app.rs` owns the document path,
+  the dirty counter, autosave, the session lock and the background export thread (D64, D65).
 - Logging (`log` + `env_logger`), never called from the audio thread.
 
 ---
@@ -705,6 +720,13 @@ project.json        # { "format": "gloomtunes-project", "schema_version": N, ...
 samples/<hash>.flac # optional embedded samples (lossless)
 ```
 
+> **As built (Step 9, D57-D61):** embedded samples are the original files, stored uncompressed
+> as `samples/<fnv-64 hex>-<file name>`, not re-encoded to FLAC (D60). `project.json` holds
+> `format`, `schema_version` (1), `app_version` and `project`. Each file sample stores
+> `path` (relative to the project file, '/'-separated), `absolute` and, when embedded,
+> `embedded`. There is no content hash in the document; relinking matches by file name.
+> Saves write `<name>.gloom.tmp` and rename it over the target.
+
 JSON (not RON) was chosen because migrations operate on a `serde_json::Value` tree before typed
 deserialization, and every tool can read it. Each schema change bumps `schema_version` and adds a
 migration function `vN -> vN+1` plus a fixture project for that version in `tests/fixtures`.
@@ -843,6 +865,17 @@ live input. Across operating systems `f32` transcendental functions (`sin`, `exp
 in the last bit, so cross-platform golden tests compare with a tolerance of -120 dBFS rather than by
 hash; the per-platform hash test (Prompt 9) catches regressions on each OS.
 
+As built (Step 9, D62, D63): `gt-export` builds a private `AudioProcessor` and sends it the same
+commands the app sends (`SetSong`, `SetMixer`, `SetModulation`, samples, Locate, Play), then
+pulls quanta from `process` on the calling thread, so export and playback share every line of
+DSP. A range export trims clips at the range end and disables the loop; the tail renders until
+0.5 s stays below -90 dBFS (at most 10 s in the app) and keeps 50 ms after that. Stems
+re-render the song once per track with the other sounding tracks muted. Dither is TPDF from a
+fixed-seed xorshift, so an export is reproducible. The golden test (`cargo test -p gt-export
+--test golden`) exports bars 3 to 4 of `crates/gt-export/tests/fixtures/reference.gloom` at
+48 kHz, 16-bit with dither, and compares an FNV-1a hash of the file to the value stored for the
+OS. The cross-OS tolerance comparison is still planned.
+
 ### 7.6 Denormals and NaN
 
 - On x86_64 the audio thread sets FTZ and DAZ in MXCSR at the start of each callback
@@ -960,6 +993,15 @@ polled), and float determinism across compilers.
 | D54 | Modulators live in a flat project list, not inside devices; any `ParamId` can be a target and several modulators on one target add up. Sources: LFO (sine, triangle, saw up/down, square, sample & hold; free 0.01-40 Hz or synced 4 bars to 1/16 triplets) and envelope follower (any strip, attack, release, gain) | Works for every parameter, including effects and mixer, with one engine path; undo covers it through the whole-document diff | Modulating a modulator's rate or depth; MIDI-note-triggered envelopes |
 | D55 | `SetModulation(Box<ModPlan>)` replaces the plan as a whole, sent by the app whenever a modulator, a target's document value or where a target lives changes; state is inherited by `ModulatorId` and the old plan returns as garbage | Same snapshot-swap pattern as songs (D4); comparing a small key each frame is cheap for at most 64 modulators | Incremental updates if plans grow large |
 | D56 | Envelope followers hear the previous quantum's post-fader peak of their strip | The mixer renders strips in one pass; reading the previous quantum avoids ordering constraints and costs 0.67 ms of lag, well inside any musical attack | Pre-fader or sidechain-input followers |
+| D57 | `project.json` is written from private DTO types, not by deriving serde on `gt-core` types; parameters, effects, curves, LFO shapes and automation targets are stored by text key (D52), unknown keys are skipped with a warning | The engine-facing types can change freely; only the DTOs are the file format. Keys survive reordering of internal enums | Derive on core types if the DTO layer becomes a burden |
+| D58 | Reading is tolerant: missing fields take defaults, bad values are clamped, dangling references dropped, and `Project::sanitize` runs last; the user sees the list of repairs | A damaged or hand-edited file still opens; nothing reaches the engine out of range | Strict mode for tests of the writer |
+| D59 | A file sample is looked up at its relative path, then its old absolute path, then its embedded copy (extracted to the data folder); anything else is "missing" and the relink dialog searches a folder by file name (case-insensitive, at most 20 000 folders) | Moving a project folder keeps working; embedding is a fallback, so a user's edited original wins | Content-hash matching (planned `SampleRef::hash`) |
+| D60 | Embedded samples are the original file bytes, stored uncompressed (`samples/<fnv hex>-<name>`), instead of FLAC as first planned | No encoder dependency, bit-exact originals (mp3 stays mp3), and the loader already decodes every format; audio barely compresses with deflate anyway | FLAC re-encoding if file size matters |
+| D61 | Schema version 1 with a migration chain on the JSON tree (`fn(&mut Value)` per version); a newer file is refused with "made by a newer version" | Old layouts never need Rust types; a test checks there is one migration per version | — |
+| D62 | Export lives in its own crate, `gt-export`, driving a private engine through the normal command API on a non-RT thread | One code path for app export and the golden test; the RT engine is untouched | Faster-than-real-time parallel stem rendering |
+| D63 | Golden test hashes the exported WAV per OS; dither noise is TPDF from xorshift64* with a fixed seed | Bit-exact regressions are caught on each CI OS; floating-point maths differs in the last bit between math libraries, so one hash for all OSes is impossible | A cross-OS tolerance comparison (§7.5) |
+| D64 | Autosave every 60 s while there are unsaved edits, to one slot `recovery/autosave.gloom` in the data folder (samples not embedded); `session.lock` is created at start and removed on a clean exit, and both together at start mean a crash, so the app offers Recover | Simple and cheap; the lock tells a crash from a normal exit | Per-instance slots; recovering more than the last autosave |
+| D65 | "Unsaved" is an edit counter (history commits, undo, redo) compared with its value at the last save, not a snapshot comparison | No document compare per frame | Compare the history position so undoing back to the save clears `*` |
 
 ---
 
@@ -977,9 +1019,10 @@ GPL-3.0-or-later. **Flagged** entries are copyleft or have special terms.
 | log, env_logger | logging | MIT OR Apache-2.0 | 1 |
 | symphonia 0.6 (`mp3` feature on) | decoding wav/flac/mp3/ogg | **MPL-2.0 (flag: file-level copyleft; compatible with GPL-3.0)**; added in Step 3 | 3 |
 | rubato 5 (+ audioadapter crates) | resampling | MIT OR Apache-2.0; added in Step 3 | 3 |
-| hound | WAV writing (Step 3: test-only dev-dependency) | Apache-2.0 | 3/9 |
+| hound | WAV writing (Step 3: test-only; Step 9: export in `gt-export`) | Apache-2.0 | 3/9 |
 | serde, serde_json | serialization; added in Step 5 for presets | MIT OR Apache-2.0 | 5/9 |
-| zip | project container | MIT | 9 |
+| zip 7 (`deflate-flate2-zlib-rs` only) | project container; added in Step 9 | MIT (zlib-rs: Zlib) | 9 |
+| rfd 0.17 | native open/save/folder dialogs (xdg portal on Linux, no GTK); added in Step 9 | MIT | 9 |
 | midir | MIDI I/O | MIT | 10 |
 | midly | SMF import/export | Unlicense | 10 |
 | criterion 0.8 (`cargo_bench_support` only, no plotters) | benchmarks (dev); added in Step 5 | MIT OR Apache-2.0 | 5 |

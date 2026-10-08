@@ -1,6 +1,6 @@
 [package]
-name = "gt-project"
-description = "GloomTunes Studio: project editing, undo/redo and persistence."
+name = "gt-export"
+description = "GloomTunes Studio: offline rendering of projects to WAV files."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,14 +11,9 @@ repository.workspace = true
 [lints]
 workspace = true
 
-
 [dependencies]
 gt-core.workspace = true
-symphonia.workspace = true
-rubato.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-zip.workspace = true
-
-[dev-dependencies]
+gt-dsp.workspace = true
+gt-engine.workspace = true
+gt-project.workspace = true
 hound.workspace = true

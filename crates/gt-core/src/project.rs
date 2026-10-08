@@ -647,6 +647,100 @@ impl Project {
         id
     }
 
+    /// The next identity the project will hand out (saved so ids are never reused).
+    pub fn id_counter(&self) -> u32 {
+        self.next_id
+    }
+
+    /// Restores the identity counter after loading. It never goes at or below an id already
+    /// in use, whatever the file says.
+    pub fn set_id_counter(&mut self, next: u32) {
+        let used = self
+            .channels
+            .iter()
+            .map(|c| c.id.0)
+            .chain(self.patterns.iter().map(|p| p.id.0))
+            .chain(self.modulators.iter().map(|m| m.id.0))
+            .max()
+            .unwrap_or(0);
+        self.next_id = next.max(used + 1);
+    }
+
+    /// Repairs a project read from a file: every value in range, no dangling references, at
+    /// least one pattern, ids unique. Everything the engine relies on holds afterwards.
+    pub fn sanitize(&mut self) {
+        let fin =
+            |v: f32, lo: f32, hi: f32, d: f32| if v.is_finite() { v.clamp(lo, hi) } else { d };
+        // Channels: unique ids, at most MAX_CHANNELS, values in range.
+        let mut seen = std::collections::BTreeSet::new();
+        self.channels.retain(|c| seen.insert(c.id));
+        self.channels.truncate(MAX_CHANNELS);
+        for c in &mut self.channels {
+            c.volume = fin(c.volume, 0.0, Channel::MAX_VOLUME, Channel::DEFAULT_VOLUME);
+            c.pan = fin(c.pan, -1.0, 1.0, 0.0);
+            if c.insert > INSERTS {
+                c.insert = MASTER;
+            }
+            match &mut c.instrument {
+                Instrument::Sampler(s) => {
+                    s.pitch = fin(s.pitch, -48.0, 48.0, 0.0);
+                    s.start = fin(s.start, 0.0, 0.999, 0.0);
+                    s.end = fin(s.end, s.start + 0.001, 1.0, 1.0);
+                    let a = &mut s.adsr;
+                    a.attack_ms = fin(a.attack_ms, 0.0, 10_000.0, 0.0);
+                    a.decay_ms = fin(a.decay_ms, 0.0, 10_000.0, 0.0);
+                    a.sustain = fin(a.sustain, 0.0, 1.0, 1.0);
+                    a.release_ms = fin(a.release_ms, 0.0, 20_000.0, 50.0);
+                }
+                Instrument::Synth(p) => p.sanitize(),
+            }
+        }
+        // Patterns: unique ids, valid lengths, notes of existing channels only, sorted.
+        let mut seen = std::collections::BTreeSet::new();
+        self.patterns.retain(|p| seen.insert(p.id));
+        let channels: std::collections::BTreeSet<ChannelId> =
+            self.channels.iter().map(|c| c.id).collect();
+        for p in &mut self.patterns {
+            if !Pattern::STEP_COUNTS.contains(&p.steps) {
+                p.steps = 16;
+            }
+            p.notes
+                .retain(|ch, v| channels.contains(ch) && !v.is_empty());
+            for v in p.notes.values_mut() {
+                for n in v.iter_mut() {
+                    n.start = n.start.max(0);
+                    n.length = n.length.max(1);
+                    n.key = n.key.min(127);
+                    n.velocity = fin(n.velocity, 0.0, 1.0, DEFAULT_VELOCITY);
+                }
+                v.sort_by_key(|n| n.start);
+            }
+        }
+        if self.patterns.is_empty() {
+            let id = self.new_pattern();
+            self.current_pattern = id;
+        }
+        if !self.patterns.iter().any(|p| p.id == self.current_pattern) {
+            self.current_pattern = self.patterns[0].id;
+        }
+        self.swing = fin(self.swing, 0.0, 1.0, 0.0);
+        self.mixer.sanitize();
+        let patterns: Vec<PatternId> = self.patterns.iter().map(|p| p.id).collect();
+        self.playlist.sanitize(|id| patterns.contains(&id));
+        // Modulators: unique ids, valid targets kept even if they no longer resolve (a deleted
+        // effect slot), at most MAX_MODULATORS.
+        let mut seen = std::collections::BTreeSet::new();
+        self.modulators.retain(|m| seen.insert(m.id));
+        self.modulators.truncate(MAX_MODULATORS);
+        for m in &mut self.modulators {
+            m.sanitize();
+        }
+        let next = self.next_id;
+        self.set_id_counter(next);
+        let next = self.playlist.id_counter();
+        self.playlist.set_id_counter(next);
+    }
+
     /// Adds a sampler channel at the bottom of the rack. `None` when the rack is full.
     pub fn add_channel(&mut self, name: &str, sample: Option<SampleSource>) -> Option<ChannelId> {
         self.add_instrument(

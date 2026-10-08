@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
-use gt_core::{BuiltInSample, Peaks, SampleData, SampleSource};
+use gt_core::{Peaks, SampleData, SampleSource};
 use gt_ui::views::{AudioLookup, BrowserEntry};
 
 /// Waveform columns kept per sample for the sampler panel.
@@ -124,20 +124,9 @@ impl AudioLookup for Library {
     }
 }
 
+/// Loads a sound the same way the export does, so playback and export use identical data.
 fn load(src: &SampleSource, rate: u32) -> Result<SampleData, String> {
-    match src {
-        SampleSource::BuiltIn(b) => {
-            let sr = rate as f32;
-            let data = match b {
-                BuiltInSample::Kick => gt_dsp::drums::kick(sr),
-                BuiltInSample::Snare => gt_dsp::drums::snare(sr),
-                BuiltInSample::Hat => gt_dsp::drums::hat(sr),
-                BuiltInSample::Clap => gt_dsp::drums::clap(sr),
-            };
-            Ok(SampleData::mono(rate, data))
-        }
-        SampleSource::File(path) => gt_project::load_sample(path, rate).map_err(|e| e.to_string()),
-    }
+    gt_export::load_source(src, rate)
 }
 
 /// Lists a folder for the browser: sub-folders, then audio files, each sorted by name.
@@ -183,17 +172,14 @@ pub fn default_folder() -> std::path::PathBuf {
     std::env::current_dir().unwrap_or_default()
 }
 
-/// Where the user's Gloom Synth presets are saved: `%APPDATA%\GloomTunes Studio\Presets\Gloom
-/// Synth` on Windows, `$XDG_DATA_HOME/gloomtunes-studio/presets/gloom-synth` (default
-/// `~/.local/share/...`) elsewhere.
-pub fn synth_preset_folder() -> std::path::PathBuf {
+/// Where the program keeps its own files (presets, autosave, extracted samples):
+/// `%APPDATA%\GloomTunes Studio` on Windows, `$XDG_DATA_HOME/gloomtunes-studio` (default
+/// `~/.local/share/gloomtunes-studio`) elsewhere.
+pub fn data_folder() -> std::path::PathBuf {
     use std::path::PathBuf;
     if cfg!(windows) {
         if let Some(appdata) = std::env::var_os("APPDATA") {
-            return PathBuf::from(appdata)
-                .join("GloomTunes Studio")
-                .join("Presets")
-                .join("Gloom Synth");
+            return PathBuf::from(appdata).join("GloomTunes Studio");
         }
     }
     let data = std::env::var_os("XDG_DATA_HOME")
@@ -206,8 +192,16 @@ pub fn synth_preset_folder() -> std::path::PathBuf {
         })
         .unwrap_or_default();
     data.join("gloomtunes-studio")
-        .join("presets")
-        .join("gloom-synth")
+}
+
+/// Where the user's Gloom Synth presets are saved: `Presets\Gloom Synth` (Windows) or
+/// `presets/gloom-synth` inside [`data_folder`].
+pub fn synth_preset_folder() -> std::path::PathBuf {
+    if cfg!(windows) && std::env::var_os("APPDATA").is_some() {
+        data_folder().join("Presets").join("Gloom Synth")
+    } else {
+        data_folder().join("presets").join("gloom-synth")
+    }
 }
 
 #[cfg(test)]
@@ -217,7 +211,7 @@ mod tests {
     #[test]
     fn built_ins_load_at_the_requested_rate() {
         let mut lib = Library::new();
-        let src = SampleSource::BuiltIn(BuiltInSample::Snare);
+        let src = SampleSource::BuiltIn(gt_core::BuiltInSample::Snare);
         lib.request(&src, 44_100);
         lib.request(&src, 44_100); // deduplicated
         let mut ready = Vec::new();
