@@ -206,6 +206,28 @@ fn channel_row(
         ch.pan = pan;
         actions.push(RackAction::ParamsChanged);
     }
+    // Mixer insert the channel plays into ("M" for the master).
+    let mut insert = ch.insert;
+    if ui
+        .add_sized(
+            vec2(24.0, 18.0),
+            egui::DragValue::new(&mut insert)
+                .range(0..=gt_core::INSERTS)
+                .speed(0.1)
+                .custom_formatter(|v, _| {
+                    if v < 0.5 {
+                        "M".to_owned()
+                    } else {
+                        format!("{v:.0}")
+                    }
+                }),
+        )
+        .on_hover_text("Mixer insert (drag or type; M = master)")
+        .changed()
+    {
+        ch.insert = insert;
+        actions.push(RackAction::ParamsChanged);
+    }
 
     // Name: click selects, hold to audition, right-click for the menu.
     let text_colour = if row.silenced {

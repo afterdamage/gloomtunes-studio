@@ -16,9 +16,9 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 2 | Engine core and transport | Done (2026-10-08) |
 | 3 | Sampler + channel rack | Done (2026-10-08) |
 | 4 | Piano roll | Done (2026-10-08) |
-| 5 | Gloom Synth | **In review** |
-| 6 | Mixer and effects | Next |
-| 7 | Playlist / arrangement | Planned |
+| 5 | Gloom Synth | Done (2026-10-08) |
+| 6 | Mixer and effects | **In review** |
+| 7 | Playlist / arrangement | Next |
 | 8 | Automation and parameter system | Planned |
 | 9 | Save/load, export, recovery | Planned |
 | 10 | MIDI input and recording | Planned |
@@ -133,6 +133,23 @@ for schedule; Phase E is the riskiest technically.
 - PDC groundwork in the graph.
 - **You should hear** a mixed loop with reverb tails that survive adding new channels.
 - Cut if late: chorus and width (ship later in 0.x), sidechain UI (keep engine support).
+- Delivered (2026-10-08): everything above, nothing cut. A **Mixer** view (F9) shows the master,
+  64 inserts and 4 send buses, each with fader, balance, mute, solo, polarity, peak and RMS
+  meters, an output, four send levels (inserts), a sidechain source and 10 effect slots with
+  bypass. Channels pick their insert in the rack. Routing that would loop is never offered
+  (D38). Effects: 8-band EQ with a draggable curve, compressor with sidechain and gain-reduction
+  readout, tempo-synced ping-pong delay, 8-line FDN reverb, chorus, distortion with
+  anti-derivative anti-aliasing, look-ahead limiter and stereo width (D40, D41). Delay
+  compensation is implemented, not just designed: every routing edge gets a compensating delay
+  (D42). Effects keep their state across mixer, channel and undo changes, so tails ring on
+  (D39). The demo routes each channel to its own insert, sends snare and clap to a reverb and
+  the hat to a delay, ducks the bass with the kick and limits the master. Measured (release,
+  this container, 1 s of stereo at 48 kHz): EQ with 8 active bands 2.2 ms, compressor 1.4 ms,
+  delay 0.9 ms, reverb 3.7 ms, chorus 1.6 ms, distortion 2.5 ms, limiter 0.6 ms, width 0.2 ms.
+  Known limits: sends are post-fader only; the sidechain key is not delay-compensated; an
+  effect with latency (the limiter) switches bypass without a crossfade; EQ band type changes
+  are instant; the master meter shows the strip, not the device output; mixer parameters are
+  not automatable yet (Step 8); nothing is saved yet (Step 9).
 
 ### Step 7: Playlist / arrangement (5 to 8 weeks)
 - Unlimited tracks; pattern, audio and automation clips; move/resize/split/duplicate/slip-edit;

@@ -11,7 +11,6 @@ use std::path::PathBuf;
 use egui::{pos2, vec2, Pos2, RichText, Sense, Shape, Stroke, Ui};
 use gt_core::synth::{ModDest, ModSource, SynthParam as P, SynthPatch};
 
-use crate::widgets::labeled_knob;
 use crate::GloomTheme;
 
 /// What the panel shows besides the patch.
@@ -238,29 +237,12 @@ fn knob_rows(ui: &mut Ui, theme: &GloomTheme, patch: &mut SynthPatch, rows: &[&[
 }
 
 fn param_knob(ui: &mut Ui, theme: &GloomTheme, patch: &mut SynthPatch, p: P) -> bool {
-    let info = p.info();
-    let id = ui.id().with(("synth_knob", p as usize));
-    let stored: Option<f32> = ui.data(|d| d.get_temp(id));
-    let mut t = stored.unwrap_or_else(|| info.to_normalized(patch.get(p)));
-    let before = patch.get(p);
-    let resp = labeled_knob(
-        ui,
-        theme,
-        info.name,
-        &mut t,
-        0.0..=1.0,
-        info.to_normalized(info.default),
-        |t| format!("{}: {}", info.name, info.format(info.from_normalized(t))),
-    );
-    if resp.dragged() {
-        ui.data_mut(|d| d.insert_temp(id, t));
-    } else if stored.is_some() {
-        ui.data_mut(|d| d.remove::<f32>(id));
+    let mut v = patch.get(p);
+    let changed = crate::widgets::param_knob(ui, theme, ("synth", p as usize), p.info(), &mut v);
+    if changed {
+        patch.set(p, v);
     }
-    if resp.changed() {
-        patch.set(p, info.from_normalized(t));
-    }
-    patch.get(p) != before
+    changed
 }
 
 fn mod_matrix(ui: &mut Ui, theme: &GloomTheme, patch: &mut SynthPatch) -> bool {

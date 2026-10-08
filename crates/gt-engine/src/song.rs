@@ -135,6 +135,8 @@ pub struct ChannelParams {
     pub looped: bool,
     /// Envelope.
     pub adsr: Adsr,
+    /// Mixer strip the channel plays into.
+    pub route: u8,
 }
 
 impl Default for ChannelParams {
@@ -149,6 +151,7 @@ impl Default for ChannelParams {
             end: 1.0,
             looped: false,
             adsr: Adsr::default(),
+            route: 0,
         }
     }
 }
@@ -164,6 +167,7 @@ impl ChannelParams {
                 ch.volume.clamp(0.0, Channel::MAX_VOLUME)
             },
             pan: ch.pan.clamp(-1.0, 1.0),
+            route: ch.insert.min(gt_core::STRIPS - 1) as u8,
             ..Self::default()
         };
         match &ch.instrument {

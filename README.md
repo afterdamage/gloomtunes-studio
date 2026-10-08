@@ -4,8 +4,9 @@ An original, open-source, pattern-based digital audio workstation written in Rus
 Windows 10/11 and Ubuntu 22.04+ from a single codebase. Channel rack, piano roll, mixer and
 playlist, with built-in instruments and effects, wrapped in a dark, moody "Gloom" interface.
 
-> **Status:** early development. Step 5 of the [roadmap](ROADMAP.md): Gloom Synth, a
-> subtractive polysynth with presets, on top of a piano roll with undo/redo, a channel rack with
+> **Status:** early development. Step 6 of the [roadmap](ROADMAP.md): a mixer with 64 inserts,
+> 4 send buses and eight built-in effects (EQ, compressor, delay, reverb, chorus, distortion,
+> limiter, stereo width), on top of Gloom Synth, a subtractive polysynth with presets, a piano roll with undo/redo, a channel rack with
 > a step sequencer, patterns, a sampler with ADSR, a sample browser, four built-in drums and a
 > sample-accurate transport. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 
@@ -78,8 +79,22 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
     arrows (move by the snap or a semitone), Shift+Up/Down (an octave), Q (quantize).
   - The toolbar sets snap (1/4 to 1/32, triplets), scale highlighting, ghost notes from the other
     channels, quantize strength and humanize amounts.
+- **Mixer** (tab or **F9**) shows the master, 64 inserts and 4 send buses. Each channel in the
+  rack has an insert box (M is the master); new channels get a free insert named after them.
+  - Each strip has a fader (double-click resets to 0 dB), balance, mute, solo, polarity (Ø) and
+    peak/RMS meters. Click a strip to edit it on the right.
+  - The detail panel sets where the strip goes (master, an insert or a send bus), the sidechain
+    source and, on inserts, four post-fader send levels. Routes that would make a loop are not
+    offered.
+  - Ten effect slots per strip: pick an effect in a slot's menu, switch it On/Off, click it to
+    edit. The EQ shows its curve: drag a handle to move a band; the knobs below set type, gain and Q. Compressors
+    show gain reduction. Set a compressor's Sidechain knob to 1 to key it from the strip's
+    sidechain source.
+  - The demo mix sends snare and clap to a reverb bus and the hat to a delay bus, ducks the bass
+    with the kick and has a limiter on the master. Latency added by the limiter is compensated on
+    every path and shown on the master strip.
 - **Undo** and **Redo** (top right, Ctrl+Z and Ctrl+Shift+Z or Ctrl+Y) cover notes, steps,
-  channels, patterns and settings.
+  channels, patterns, the mixer and settings.
 
 ### Checks
 
@@ -89,8 +104,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 # Piano roll frame time with 10,000 notes (prints the median):
 cargo test --release -p gt-ui -- --ignored --nocapture
-# Gloom Synth benchmarks (1 s of audio per iteration):
+# Gloom Synth and effect benchmarks (1 s of audio per iteration):
 cargo bench -p gt-dsp
+cargo bench -p gt-dsp --bench fx
 # After an intended change to the synth's sound, review the rendered snapshot
 # (cargo install cargo-insta) or accept it directly:
 cargo insta review          # or: INSTA_UPDATE=always cargo test -p gt-dsp --test synth_snapshot

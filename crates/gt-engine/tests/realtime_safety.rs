@@ -7,8 +7,11 @@
 use assert_no_alloc::{assert_no_alloc, AllocDisabler};
 use std::sync::Arc;
 
-use gt_core::{Project, SampleData, TempoMap, Tick, TimeSig, MAX_CHANNELS};
-use gt_engine::{create, ChannelParams, EngineCommand, EngineConfig, LoopRegion, SongSnapshot};
+use gt_core::{EffectKind, EffectSlot, Project, SampleData, TempoMap, Tick, TimeSig, MAX_CHANNELS};
+use gt_engine::{
+    create, create_effect, ChannelParams, EngineCommand, EngineConfig, LoopRegion, MixerParams,
+    SongSnapshot,
+};
 
 #[global_allocator]
 static ALLOCATOR: AllocDisabler = AllocDisabler;
@@ -115,6 +118,63 @@ fn process_does_not_allocate() {
         .unwrap();
         run(&mut p, 100);
         h.collect_garbage();
+
+        // The demo mix (sends, sidechain, limiter) plus every effect kind on insert 10, then
+        // parameter sweeps and bypass toggles while playing.
+        let mut mix = Project::demo().mixer;
+        for (k, kind) in EffectKind::ALL.into_iter().enumerate() {
+            mix.strips[10].slots[k] = Some(EffectSlot::new(kind));
+        }
+        mix.strips[10].sidechain = Some(1);
+        for (si, strip) in mix.strips.iter().enumerate() {
+            for (k, slot) in strip.slots.iter().enumerate() {
+                if let Some(slot) = slot {
+                    h.send(EngineCommand::SetEffect {
+                        strip: si as u8,
+                        slot: k as u8,
+                        effect: Some(create_effect(slot, sr as f32)),
+                    })
+                    .unwrap();
+                }
+            }
+        }
+        h.send(EngineCommand::SetMixer(Box::new(MixerParams::from_mixer(
+            &mix,
+        ))))
+        .unwrap();
+        for slot in 0..MAX_CHANNELS as u16 {
+            h.send(EngineCommand::SetChannelParams {
+                slot,
+                params: Box::new(ChannelParams {
+                    gain: 0.5,
+                    route: (slot % 12) as u8,
+                    ..ChannelParams::default()
+                }),
+            })
+            .unwrap();
+        }
+        run(&mut p, 100);
+        h.collect_garbage();
+        for step in 0..20 {
+            for k in 0..8_u8 {
+                h.send(EngineCommand::SetEffectParam {
+                    strip: 10,
+                    slot: k,
+                    index: step % 6,
+                    value: step as f32 * 3.7 - 20.0,
+                })
+                .unwrap();
+            }
+            if let Some(s) = mix.strips[10].slots[step as usize % 8].as_mut() {
+                s.enabled = !s.enabled;
+            }
+            h.send(EngineCommand::SetMixer(Box::new(MixerParams::from_mixer(
+                &mix,
+            ))))
+            .unwrap();
+            run(&mut p, 10);
+            h.collect_garbage();
+        }
 
         h.send(EngineCommand::Pause).unwrap();
         h.send(EngineCommand::Locate(Tick(12_345))).unwrap();

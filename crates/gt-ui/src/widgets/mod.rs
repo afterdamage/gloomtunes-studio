@@ -1,12 +1,15 @@
 //! Reusable custom-painted widgets.
 
+mod fader;
 mod knob;
 mod meter;
 
+pub use fader::{fader, fader_gain, fader_position, stereo_meter};
 pub use knob::knob;
 pub use meter::{level_meter, MeterBallistics};
 
 use egui::{RichText, Ui};
+use gt_core::ParamInfo;
 
 use crate::GloomTheme;
 
@@ -31,6 +34,42 @@ pub fn labeled_knob(
         },
     )
     .inner
+}
+
+/// A labelled knob for a described parameter, with the knob's travel following the
+/// parameter's taper. `id_salt` must be unique among the knobs drawn in the same `Ui`.
+/// Returns true if the value changed.
+pub fn param_knob(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    info: &ParamInfo,
+    value: &mut f32,
+) -> bool {
+    // Stepped parameters round their value, so while dragging keep the unrounded knob position
+    // or small drags would never move it.
+    let id = ui.id().with(("param_knob", id_salt));
+    let stored: Option<f32> = ui.data(|d| d.get_temp(id));
+    let mut t = stored.unwrap_or_else(|| info.to_normalized(*value));
+    let before = *value;
+    let resp = labeled_knob(
+        ui,
+        theme,
+        info.name,
+        &mut t,
+        0.0..=1.0,
+        info.to_normalized(info.default),
+        |t| format!("{}: {}", info.name, info.format(info.from_normalized(t))),
+    );
+    if resp.dragged() {
+        ui.data_mut(|d| d.insert_temp(id, t));
+    } else if stored.is_some() {
+        ui.data_mut(|d| d.remove::<f32>(id));
+    }
+    if resp.changed() {
+        *value = info.from_normalized(t);
+    }
+    *value != before
 }
 
 /// Formats a linear gain as dB for hover text.

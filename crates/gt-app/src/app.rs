@@ -5,15 +5,20 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use gt_core::{
-    Instrument, Project, SampleSource, TempoMap, Tick, MAX_CHANNELS, ROOT_KEY, STEP_TICKS,
+    EffectKind, Instrument, Project, SampleSource, TempoMap, Tick, FX_SLOTS, MAX_CHANNELS,
+    ROOT_KEY, STEP_TICKS, STRIPS,
 };
-use gt_engine::{ChannelParams, EngineCommand, LoopRegion, SongSnapshot, TransportState};
+use gt_engine::{
+    create_effect, ChannelParams, EngineCommand, LoopRegion, MixerParams, SongSnapshot,
+    TransportState,
+};
 use gt_project::{ops, presets, History};
 use gt_ui::views::{
-    audio_panel, browser, channel_rack, piano_roll, sampler_panel, synth_panel, transport_bar,
-    AudioAction, AudioPanelModel, BrowserAction, BrowserModel, PianoRollAction, PianoRollState,
-    PianoRollView, PlayState, RackAction, RackState, RackView, SamplerPanelView, SynthPanelAction,
-    SynthPanelView, TransportAction, TransportModel,
+    audio_panel, browser, channel_rack, mixer_view, piano_roll, sampler_panel, synth_panel,
+    transport_bar, AudioAction, AudioPanelModel, BrowserAction, BrowserModel, MixerState,
+    MixerView, PianoRollAction, PianoRollState, PianoRollView, PlayState, RackAction, RackState,
+    RackView, SamplerPanelView, StripMeter, SynthPanelAction, SynthPanelView, TransportAction,
+    TransportModel,
 };
 use gt_ui::widgets::MeterBallistics;
 use gt_ui::GloomTheme;
@@ -31,6 +36,14 @@ const ACTIVITY_FALL_PER_S: f32 = 4.0;
 enum MainView {
     Rack,
     PianoRoll,
+    Mixer,
+}
+
+/// What the engine last received for one effect slot, so only differences are sent.
+#[derive(Debug, Clone, PartialEq)]
+struct SentEffect {
+    kind: EffectKind,
+    params: Vec<f32>,
 }
 
 pub struct GloomApp {
@@ -65,6 +78,14 @@ pub struct GloomApp {
     preset_dir: std::path::PathBuf,
     user_presets: Vec<(String, std::path::PathBuf)>,
     preset_status: Option<String>,
+
+    mixer_state: MixerState,
+    /// Mixer settings and effects as last sent to the engine (none: send everything).
+    sent_mixer: Option<MixerParams>,
+    sent_fx: Vec<[Option<SentEffect>; FX_SLOTS]>,
+    strip_meters: Vec<[MeterBallistics; 2]>,
+    strip_view: Vec<StripMeter>,
+    fx_meters: Vec<[f32; FX_SLOTS]>,
 }
 
 impl GloomApp {
@@ -97,6 +118,12 @@ impl GloomApp {
             preset_dir: synth_preset_folder(),
             user_presets: Vec::new(),
             preset_status: None,
+            mixer_state: MixerState::default(),
+            sent_mixer: None,
+            sent_fx: vec![Default::default(); STRIPS],
+            strip_meters: vec![Default::default(); STRIPS],
+            strip_view: vec![StripMeter::default(); STRIPS],
+            fx_meters: vec![[0.0; FX_SLOTS]; STRIPS],
         };
         app.refresh_presets();
         app.open_folder(default_folder());
@@ -434,9 +461,111 @@ impl GloomApp {
     /// Sends a command to the engine if audio is running. Settings live in `self.transport`,
     /// so a command lost while audio is down is re-sent when a new engine starts.
     fn send(&mut self, cmd: EngineCommand) {
-        if let Some(engine) = self.audio.engine_mut() {
-            if let Err(cmd) = engine.send(cmd) {
+        self.try_send(cmd);
+    }
+
+    /// Like `send`, but reports whether the engine got the command.
+    fn try_send(&mut self, cmd: EngineCommand) -> bool {
+        let Some(engine) = self.audio.engine_mut() else {
+            return false;
+        };
+        match engine.send(cmd) {
+            Ok(()) => true,
+            Err(cmd) => {
                 log::warn!("engine command queue full; dropped {cmd:?}");
+                false
+            }
+        }
+    }
+
+    /// Brings the engine's mixer in line with the document: the strip settings when they
+    /// changed, a new effect where a slot's kind changed, and single parameters otherwise.
+    /// Runs every frame, so edits, undo and loading all take the same path. Effects that stay
+    /// in place keep their state (reverb tails ring on).
+    fn sync_mixer(&mut self) {
+        if self.audio.engine().is_none() {
+            return;
+        }
+        let params = MixerParams::from_mixer(&self.project.mixer);
+        if self.sent_mixer.as_ref() != Some(&params)
+            && self.try_send(EngineCommand::SetMixer(Box::new(params.clone())))
+        {
+            self.sent_mixer = Some(params);
+        }
+        let rate = self.rate() as f32;
+        for strip in 0..STRIPS {
+            for k in 0..FX_SLOTS {
+                let want = self.project.mixer.strips[strip].slots[k].clone();
+                let have = self.sent_fx[strip][k].clone();
+                match (want, have) {
+                    (None, None) => {}
+                    (None, Some(_)) => {
+                        if self.try_send(EngineCommand::SetEffect {
+                            strip: strip as u8,
+                            slot: k as u8,
+                            effect: None,
+                        }) {
+                            self.sent_fx[strip][k] = None;
+                        }
+                    }
+                    (Some(w), Some(h)) if w.kind == h.kind => {
+                        for (i, (&a, &b)) in w.params.iter().zip(&h.params).enumerate() {
+                            if a != b
+                                && self.try_send(EngineCommand::SetEffectParam {
+                                    strip: strip as u8,
+                                    slot: k as u8,
+                                    index: i as u8,
+                                    value: a,
+                                })
+                            {
+                                if let Some(s) = self.sent_fx[strip][k].as_mut() {
+                                    s.params[i] = a;
+                                }
+                            }
+                        }
+                    }
+                    (Some(w), _) => {
+                        let effect = create_effect(&w, rate);
+                        if self.try_send(EngineCommand::SetEffect {
+                            strip: strip as u8,
+                            slot: k as u8,
+                            effect: Some(effect),
+                        }) {
+                            self.sent_fx[strip][k] = Some(SentEffect {
+                                kind: w.kind,
+                                params: w.params,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reads the strip and effect meters from the engine and applies peak ballistics.
+    fn read_meters(&mut self, dt: f32) {
+        let Some(engine) = self.audio.engine() else {
+            self.strip_view.fill(StripMeter::default());
+            return;
+        };
+        let t = engine.telemetry();
+        let db = |x: f32| {
+            if x > 1e-6 {
+                (20.0 * x.log10()).max(-60.0)
+            } else {
+                -60.0
+            }
+        };
+        for i in 0..STRIPS {
+            let cell = &t.meters[i];
+            for side in 0..2 {
+                let peak = cell.peak[side].swap(0.0, Ordering::Relaxed);
+                self.strip_meters[i][side].update(peak, dt);
+                self.strip_view[i].peak_db[side] = self.strip_meters[i][side].level_db();
+                self.strip_view[i].rms_db[side] = db(cell.rms[side].load(Ordering::Relaxed));
+            }
+            for k in 0..FX_SLOTS {
+                self.fx_meters[i][k] = t.fx_meters[i][k].load(Ordering::Relaxed);
             }
         }
     }
@@ -454,6 +583,9 @@ impl GloomApp {
         self.slots_in_use = 0; // a new engine starts with empty slots
         self.push_channels();
         self.send(EngineCommand::SetScopeChannel(self.scope_slot));
+        // A new engine has an empty mixer.
+        self.sent_mixer = None;
+        self.sent_fx = vec![Default::default(); STRIPS];
     }
 
     /// Draws the piano roll for the selected channel of the current pattern.
@@ -601,6 +733,9 @@ impl eframe::App for GloomApp {
             if key(Modifiers::NONE, Key::F7) {
                 self.main_view = MainView::PianoRoll;
             }
+            if key(Modifiers::NONE, Key::F9) {
+                self.main_view = MainView::Mixer;
+            }
         }
 
         let theme = self.theme.clone();
@@ -707,36 +842,41 @@ impl eframe::App for GloomApp {
             }
         }
         let sample_rate = self.rate() as f32;
-        let (sampler_changed, synth_actions) = egui::Panel::bottom("instrument")
-            .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(8))
-            .show(ui, |ui| {
-                let Some(ch) = self.project.channels.get_mut(self.rack.selected) else {
-                    ui.label(egui::RichText::new("No channel selected").color(theme.text_dim));
-                    return (false, Vec::new());
-                };
-                match &mut ch.instrument {
-                    Instrument::Sampler(s) => {
-                        let loaded = s.sample.as_ref().and_then(|x| self.library.get(x));
-                        let status = s.sample.as_ref().and_then(|x| self.library.status(x));
-                        let view = SamplerPanelView {
-                            waveform: loaded.map(|l| l.overview.as_slice()),
-                            seconds: loaded.map(|l| l.data.seconds()),
-                            status: status.as_deref(),
-                        };
-                        (sampler_panel(ui, &theme, &mut ch.name, s, view), Vec::new())
+        let show_instrument = self.main_view != MainView::Mixer;
+        let (sampler_changed, synth_actions) = if !show_instrument {
+            (false, Vec::new())
+        } else {
+            egui::Panel::bottom("instrument")
+                .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(8))
+                .show(ui, |ui| {
+                    let Some(ch) = self.project.channels.get_mut(self.rack.selected) else {
+                        ui.label(egui::RichText::new("No channel selected").color(theme.text_dim));
+                        return (false, Vec::new());
+                    };
+                    match &mut ch.instrument {
+                        Instrument::Sampler(s) => {
+                            let loaded = s.sample.as_ref().and_then(|x| self.library.get(x));
+                            let status = s.sample.as_ref().and_then(|x| self.library.status(x));
+                            let view = SamplerPanelView {
+                                waveform: loaded.map(|l| l.overview.as_slice()),
+                                seconds: loaded.map(|l| l.data.seconds()),
+                                status: status.as_deref(),
+                            };
+                            (sampler_panel(ui, &theme, &mut ch.name, s, view), Vec::new())
+                        }
+                        Instrument::Synth(patch) => {
+                            let view = SynthPanelView {
+                                scope: &self.scope,
+                                user_presets: &self.user_presets,
+                                sample_rate,
+                                status: self.preset_status.as_deref(),
+                            };
+                            (false, synth_panel(ui, &theme, &mut ch.name, patch, view))
+                        }
                     }
-                    Instrument::Synth(patch) => {
-                        let view = SynthPanelView {
-                            scope: &self.scope,
-                            user_presets: &self.user_presets,
-                            sample_rate,
-                            status: self.preset_status.as_deref(),
-                        };
-                        (false, synth_panel(ui, &theme, &mut ch.name, patch, view))
-                    }
-                }
-            })
-            .inner;
+                })
+                .inner
+        };
         if sampler_changed {
             self.push_all_params();
             self.pending_edit = Some("Sampler settings");
@@ -750,6 +890,10 @@ impl eframe::App for GloomApp {
             let len = self.project.current_pattern().length_ticks().max(1);
             self.transport.position.0.rem_euclid(len)
         });
+        if self.main_view == MainView::Mixer {
+            self.read_meters(dt);
+        }
+        let mut mixer_changed = false;
         let (rack_actions, roll_actions) = egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(ui.style()).inner_margin(10))
             .show(ui, |ui| {
@@ -761,6 +905,7 @@ impl eframe::App for GloomApp {
                             "Piano roll",
                             "Notes of the selected channel (F7)",
                         ),
+                        (MainView::Mixer, "Mixer", "Inserts, sends and effects (F9)"),
                     ] {
                         if ui
                             .add(egui::Button::selectable(self.main_view == v, label))
@@ -787,6 +932,28 @@ impl eframe::App for GloomApp {
                         (a, Vec::new())
                     }
                     MainView::PianoRoll => (Vec::new(), self.show_roll(ui, &theme, pattern_pos)),
+                    MainView::Mixer => {
+                        let latency = self
+                            .audio
+                            .engine()
+                            .map_or(0, |e| e.telemetry().latency_frames.load(Ordering::Relaxed));
+                        let view = MixerView {
+                            meters: &self.strip_view,
+                            fx_meters: &self.fx_meters,
+                            sample_rate,
+                            latency_ms: latency as f32 * 1000.0 / sample_rate,
+                        };
+                        if mixer_view(
+                            ui,
+                            &theme,
+                            &mut self.project.mixer,
+                            &mut self.mixer_state,
+                            view,
+                        ) {
+                            mixer_changed = true;
+                        }
+                        (Vec::new(), Vec::new())
+                    }
                 }
             })
             .inner;
@@ -796,6 +963,10 @@ impl eframe::App for GloomApp {
         for a in roll_actions {
             self.on_roll(a);
         }
+        if mixer_changed {
+            self.pending_edit = Some("Mixer");
+        }
+        self.sync_mixer();
         if self.main_view != MainView::PianoRoll {
             // Hidden mid-gesture (F6, tab click): the roll never sees the release.
             self.cancel_roll_gesture();
@@ -803,7 +974,13 @@ impl eframe::App for GloomApp {
         self.commit_if_idle(&ctx);
 
         // Repaint at display rate while anything moves; idle otherwise.
-        let lights = self.activity.iter().any(|&a| a > 0.0);
+        let lights = self.activity.iter().any(|&a| a > 0.0)
+            || self.main_view == MainView::Mixer
+                && self
+                    .strip_meters
+                    .iter()
+                    .flatten()
+                    .any(MeterBallistics::is_moving);
         if playing || self.test_tone || self.meter.is_moving() || lights || self.library.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(16));
         } else if self.audio.engine().is_some() {

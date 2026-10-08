@@ -18,6 +18,7 @@
 mod atomic;
 mod channel;
 mod command;
+mod mixer;
 mod processor;
 pub mod song;
 pub mod transport;
@@ -26,13 +27,14 @@ pub use atomic::AtomicF32;
 pub use channel::VOICES_PER_CHANNEL;
 pub use command::{EngineCommand, EngineEvent, Garbage, LoopRegion, TransportState};
 pub use gt_core::MAX_CHANNELS;
+pub use mixer::{create_effect, EffectBox, MixerParams, StripParams, MAX_PDC_FRAMES};
 pub use processor::{AudioProcessor, PREVIEW_GAIN, TEST_TONE_DBFS, TEST_TONE_HZ};
 pub use song::{synth_settings, ChannelParams, InstrumentKind, NoteKind, SongEvent, SongSnapshot};
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
-use gt_core::Tick;
+use gt_core::{Tick, FX_SLOTS, STRIPS};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 /// Frames per render quantum. The engine always renders in blocks of exactly this size, counted
@@ -83,6 +85,23 @@ pub struct Telemetry {
     pub scope: [AtomicF32; SCOPE_LEN],
     /// Total samples written to `scope` (index = value % `SCOPE_LEN`).
     pub scope_write: AtomicU64,
+    /// Level meters for every mixer strip, by strip index.
+    pub meters: [MeterCell; STRIPS],
+    /// Each effect's own meter (gain reduction in dB for dynamics), by strip and slot.
+    pub fx_meters: [[AtomicF32; FX_SLOTS]; STRIPS],
+    /// Delay from a channel to the device caused by effect latency, in frames.
+    pub latency_frames: AtomicU32,
+}
+
+/// One strip's meter. The engine raises `peak` with `fetch_max` (the UI swaps it back to 0
+/// when it reads, and applies decay and hold) and stores the RMS level, integrated over about
+/// 300 ms, every quantum. Linear amplitude, left and right.
+#[derive(Debug, Default)]
+pub struct MeterCell {
+    /// Highest sample since the UI last read it.
+    pub peak: [AtomicF32; 2],
+    /// Smoothed RMS level.
+    pub rms: [AtomicF32; 2],
 }
 
 /// Length of the oscilloscope ring buffer in samples.
@@ -103,6 +122,9 @@ impl Default for Telemetry {
             channel_peaks: std::array::from_fn(|_| AtomicF32::default()),
             scope: std::array::from_fn(|_| AtomicF32::default()),
             scope_write: AtomicU64::default(),
+            meters: std::array::from_fn(|_| MeterCell::default()),
+            fx_meters: std::array::from_fn(|_| std::array::from_fn(|_| AtomicF32::default())),
+            latency_frames: AtomicU32::default(),
         }
     }
 }

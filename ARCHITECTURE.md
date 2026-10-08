@@ -145,6 +145,10 @@ pub struct Delay;  pub struct Reverb;  pub struct Chorus;  pub struct Waveshaper
 pub struct Limiter;  pub struct StereoWidth;
 ```
 
+> **As built (Step 6, D40-D41):** effects live in `gt_dsp::fx` behind the `Effect` trait:
+> `ParamEq`, `Compressor`, `Delay`, `Reverb` (FDN), `Chorus`, `Distortion` (the waveshaper),
+> `Limiter`, `StereoWidth`, plus `Biquad`, `Smooth` (one-pole) and a fixed `DelayLine`.
+>
 > **As built (Step 5, D32-D34):** the oscillator is a function, `blep_sample(wave, phase, dt, pw)`,
 > over a `Phase` accumulator rather than a struct, so unison copies share one code path; `Lfo`,
 > `Noise` (xorshift32), `Ladder` (+ `ladder_response` for the UI) and `GloomSynth` exist as
@@ -328,7 +332,9 @@ As of Step 3 the implemented variants are `Play`, `Pause`, `Stop`, `Locate`, `Se
 (stand-in for `SetParam` until the parameter system of Prompt 8), `SetChannelSample { slot,
 Option<Arc<SampleData>> }` (stand-in for `ApplyGraph` until the mixer graph of Prompt 6),
 `NoteOn`, `NoteOff` and `PreviewSample(Option<Arc<SampleData>>)` (`None` replaces
-`StopPreview`). Commands that hand something back are only taken when the garbage queue has a
+`StopPreview`). Step 5 added `SetScopeChannel(Option<u16>)`, and Step 6 `SetMixer(Box<MixerParams>)`,
+`SetEffect { strip, slot, Option<EffectBox> }` and `SetEffectParam { strip, slot, index, value }`
+(stand-ins for `ApplyGraph` and `SetParam`, D39). Commands that hand something back are only taken when the garbage queue has a
 free slot. The size limit is enforced by a compile-time assertion. The rest of the enum below
 arrives with the steps that need it.
 
@@ -796,6 +802,10 @@ input the maximum upstream latency and assigns a compensating delay line to fast
 effects are zero-latency in v1 except the limiter (lookahead). The graph design reserves the delay
 nodes from Prompt 6 even if all latencies are zero.
 
+> **As built (Step 6, D42):** the strips are a fixed mixer rather than a general node graph, and
+> compensation runs in `gt-engine/src/mixer.rs`: per strip a delay line on the channel input, the
+> output edge and each send edge, recomputed whenever the mixer settings or an effect change.
+
 ### 7.8 Platform specifics
 
 | Area | Windows | Ubuntu |
@@ -872,6 +882,12 @@ polled), and float determinism across compilers.
 | D35 | Voice stealing: free voice, else oldest releasing, else oldest; a stolen voice keeps its state and its envelopes restart from the current level (`Adsr::retrigger`) | Avoids the click of a hard cut without a second voice for a 2 ms fade | Revisit with a fade if retriggered tails sound wrong on pads |
 | D36 | Presets are JSON files (`.gloomsynth`, format `gloomtunes-synth-preset` v1) keyed by stable parameter keys, loaded tolerantly (unknown keys ignored, missing keys default, values clamped). Folder: `%APPDATA%\GloomTunes Studio\Presets\Gloom Synth`, or `$XDG_DATA_HOME`/`~/.local/share/gloomtunes-studio/presets/gloom-synth`. Factory presets live in code | Human-readable, survives added or renamed parameters, shareable as single files | Project files (Step 9) embed the same key/value map |
 | D37 | The oscilloscope is a 4096-sample ring of `AtomicF32` in `Telemetry`, fed with the mono mix of one channel chosen by `SetScopeChannel` | No queue or lock; tearing between quanta only affects a picture | Move to the mixer's metering taps in Step 6 |
+| D38 | Mixer: strip 0 is the master, 1-64 inserts, 65-68 send buses; channels feed the master or an insert. Inserts output to the master, an insert or a send; sends output only to the master or another send, and inserts feed sends through post-fader levels. Sidechain keys are a third kind of edge. `gt_core::Mixer` refuses routes that would close a loop (`can_route`, `can_sidechain`) and sorts the graph (`processing_order`, Kahn, master last). Solo keeps every strip on a path into or out of a soloed strip audible. Strips use a balance law (unity at centre); channels keep equal-power pan | Sends can never feed back into inserts, so send levels never need a cycle check; the UI only lists valid targets | Pre-fader sends if users ask |
+| D39 | The app diffs the document mixer against what it last sent, every frame: `SetMixer(Box<MixerParams>)` when strip settings change, `SetEffect` with a new boxed effect only when a slot's kind changes, `SetEffectParam` per changed value otherwise. Effects are created and configured on the UI thread (`create_effect`) and old ones come back as garbage | Edits, undo and (later) loading share one path; effects that stay keep their state, so reverb tails survive adding channels or undoing a fader move | Replace with `ApplyGraph`/`SetParam` once Prompt 8 gives every parameter a slot |
+| D40 | Effects implement `gt_dsp::fx::Effect` (`set_param(index, plain value)`, `process` in place on planar stereo, `latency`, `meter`). Their parameter tables live in `gt_core::effects`, in the same index order; a gt-engine test checks the counts match. Continuous parameters glide with a 20 ms one-pole; EQ coefficients are recomputed every 16 frames | Keeps gt-dsp and gt-core independent (§2) like D32 | Move tables into the Prompt 8 parameter registry |
+| D41 | Effect designs: RBJ biquads (TDF-II) for the EQ; feed-forward compressor with soft knee, dB-domain attack/release; delay with one-pole "tone" in the feedback and linear interpolation; 8-line FDN reverb with Hadamard feedback, per-line RT60 gains, damping and 4 input allpasses; chorus with one swept line per side; distortion with first-order ADAA (antiderivatives in f64) instead of oversampling; limiter with instant-attack release, running minimum and moving average over a 1.5 ms look-ahead, so the ceiling is guaranteed | Each is the simplest design that meets the step's bar at under 4 ms per second of audio | Oversampled distortion and a Dattorro plate as alternatives later |
+| D42 | Delay compensation: each strip's input latency is the largest output latency feeding it; every edge (channel input, output, each send) gets a fixed-capacity delay line (512 frames) set to the difference; the total is published as `latency_frames`. Latency counts enabled effects only | Real PDC at low cost (only the limiter has latency in v1); the same scheme serves CLAP plugins in Prompt 11 | Larger capacity for plugins with long latency |
+| D43 | Effects are reset when playback starts from Stop, not on pause or locate | Offline export (Step 9) must match a real-time capture from a stopped transport (§7.5) | Revisit if users want tails to continue across a restart |
 
 ---
 
