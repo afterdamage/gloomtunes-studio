@@ -1,4 +1,4 @@
-//! Audio device panel: device, buffer size, sample rate and the test-tone switch.
+//! Audio device panel: device, buffer size, sample rate, level and the device test tone.
 
 use egui::{Grid, RichText, Ui};
 
@@ -25,8 +25,10 @@ pub struct AudioPanelModel {
     pub channels: Option<u16>,
     /// Frames delivered in the latest callback (may differ from the requested size).
     pub callback_frames: Option<u32>,
-    /// True while the tone plays (or is fading in).
-    pub running: bool,
+    /// True while an output stream is open.
+    pub stream_open: bool,
+    /// True while the test tone is on.
+    pub test_tone: bool,
     /// Displayed meter level in dBFS.
     pub level_db: f32,
     /// Status or error line.
@@ -40,10 +42,10 @@ pub enum AudioAction {
     SelectDevice(usize),
     /// Pick a different buffer size.
     SelectBufferSize(u32),
-    /// Start the test tone.
-    Start,
-    /// Stop the test tone.
-    Stop,
+    /// Turn the 440 Hz test tone on or off.
+    ToggleTestTone,
+    /// Close and reopen the output stream.
+    RestartAudio,
     /// Re-scan output devices.
     Rescan,
 }
@@ -120,19 +122,12 @@ pub fn audio_panel(ui: &mut Ui, theme: &GloomTheme, m: &AudioPanelModel) -> Opti
 
     ui.add_space(8.0);
     ui.horizontal(|ui| {
-        let (label, act) = if m.running {
-            ("■  Stop", AudioAction::Stop)
-        } else {
-            ("▶  Play 440 Hz", AudioAction::Start)
-        };
-        let button = egui::Button::new(RichText::new(label).color(if m.running {
-            theme.accent
-        } else {
-            theme.text
-        }))
-        .min_size(egui::vec2(120.0, 24.0));
-        if ui.add(button).clicked() {
-            action = Some(act);
+        let tone = egui::Button::selectable(m.test_tone, "Test tone 440 Hz");
+        if ui.add_enabled(m.stream_open, tone).clicked() {
+            action = Some(AudioAction::ToggleTestTone);
+        }
+        if ui.button("Restart audio").clicked() {
+            action = Some(AudioAction::RestartAudio);
         }
     });
     if !m.status.is_empty() {

@@ -4,8 +4,8 @@ An original, open-source, pattern-based digital audio workstation written in Rus
 Windows 10/11 and Ubuntu 22.04+ from a single codebase. Channel rack, piano roll, mixer and
 playlist, with built-in instruments and effects, wrapped in a dark, moody "Gloom" interface.
 
-> **Status:** early development. Step 1 of the [roadmap](ROADMAP.md) plays a test tone through
-> your audio device. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
+> **Status:** early development. Step 2 of the [roadmap](ROADMAP.md): a transport with tempo,
+> time signature, loop and a sample-accurate metronome. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 
 ## Goals
 

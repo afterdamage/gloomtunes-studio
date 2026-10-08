@@ -16,6 +16,7 @@ name = "gloomtunes"
 path = "src/main.rs"
 
 [dependencies]
+gt-core.workspace = true
 gt-engine.workspace = true
 gt-ui.workspace = true
 cpal.workspace = true

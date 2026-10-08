@@ -42,6 +42,12 @@ impl SineOsc {
         self.phase = 0.0;
     }
 
+    /// Sets the phase in cycles (0.0 = rising zero crossing, 0.25 = positive peak).
+    #[inline]
+    pub fn set_phase(&mut self, cycles: f32) {
+        self.phase = f64::from(cycles).rem_euclid(1.0);
+    }
+
     /// Returns the next sample in `-1.0..=1.0`.
     #[inline]
     pub fn next_sample(&mut self) -> f32 {

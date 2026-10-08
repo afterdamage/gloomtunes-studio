@@ -6,27 +6,39 @@
 //!   export thread) and only ever does real-time-safe work in [`AudioProcessor::process`].
 //! - [`EngineHandle`] stays on the UI thread. It never waits for the audio thread.
 //!
+//! They talk through three wait-free `rtrb` queues (commands in; events and garbage out) and a
+//! block of atomics ([`Telemetry`]). See ARCHITECTURE.md §4.
+//!
 //! This crate deliberately does not depend on any audio device library: the device layer in
 //! `gt-app` calls `process`, and so can tests and offline export.
-//!
-//! Step 1 scope: the processor plays a 440 Hz test tone at -12 dBFS with click-free start/stop
-//! fades. Control uses a few atomics; Step 2 replaces them with the `rtrb` command queue described
-//! in ARCHITECTURE.md §4.
 
 // Unsafe code will be needed later for FTZ/DAZ flags (ARCHITECTURE.md §7.6); until then, none.
 #![deny(unsafe_code)]
 
 mod atomic;
+mod command;
 mod processor;
+pub mod transport;
 
 pub use atomic::AtomicF32;
+pub use command::{EngineCommand, EngineEvent, Garbage, LoopRegion, TransportState};
 pub use processor::{AudioProcessor, TEST_TONE_DBFS, TEST_TONE_HZ};
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
-/// Fade time for start/stop, in seconds. Long enough to be click-free, short enough to feel instant.
+use gt_core::Tick;
+use rtrb::{Consumer, Producer, RingBuffer};
+
+/// Frames per render quantum. The engine always renders in blocks of exactly this size, counted
+/// from engine start, whatever the device buffer size is (ARCHITECTURE.md §5.3).
+pub const RENDER_QUANTUM: usize = 64;
+/// Fade time for test tone and output fades, in seconds.
 pub const FADE_SECONDS: f32 = 0.02;
+
+const COMMAND_CAPACITY: usize = 1024;
+const EVENT_CAPACITY: usize = 256;
+const GARBAGE_CAPACITY: usize = 64;
 
 /// Static configuration of an engine instance. A new device or sample rate means a new engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,52 +59,71 @@ pub struct Telemetry {
     pub blocks: AtomicU64,
     /// Highest absolute sample value seen since the UI last reset it (UI applies decay).
     pub peak: AtomicF32,
-    /// True when output is exactly silent and the tone is stopped (safe to close the stream).
+    /// True when the output has been faded out completely (safe to close the stream).
     pub silent: AtomicBool,
     /// Set by the device layer when the callback panicked; the engine output is muted.
     pub faulted: AtomicBool,
+    /// [`TransportState`] as `u8`.
+    pub transport_state: AtomicU8,
+    /// Playhead in whole ticks, at the end of the last rendered quantum.
+    pub position_ticks: AtomicI64,
+    /// Engine frames rendered since creation.
+    pub frames_rendered: AtomicU64,
+    /// Events that could not be delivered (scheduler or event queue full). Should stay 0.
+    pub events_dropped: AtomicU32,
 }
 
-/// Control flags written by the UI and read by the audio thread.
-#[derive(Debug, Default)]
-pub(crate) struct Control {
-    pub(crate) tone_on: AtomicBool,
-}
+impl Telemetry {
+    /// The transport state.
+    pub fn transport_state(&self) -> TransportState {
+        TransportState::from_u8(self.transport_state.load(Ordering::Relaxed))
+    }
 
-/// State shared between the two halves.
-#[derive(Debug, Default)]
-pub(crate) struct Shared {
-    pub(crate) control: Control,
-    pub(crate) telemetry: Telemetry,
+    /// The playhead position.
+    pub fn position(&self) -> Tick {
+        Tick(self.position_ticks.load(Ordering::Relaxed))
+    }
 }
 
 /// The UI-thread half of the engine.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct EngineHandle {
-    shared: Arc<Shared>,
+    commands: Producer<EngineCommand>,
+    events: Consumer<EngineEvent>,
+    garbage: Consumer<Garbage>,
+    telemetry: Arc<Telemetry>,
     config: EngineConfig,
 }
 
 impl EngineHandle {
-    /// Fades the test tone in.
-    pub fn start_tone(&self) {
-        self.shared.telemetry.silent.store(false, Ordering::Relaxed);
-        self.shared.control.tone_on.store(true, Ordering::Relaxed);
+    /// Queues a command for the audio thread. Never blocks; if the queue is full the command is
+    /// handed back so the caller can retry later.
+    pub fn send(&mut self, cmd: EngineCommand) -> Result<(), EngineCommand> {
+        self.commands
+            .push(cmd)
+            .map_err(|rtrb::PushError::Full(c)| c)
     }
 
-    /// Fades the test tone out. [`Telemetry::silent`] becomes true once the fade has finished.
-    pub fn stop_tone(&self) {
-        self.shared.control.tone_on.store(false, Ordering::Relaxed);
+    /// Calls `f` for every event the engine has posted since the last call.
+    pub fn poll_events(&mut self, mut f: impl FnMut(EngineEvent)) {
+        while let Ok(e) = self.events.pop() {
+            f(e);
+        }
     }
 
-    /// True if the tone is requested to play (it may still be fading).
-    pub fn tone_requested(&self) -> bool {
-        self.shared.control.tone_on.load(Ordering::Relaxed)
+    /// Frees everything the engine has handed back. Call once per UI frame.
+    pub fn collect_garbage(&mut self) -> usize {
+        let mut n = 0;
+        while let Ok(g) = self.garbage.pop() {
+            drop(g);
+            n += 1;
+        }
+        n
     }
 
     /// Read-only access to the published telemetry.
     pub fn telemetry(&self) -> &Telemetry {
-        &self.shared.telemetry
+        &self.telemetry
     }
 
     /// The configuration this engine was created with.
@@ -103,8 +134,17 @@ impl EngineHandle {
 
 /// Creates both halves of an engine. Call on the UI thread: this allocates.
 pub fn create(config: EngineConfig) -> (EngineHandle, AudioProcessor) {
-    let shared = Arc::new(Shared::default());
-    shared.telemetry.silent.store(true, Ordering::Relaxed);
-    let processor = AudioProcessor::new(config, Arc::clone(&shared));
-    (EngineHandle { shared, config }, processor)
+    let telemetry = Arc::new(Telemetry::default());
+    let (cmd_tx, cmd_rx) = RingBuffer::new(COMMAND_CAPACITY);
+    let (evt_tx, evt_rx) = RingBuffer::new(EVENT_CAPACITY);
+    let (gc_tx, gc_rx) = RingBuffer::new(GARBAGE_CAPACITY);
+    let processor = AudioProcessor::new(config, Arc::clone(&telemetry), cmd_rx, evt_tx, gc_tx);
+    let handle = EngineHandle {
+        commands: cmd_tx,
+        events: evt_rx,
+        garbage: gc_rx,
+        telemetry,
+        config,
+    };
+    (handle, processor)
 }

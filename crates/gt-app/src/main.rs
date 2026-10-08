@@ -29,8 +29,8 @@ fn run(renderer: eframe::Renderer) -> eframe::Result {
         renderer,
         viewport: egui::ViewportBuilder::default()
             .with_title("GloomTunes Studio")
-            .with_inner_size([560.0, 300.0])
-            .with_min_inner_size([480.0, 260.0]),
+            .with_inner_size([880.0, 340.0])
+            .with_min_inner_size([780.0, 280.0]),
         ..Default::default()
     };
     eframe::run_native(

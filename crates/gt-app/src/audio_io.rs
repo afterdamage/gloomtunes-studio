@@ -1,6 +1,6 @@
 //! Audio device layer: the only code that talks to cpal.
 //!
-//! Lives on the UI thread. It enumerates devices, builds the output stream around an
+//! Lives on the UI thread. It enumerates devices, keeps one output stream open around an
 //! `AudioProcessor`, converts samples at the edge, and turns device errors into status text.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -10,13 +10,13 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig, SupportedBufferSize};
-use gt_engine::{AudioProcessor, EngineConfig, EngineHandle};
+use gt_engine::{AudioProcessor, EngineCommand, EngineConfig, EngineHandle};
 
 /// Frames of f32 scratch for devices that want integer samples. Larger callbacks are rendered
 /// in several chunks, so this only bounds the chunk size, not the device buffer size.
 const SCRATCH_FRAMES: usize = 4096;
 /// If the fade-out has not been confirmed by the audio thread after this long (e.g. the device
-/// stopped calling back), the stream is closed anyway.
+/// stopped calling back), the stream is reopened anyway.
 const STOP_TIMEOUT: Duration = Duration::from_millis(300);
 
 struct Running {
@@ -24,15 +24,11 @@ struct Running {
     engine: EngineHandle,
     channels: u16,
     sample_rate: u32,
+    device_name: String,
 }
 
-/// What to do once the current stream has faded out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AfterFade {
-    Close,
-    Restart,
-}
-
+/// Device layer state. The output stream stays open while the app runs, so the transport can
+/// play at any time; it is faded out and reopened when the device or buffer size changes.
 pub struct AudioIo {
     host: cpal::Host,
     /// `None` at index 0 means "follow the system default device".
@@ -41,7 +37,10 @@ pub struct AudioIo {
     selected: usize,
     buffer_size: u32,
     running: Option<Running>,
-    fading: Option<(Instant, AfterFade)>,
+    /// Set while the output fades out before the stream is reopened.
+    reopening_since: Option<Instant>,
+    /// True once after a new engine was created, so the app can send it the current settings.
+    fresh_engine: bool,
     stream_error: Arc<Mutex<Option<String>>>,
     status: String,
 }
@@ -57,11 +56,13 @@ impl AudioIo {
             selected: 0,
             buffer_size: 256,
             running: None,
-            fading: None,
+            reopening_since: None,
+            fresh_engine: false,
             stream_error: Arc::new(Mutex::new(None)),
             status: String::new(),
         };
         io.rescan();
+        io.open();
         io
     }
 
@@ -83,86 +84,82 @@ impl AudioIo {
         self.selected = previous
             .and_then(|p| self.names.iter().position(|n| *n == p))
             .unwrap_or(0);
-        if self.names.len() == 1 && self.host.default_output_device().is_none() {
-            self.status = "No output device found".to_owned();
-        }
     }
 
     pub fn select_device(&mut self, index: usize) {
         if index < self.devices.len() {
             self.selected = index;
-            self.restart_if_running();
+            self.reopen();
         }
     }
 
     pub fn select_buffer_size(&mut self, frames: u32) {
         self.buffer_size = frames;
-        self.restart_if_running();
+        self.reopen();
     }
 
-    pub fn start(&mut self) {
-        if let Some(r) = &self.running {
-            // Still fading out from a stop: just fade back in.
-            r.engine.start_tone();
-            self.fading = None;
-            return;
-        }
-        match self.open_stream() {
-            Ok(running) => {
-                running.engine.start_tone();
-                self.running = Some(running);
+    /// Closes the stream (after a short fade) and opens it again with the current settings.
+    pub fn reopen(&mut self) {
+        match self.running.as_mut() {
+            Some(r) if self.reopening_since.is_none() => {
+                let _ = r.engine.send(EngineCommand::FadeOut);
+                self.reopening_since = Some(Instant::now());
             }
-            Err(e) => {
-                log::error!("{e}");
-                self.status = e;
-            }
+            Some(_) => {} // already fading
+            None => self.open(),
         }
     }
 
-    pub fn stop(&mut self) {
-        self.begin_fade(AfterFade::Close);
+    /// The engine of the open stream, if any.
+    pub fn engine_mut(&mut self) -> Option<&mut EngineHandle> {
+        self.running.as_mut().map(|r| &mut r.engine)
     }
 
-    /// True while a stream exists (playing or fading out).
-    pub fn is_active(&self) -> bool {
-        self.running.is_some()
+    /// The engine of the open stream, if any.
+    pub fn engine(&self) -> Option<&EngineHandle> {
+        self.running.as_ref().map(|r| &r.engine)
+    }
+
+    /// True exactly once after a new engine has been created.
+    pub fn take_fresh_engine(&mut self) -> bool {
+        std::mem::take(&mut self.fresh_engine)
     }
 
     /// Returns and resets the raw peak the audio thread has seen since the last call.
     pub fn take_peak(&self) -> f32 {
-        self.running.as_ref().map_or(0.0, |r| {
-            r.engine.telemetry().peak.swap(0.0, Ordering::Relaxed)
-        })
+        self.engine()
+            .map_or(0.0, |e| e.telemetry().peak.swap(0.0, Ordering::Relaxed))
     }
 
-    /// Housekeeping, once per UI frame: finishes fades and surfaces stream errors.
+    /// Housekeeping, once per UI frame: frees engine garbage, surfaces stream errors and
+    /// finishes reopening.
     pub fn poll(&mut self) {
         if let Some(msg) = self.stream_error.lock().ok().and_then(|mut e| e.take()) {
             log::warn!("stream error: {msg}");
             self.status = msg;
         }
-        if let Some(r) = &self.running {
-            if r.engine.telemetry().faulted.load(Ordering::Relaxed) {
-                self.status = "Audio engine fault: output muted. Press Play to restart.".to_owned();
-                self.running = None;
-                self.fading = None;
-                return;
-            }
+        let Some(r) = self.running.as_mut() else {
+            return;
+        };
+        r.engine.collect_garbage();
+        r.engine.poll_events(|e| log::debug!("engine event: {e:?}"));
+        if r.engine.telemetry().faulted.load(Ordering::Relaxed) {
+            self.status = "Audio engine fault: output muted. Use Restart audio.".to_owned();
+            self.running = None;
+            self.reopening_since = None;
+            return;
         }
-        if let (Some((since, after)), Some(r)) = (self.fading, &self.running) {
+        if let Some(since) = self.reopening_since {
             let silent = r.engine.telemetry().silent.load(Ordering::Relaxed);
             if silent || since.elapsed() > STOP_TIMEOUT {
                 self.running = None; // dropping the stream closes the device
-                self.fading = None;
-                match after {
-                    AfterFade::Restart => self.start(),
-                    AfterFade::Close => self.status = "Stopped".to_owned(),
-                }
+                self.reopening_since = None;
+                self.open();
             }
         }
     }
 
-    pub fn panel_model(&self) -> gt_ui::views::AudioPanelModel {
+    pub fn panel_model(&self, test_tone: bool) -> gt_ui::views::AudioPanelModel {
         let (sample_rate, channels, callback_frames) = match &self.running {
             Some(r) => {
                 let frames = r
@@ -176,13 +173,7 @@ impl AudioIo {
                     (frames > 0).then_some(frames),
                 )
             }
-            None => (
-                self.device()
-                    .and_then(|d| d.default_output_config().ok())
-                    .map(|c| c.sample_rate()),
-                None,
-                None,
-            ),
+            None => (None, None, None),
         };
         gt_ui::views::AudioPanelModel {
             host_name: self.host.id().name().to_owned(),
@@ -192,10 +183,8 @@ impl AudioIo {
             sample_rate,
             channels,
             callback_frames,
-            running: self
-                .running
-                .as_ref()
-                .is_some_and(|r| r.engine.tone_requested()),
+            stream_open: self.running.is_some(),
+            test_tone,
             level_db: f32::NEG_INFINITY,
             status: self.status.clone(),
         }
@@ -208,24 +197,17 @@ impl AudioIo {
         }
     }
 
-    fn restart_if_running(&mut self) {
-        let playing = self
-            .running
-            .as_ref()
-            .is_some_and(|r| r.engine.tone_requested());
-        if playing {
-            self.begin_fade(AfterFade::Restart);
-        } else {
-            // A stopped or fading stream simply closes; the next Play uses the new settings.
-            self.running = None;
-            self.fading = None;
-        }
-    }
-
-    fn begin_fade(&mut self, after: AfterFade) {
-        if let Some(r) = &self.running {
-            r.engine.stop_tone();
-            self.fading = Some((Instant::now(), after));
+    fn open(&mut self) {
+        match self.open_stream() {
+            Ok(running) => {
+                self.status = format!("Audio running on {}", running.device_name);
+                self.running = Some(running);
+                self.fresh_engine = true;
+            }
+            Err(e) => {
+                log::error!("{e}");
+                self.status = e;
+            }
         }
     }
 
@@ -275,7 +257,6 @@ impl AudioIo {
             .play()
             .map_err(|e| format!("Could not start the output stream: {e}"))?;
 
-        self.status = format!("Playing on {}{note}", device_name(&device));
         log::info!(
             "stream open: {} Hz, {} ch, {sample_format}, buffer {:?}",
             config.sample_rate,
@@ -287,6 +268,7 @@ impl AudioIo {
             engine,
             channels: config.channels,
             sample_rate: config.sample_rate,
+            device_name: format!("{}{note}", device_name(&device)),
         })
     }
 }
