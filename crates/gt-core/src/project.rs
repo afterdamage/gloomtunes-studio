@@ -197,9 +197,20 @@ impl Pattern {
     /// Allowed pattern lengths in steps.
     pub const STEP_COUNTS: [u16; 2] = [16, 32];
 
-    /// Length in ticks.
+    /// Length in ticks: the step-grid length, extended to whole bars (4/4) so that every note
+    /// fits. Notes drawn past the grid in the piano roll make the pattern longer, as in other
+    /// pattern-based DAWs.
     pub fn length_ticks(&self) -> i64 {
-        i64::from(self.steps) * STEP_TICKS
+        const BAR: i64 = 16 * STEP_TICKS;
+        let grid = i64::from(self.steps) * STEP_TICKS;
+        let end = self
+            .notes
+            .values()
+            .flat_map(|v| v.iter())
+            .map(|n| n.start + n.length.max(1))
+            .max()
+            .unwrap_or(0);
+        grid.max((end + BAR - 1).div_euclid(BAR) * BAR)
     }
 
     /// The note that the step sequencer shows at `step` for `channel`, if any.
@@ -499,6 +510,23 @@ mod tests {
         p.clone_pattern(first).unwrap();
         let names: Vec<_> = p.patterns.iter().map(|p| p.name.as_str()).collect();
         assert!(names.contains(&"Pattern 1 copy 2"), "{names:?}");
+    }
+
+    #[test]
+    fn length_grows_to_whole_bars_around_notes() {
+        let mut p = Project::empty();
+        let c = p.add_channel("c", None).unwrap();
+        let pat = p.current_pattern_mut();
+        assert_eq!(pat.length_ticks(), 16 * STEP_TICKS);
+        pat.notes.entry(c).or_default().push(Note {
+            start: 16 * STEP_TICKS + 100,
+            length: 240,
+            key: 64,
+            velocity: 0.5,
+        });
+        assert_eq!(pat.length_ticks(), 32 * STEP_TICKS);
+        pat.steps = 32;
+        assert_eq!(pat.length_ticks(), 32 * STEP_TICKS);
     }
 
     #[test]

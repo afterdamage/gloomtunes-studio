@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use gt_core::{Project, SampleSource, TempoMap, Tick, MAX_CHANNELS, ROOT_KEY, STEP_TICKS};
 use gt_engine::{ChannelParams, EngineCommand, LoopRegion, SongSnapshot, TransportState};
+use gt_project::{ops, History};
 use gt_ui::views::{
-    audio_panel, browser, channel_rack, sampler_panel, transport_bar, AudioAction, AudioPanelModel,
-    BrowserAction, BrowserModel, PlayState, RackAction, RackState, RackView, SamplerPanelView,
-    TransportAction, TransportModel,
+    audio_panel, browser, channel_rack, piano_roll, sampler_panel, transport_bar, AudioAction,
+    AudioPanelModel, BrowserAction, BrowserModel, PianoRollAction, PianoRollState, PianoRollView,
+    PlayState, RackAction, RackState, RackView, SamplerPanelView, TransportAction, TransportModel,
 };
 use gt_ui::widgets::MeterBallistics;
 use gt_ui::GloomTheme;
@@ -21,6 +22,13 @@ use crate::library::{default_folder, list_folder, Library};
 const FALLBACK_RATE: u32 = 48_000;
 /// Activity lights fall by this much per second.
 const ACTIVITY_FALL_PER_S: f32 = 4.0;
+
+/// What the central area shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainView {
+    Rack,
+    PianoRoll,
+}
 
 pub struct GloomApp {
     theme: GloomTheme,
@@ -39,12 +47,22 @@ pub struct GloomApp {
     /// Engine slots that may hold a sample (cleared when channels are removed).
     slots_in_use: usize,
     activity: [f32; MAX_CHANNELS],
+
+    main_view: MainView,
+    roll: PianoRollState,
+    history: History,
+    /// Label of the document change made since the last undo step, if any. Committed to the
+    /// history once the gesture ends (no mouse button down, no text field focused).
+    pending_edit: Option<&'static str>,
+    humanize_seed: u64,
 }
 
 impl GloomApp {
     pub fn new(ctx: &egui::Context) -> Self {
         let theme = GloomTheme::default();
         theme.apply(ctx);
+        let project = Project::demo();
+        let history = History::new(&project);
         let mut app = Self {
             theme,
             audio: AudioIo::new(),
@@ -52,13 +70,18 @@ impl GloomApp {
             transport: TransportModel::default(),
             test_tone: false,
             show_audio: false,
-            project: Project::demo(),
+            project,
             rack: RackState::default(),
             library: Library::new(),
             browser: BrowserModel::default(),
             preview_pending: None,
             slots_in_use: 0,
             activity: [0.0; MAX_CHANNELS],
+            main_view: MainView::Rack,
+            roll: PianoRollState::default(),
+            history,
+            pending_edit: None,
+            humanize_seed: 0x9E37_79B9_7F4A_7C15,
         };
         app.open_folder(default_folder());
         app.request_channel_samples();
@@ -193,6 +216,7 @@ impl GloomApp {
                 }
                 ch.sampler.sample = Some(src);
                 self.push_sample(i);
+                self.pending_edit = Some("Load sample");
             }
             BrowserAction::Open(dir) => self.open_folder(dir),
         }
@@ -200,9 +224,19 @@ impl GloomApp {
 
     fn on_rack(&mut self, action: RackAction) {
         match action {
-            RackAction::SongChanged => self.push_song(),
-            RackAction::ParamsChanged => self.push_all_params(),
-            RackAction::ChannelsChanged => self.push_channels(),
+            RackAction::SongChanged => {
+                self.push_song();
+                self.pending_edit = Some("Edit pattern");
+            }
+            RackAction::ParamsChanged => {
+                self.push_all_params();
+                self.pending_edit = Some("Channel settings");
+            }
+            RackAction::ChannelsChanged => {
+                self.push_channels();
+                self.pending_edit = Some("Add or remove channel");
+            }
+            RackAction::OpenPianoRoll(_) => self.main_view = MainView::PianoRoll,
             RackAction::NoteOn(i) => self.send(EngineCommand::NoteOn {
                 slot: i as u16,
                 key: ROOT_KEY,
@@ -212,6 +246,101 @@ impl GloomApp {
                 slot: i as u16,
                 key: ROOT_KEY,
             }),
+        }
+    }
+
+    fn on_roll(&mut self, action: PianoRollAction) {
+        let slot = self.rack.selected as u16;
+        match action {
+            PianoRollAction::Changed => {
+                self.tidy_roll_notes();
+                self.push_song();
+                self.pending_edit = Some("Edit notes");
+            }
+            PianoRollAction::AuditionOn { key, velocity } => self.send(EngineCommand::NoteOn {
+                slot,
+                key,
+                velocity,
+            }),
+            PianoRollAction::AuditionOff { key } => {
+                self.send(EngineCommand::NoteOff { slot, key });
+            }
+            PianoRollAction::Quantize | PianoRollAction::Humanize => {
+                let Some(id) = self.project.channels.get(self.rack.selected).map(|c| c.id) else {
+                    return;
+                };
+                let roll = &mut self.roll;
+                let notes = self
+                    .project
+                    .current_pattern_mut()
+                    .notes
+                    .entry(id)
+                    .or_default();
+                roll.selected.resize(notes.len(), false);
+                if action == PianoRollAction::Quantize {
+                    ops::quantize(
+                        notes,
+                        &roll.selected,
+                        roll.snap.ticks(),
+                        roll.quantize_strength,
+                    );
+                } else {
+                    self.humanize_seed = self.humanize_seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                    ops::humanize(
+                        notes,
+                        &roll.selected,
+                        roll.humanize_ticks,
+                        roll.humanize_velocity,
+                        self.humanize_seed,
+                    );
+                }
+                ops::sort_with_selection(notes, &mut roll.selected);
+                self.tidy_roll_notes();
+                self.push_song();
+                self.pending_edit = Some(if action == PianoRollAction::Quantize {
+                    "Quantize"
+                } else {
+                    "Humanize"
+                });
+            }
+        }
+    }
+
+    /// Drops an emptied note list, so "no notes" has a single representation.
+    fn tidy_roll_notes(&mut self) {
+        let pat = self.project.current_pattern_mut();
+        pat.notes.retain(|_, v| !v.is_empty());
+    }
+
+    /// Records the pending change as an undo step once the gesture has ended.
+    fn commit_if_idle(&mut self, ctx: &egui::Context) {
+        let Some(label) = self.pending_edit else {
+            return;
+        };
+        let busy = ctx.input(|i| i.pointer.any_down())
+            || ctx.text_edit_focused()
+            || self.roll.is_dragging();
+        if !busy {
+            self.history.commit(&self.project, label);
+            self.pending_edit = None;
+        }
+    }
+
+    fn undo(&mut self, redo: bool) {
+        // Finish the current gesture first so it becomes its own step.
+        if let Some(label) = self.pending_edit.take() {
+            self.history.commit(&self.project, label);
+        }
+        let done = if redo {
+            self.history.redo(&mut self.project)
+        } else {
+            self.history.undo(&mut self.project)
+        };
+        if done.is_some() {
+            self.roll.selected.clear();
+            let n = self.project.channels.len();
+            self.rack.selected = self.rack.selected.min(n.saturating_sub(1));
+            self.push_channels();
         }
     }
 
@@ -237,6 +366,44 @@ impl GloomApp {
         self.send(EngineCommand::SetTestTone(self.test_tone));
         self.slots_in_use = 0; // a new engine starts with empty slots
         self.push_channels();
+    }
+
+    /// Draws the piano roll for the selected channel of the current pattern.
+    fn show_roll(
+        &mut self,
+        ui: &mut egui::Ui,
+        theme: &GloomTheme,
+        playhead: Option<i64>,
+    ) -> Vec<PianoRollAction> {
+        let Some(ch) = self.project.channels.get(self.rack.selected) else {
+            ui.label(egui::RichText::new("Add a channel to write notes").color(theme.text_dim));
+            return Vec::new();
+        };
+        let (id, name) = (ch.id, ch.name.clone());
+        let bar_ticks = self.transport.time_sig.bar_ticks();
+        let pat = self.project.current_pattern_mut();
+        self.roll.set_target(pat.id.0, id.0);
+        let pattern_len = pat.length_ticks();
+        // Take the edited list out so the other channels can be borrowed as ghosts.
+        let mut notes = pat.notes.remove(&id).unwrap_or_default();
+        let ghosts: Vec<&[gt_core::Note]> = pat.notes.values().map(Vec::as_slice).collect();
+        let actions = piano_roll(
+            ui,
+            theme,
+            &mut self.roll,
+            PianoRollView {
+                notes: &mut notes,
+                ghosts,
+                pattern_len,
+                bar_ticks,
+                playhead,
+                channel_name: &name,
+            },
+        );
+        if !notes.is_empty() {
+            pat.notes.insert(id, notes);
+        }
+        actions
     }
 
     fn loop_region(&self) -> LoopRegion {
@@ -329,7 +496,35 @@ impl eframe::App for GloomApp {
         let space = !ctx.text_edit_focused()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space));
 
+        // Undo/redo and view switching, unless a text field wants the keys. Ctrl+Shift+Z is
+        // checked before Ctrl+Z because egui ignores extra Shift when matching.
+        if !ctx.text_edit_focused() {
+            use egui::{Key, Modifiers};
+            let key = |m, k| ctx.input_mut(|i| i.consume_key(m, k));
+            if key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || key(Modifiers::COMMAND, Key::Y)
+            {
+                self.undo(true);
+            } else if key(Modifiers::COMMAND, Key::Z) {
+                self.undo(false);
+            }
+            if key(Modifiers::NONE, Key::F6) {
+                self.main_view = MainView::Rack;
+            }
+            if key(Modifiers::NONE, Key::F7) {
+                self.main_view = MainView::PianoRoll;
+            }
+        }
+
         let theme = self.theme.clone();
+        let mut undo_clicked = None;
+        let undo_tip = self
+            .history
+            .undo_label()
+            .map(|l| format!("Undo {l} (Ctrl+Z)"));
+        let redo_tip = self
+            .history
+            .redo_label()
+            .map(|l| format!("Redo {l} (Ctrl+Shift+Z)"));
         let mut transport_actions = egui::Panel::top("transport")
             .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(8))
             .show(ui, |ui| {
@@ -342,6 +537,20 @@ impl eframe::App for GloomApp {
                             .clicked()
                         {
                             self.show_audio = !self.show_audio;
+                        }
+                        let redo = ui.add_enabled(redo_tip.is_some(), egui::Button::new("Redo"));
+                        if redo
+                            .on_hover_text(redo_tip.as_deref().unwrap_or("Nothing to redo"))
+                            .clicked()
+                        {
+                            undo_clicked = Some(true);
+                        }
+                        let undo = ui.add_enabled(undo_tip.is_some(), egui::Button::new("Undo"));
+                        if undo
+                            .on_hover_text(undo_tip.as_deref().unwrap_or("Nothing to undo"))
+                            .clicked()
+                        {
+                            undo_clicked = Some(false);
                         }
                         gt_ui::widgets::level_meter(
                             ui,
@@ -360,6 +569,9 @@ impl eframe::App for GloomApp {
         }
         for a in transport_actions {
             self.on_transport(a);
+        }
+        if let Some(redo) = undo_clicked {
+            self.undo(redo);
         }
 
         if self.show_audio {
@@ -421,33 +633,63 @@ impl eframe::App for GloomApp {
             .inner;
         if sampler_changed {
             self.push_all_params();
+            self.pending_edit = Some("Sampler settings");
         }
 
-        let playhead_step = (self.transport.state == PlayState::Playing).then(|| {
+        let playing = self.transport.state == PlayState::Playing;
+        let pattern_pos = playing.then(|| {
             let len = self.project.current_pattern().length_ticks().max(1);
-            (self.transport.position.0.rem_euclid(len) / STEP_TICKS) as u16
+            self.transport.position.0.rem_euclid(len)
         });
-        let rack_actions = egui::CentralPanel::default()
+        let (rack_actions, roll_actions) = egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(ui.style()).inner_margin(10))
             .show(ui, |ui| {
-                channel_rack(
-                    ui,
-                    &theme,
-                    &mut self.project,
-                    &mut self.rack,
-                    RackView {
-                        playhead_step,
-                        activity: &self.activity,
-                    },
-                )
+                ui.horizontal(|ui| {
+                    for (v, label, tip) in [
+                        (MainView::Rack, "Channel rack", "Step sequencer (F6)"),
+                        (
+                            MainView::PianoRoll,
+                            "Piano roll",
+                            "Notes of the selected channel (F7)",
+                        ),
+                    ] {
+                        if ui
+                            .add(egui::Button::selectable(self.main_view == v, label))
+                            .on_hover_text(tip)
+                            .clicked()
+                        {
+                            self.main_view = v;
+                        }
+                    }
+                });
+                ui.separator();
+                match self.main_view {
+                    MainView::Rack => {
+                        let a = channel_rack(
+                            ui,
+                            &theme,
+                            &mut self.project,
+                            &mut self.rack,
+                            RackView {
+                                playhead_step: pattern_pos.map(|t| (t / STEP_TICKS) as u16),
+                                activity: &self.activity,
+                            },
+                        );
+                        (a, Vec::new())
+                    }
+                    MainView::PianoRoll => (Vec::new(), self.show_roll(ui, &theme, pattern_pos)),
+                }
             })
             .inner;
         for a in rack_actions {
             self.on_rack(a);
         }
+        for a in roll_actions {
+            self.on_roll(a);
+        }
+        self.commit_if_idle(&ctx);
 
         // Repaint at display rate while anything moves; idle otherwise.
-        let playing = self.transport.state == PlayState::Playing;
         let lights = self.activity.iter().any(|&a| a > 0.0);
         if playing || self.test_tone || self.meter.is_moving() || lights || self.library.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(16));

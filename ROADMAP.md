@@ -14,9 +14,9 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 0 | Architecture and plan | Done (2026-10-08) |
 | 1 | Workspace + hello audio | Done (2026-10-08) |
 | 2 | Engine core and transport | Done (2026-10-08) |
-| 3 | Sampler + channel rack | **In review** |
-| 4 | Piano roll | Next |
-| 5 | Gloom Synth | Planned |
+| 3 | Sampler + channel rack | Done (2026-10-08) |
+| 4 | Piano roll | **In review** |
+| 5 | Gloom Synth | Next |
 | 6 | Mixer and effects | Planned |
 | 7 | Playlist / arrangement | Planned |
 | 8 | Automation and parameter system | Planned |
@@ -91,6 +91,13 @@ for schedule; Phase E is the riskiest technically.
 - Undo/redo via the `Edit` command stack in `gt-project`.
 - **You should see** 60 fps with 10,000 notes; hear edits immediately during playback.
 - Cut if late: humanize, scale highlighting, ghost notes.
+- Delivered (2026-10-08): everything above. Undo/redo is a snapshot-diff history rather than
+  one `Edit` type per gesture (D28). Notes past the step grid lengthen the pattern to whole bars
+  (D29). Measured: a frame with all 10,000 notes on screen takes about 4 ms to build and
+  tessellate in a release build (the `ten_thousand_notes_frame_time` test). Known limits:
+  one channel edited at a time (ghosts show the others); paste lands at the copied position;
+  no note-length or velocity editing by keyboard; no mouse-wheel velocity on notes; undo
+  history is not saved (as planned for Step 9).
 
 ### Step 5: Gloom Synth (4 to 6 weeks)
 - PolyBLEP oscillators, sub, noise, unison, ZDF ladder low-pass (24 dB/oct), 2 ADSR, 2 LFO,

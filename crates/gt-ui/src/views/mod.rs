@@ -3,11 +3,15 @@
 mod audio_panel;
 mod browser;
 mod channel_rack;
+mod piano_roll;
 mod sampler_panel;
 mod transport_bar;
 
 pub use audio_panel::{audio_panel, AudioAction, AudioPanelModel, BUFFER_SIZES};
 pub use browser::{browser, BrowserAction, BrowserEntry, BrowserModel};
 pub use channel_rack::{channel_rack, RackAction, RackState, RackView};
+pub use piano_roll::{
+    key_name, piano_roll, PianoRollAction, PianoRollState, PianoRollView, ScaleKind, Snap, Tool,
+};
 pub use sampler_panel::{sampler_panel, SamplerPanelView};
 pub use transport_bar::{transport_bar, PlayState, TransportAction, TransportModel};
