@@ -8,8 +8,9 @@ use std::path::PathBuf;
 
 use crate::effects::{EffectKind, EffectSlot};
 use crate::mixer::{Mixer, StripKind, FIRST_SEND, FX_SLOTS, INSERTS, MASTER};
+use crate::playlist::{AutoPoint, AutoTarget, Automation, ClipKind, Playlist};
 use crate::synth::SynthPatch;
-use crate::time::PPQ;
+use crate::time::{TempoMap, TimeSigMap, PPQ};
 
 /// Ticks per step of the channel rack: a 1/16 note.
 pub const STEP_TICKS: i64 = PPQ / 4;
@@ -332,6 +333,12 @@ pub struct Project {
     pub swing: f32,
     /// Master, inserts and send buses.
     pub mixer: Mixer,
+    /// Tracks, clips and markers of the arrangement.
+    pub playlist: Playlist,
+    /// Tempo over the timeline.
+    pub tempo: TempoMap,
+    /// Time signatures over the timeline.
+    pub signatures: TimeSigMap,
     next_id: u32,
 }
 
@@ -350,6 +357,9 @@ impl Project {
             current_pattern: PatternId(0),
             swing: 0.0,
             mixer: Mixer::new(),
+            playlist: Playlist::new(),
+            tempo: TempoMap::default(),
+            signatures: TimeSigMap::default(),
             next_id: 1,
         };
         let id = p.new_pattern();
@@ -358,7 +368,7 @@ impl Project {
     }
 
     /// The starter project: the four built-in drums with a basic beat and a Gloom Synth bass line
-    /// in "Pattern 1".
+    /// in "Pattern 1", two variations ("Intro", "Break") and a 12-bar arrangement of them.
     pub fn demo() -> Self {
         let mut p = Self::empty();
         let [kick, snare, hat, clap] = BuiltInSample::ALL.map(|b| {
@@ -411,7 +421,74 @@ impl Project {
                 .collect(),
         );
         p.demo_mix(bass);
+        p.demo_arrangement(bass);
         p
+    }
+
+    /// "Intro" (kick and hat) and "Break" (bass and hat) patterns, and an arrangement: intro,
+    /// four bars of the full beat, the break with the delay bus swelling, the beat again.
+    fn demo_arrangement(&mut self, bass: ChannelId) {
+        const BAR: i64 = 4 * PPQ;
+        let main = self.current_pattern;
+        let ids: Vec<ChannelId> = self.channels.iter().map(|c| c.id).collect();
+        let (kick, hat) = (ids[0], ids[2]);
+        let keep = |p: &mut Self, id: PatternId, name: &str, chans: &[ChannelId]| {
+            p.rename_pattern(id, name);
+            if let Some(pat) = p.patterns.iter_mut().find(|x| x.id == id) {
+                pat.notes.retain(|c, _| chans.contains(c));
+            }
+        };
+        // Each clone lands right after the main pattern: create the break first.
+        let brk = self.clone_pattern(main).expect("exists");
+        keep(self, brk, "Break", &[bass, hat]);
+        let intro = self.clone_pattern(main).expect("exists");
+        keep(self, intro, "Intro", &[kick, hat]);
+        self.current_pattern = main;
+
+        let pl = &mut self.playlist;
+        let names = ["Beat", "Intro", "Break", "Delay swell"];
+        for (t, n) in pl.tracks.iter_mut().zip(names) {
+            n.clone_into(&mut t.name);
+        }
+        let (t_main, t_intro, t_break, t_auto) = (
+            pl.tracks[0].id,
+            pl.tracks[1].id,
+            pl.tracks[2].id,
+            pl.tracks[3].id,
+        );
+        pl.add_clip(t_intro, 0, 2 * BAR, ClipKind::Pattern(intro));
+        pl.add_clip(t_main, 2 * BAR, 4 * BAR, ClipKind::Pattern(main));
+        pl.add_clip(t_break, 6 * BAR, 2 * BAR, ClipKind::Pattern(brk));
+        pl.add_clip(t_main, 8 * BAR, 4 * BAR, ClipKind::Pattern(main));
+        let delay = FIRST_SEND + 1;
+        let rest = crate::playlist::volume_to_norm(self.mixer.strips[delay].volume);
+        pl.add_clip(
+            t_auto,
+            6 * BAR,
+            2 * BAR,
+            ClipKind::Automation(Automation {
+                target: AutoTarget::StripVolume(delay),
+                points: vec![
+                    AutoPoint { at: 0, value: rest },
+                    AutoPoint {
+                        at: 2 * BAR - PPQ,
+                        value: 1.0,
+                    },
+                    AutoPoint {
+                        at: 2 * BAR,
+                        value: rest,
+                    },
+                ],
+            }),
+        );
+        pl.add_marker(0, "Intro");
+        pl.add_marker(2 * BAR, "Drop");
+        pl.add_marker(6 * BAR, "Break");
+    }
+
+    /// The pattern with this id.
+    pub fn pattern(&self, id: PatternId) -> Option<&Pattern> {
+        self.patterns.iter().find(|p| p.id == id)
     }
 
     /// Mixer settings for the demo: each channel on its own insert (from `add_instrument`), a
@@ -679,12 +756,19 @@ mod tests {
     #[test]
     fn patterns_clone_rename_select() {
         let mut p = Project::demo();
+        let names = |p: &Project| {
+            p.patterns
+                .iter()
+                .map(|x| x.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&p), ["Pattern 1", "Intro", "Break"]);
         let first = p.current_pattern;
         let copy = p.clone_pattern(first).unwrap();
         assert_eq!(p.patterns[1].name, "Pattern 1 copy");
         assert_eq!(p.patterns[1].notes, p.patterns[0].notes);
         let fresh = p.new_pattern();
-        assert_eq!(p.patterns[2].name, "Pattern 2");
+        assert_eq!(p.patterns.last().unwrap().name, "Pattern 2");
         p.rename_pattern(copy, "  Fill ");
         assert_eq!(p.patterns[1].name, "Fill");
         p.rename_pattern(copy, "   ");
@@ -696,8 +780,33 @@ mod tests {
         // Clones of clones get distinct names.
         p.clone_pattern(first).unwrap();
         p.clone_pattern(first).unwrap();
-        let names: Vec<_> = p.patterns.iter().map(|p| p.name.as_str()).collect();
-        assert!(names.contains(&"Pattern 1 copy 2"), "{names:?}");
+        assert!(
+            names(&p).contains(&"Pattern 1 copy 2".to_owned()),
+            "{:?}",
+            names(&p)
+        );
+    }
+
+    #[test]
+    fn demo_arrangement_uses_every_pattern() {
+        let p = Project::demo();
+        let pl = &p.playlist;
+        assert_eq!(pl.song_end(), 12 * 4 * PPQ);
+        for pat in &p.patterns {
+            assert!(
+                pl.clips.iter().any(|c| c.kind == ClipKind::Pattern(pat.id)),
+                "{}",
+                pat.name
+            );
+        }
+        let intro = &p.patterns[1];
+        assert_eq!(intro.notes.len(), 2, "kick and hat");
+        assert_eq!(pl.markers.len(), 3);
+        assert!(pl
+            .clips
+            .iter()
+            .any(|c| matches!(&c.kind, ClipKind::Automation(a)
+            if a.target.is_valid(&p.mixer))));
     }
 
     #[test]

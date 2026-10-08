@@ -1,7 +1,7 @@
 //! Transport bar: play/pause, stop, tempo, time signature, position, loop and metronome.
 
 use egui::{DragValue, RichText, Ui};
-use gt_core::{BarBeatTick, Tick, TimeSig};
+use gt_core::{Tick, TimeSig, TimeSigMap};
 
 use crate::GloomTheme;
 
@@ -24,16 +24,18 @@ pub struct TransportModel {
     pub state: PlayState,
     /// Playhead from the engine.
     pub position: Tick,
-    /// Tempo in BPM.
+    /// Tempo in BPM at the playhead.
     pub bpm: f64,
-    /// Time signature.
+    /// Time signature at the playhead.
     pub time_sig: TimeSig,
+    /// Song mode plays the playlist; pattern mode loops the current pattern.
+    pub song_mode: bool,
     /// Loop on/off.
     pub loop_enabled: bool,
-    /// First bar of the loop, from 1.
-    pub loop_start_bar: i64,
-    /// Loop length in bars.
-    pub loop_bars: i64,
+    /// First tick of the loop.
+    pub loop_start: Tick,
+    /// First tick after the loop.
+    pub loop_end: Tick,
     /// Metronome on/off.
     pub metronome: bool,
     /// False when no audio stream is open (controls still edit settings).
@@ -47,9 +49,10 @@ impl Default for TransportModel {
             position: Tick::ZERO,
             bpm: 120.0,
             time_sig: TimeSig::default(),
+            song_mode: false,
             loop_enabled: false,
-            loop_start_bar: 1,
-            loop_bars: 4,
+            loop_start: Tick(0),
+            loop_end: Tick(4 * 3840),
             // Off by default now that the rack plays a beat; one click turns it on.
             metronome: false,
             audio_online: false,
@@ -64,21 +67,25 @@ pub enum TransportAction {
     PlayPause,
     /// Stop (twice: back to bar 1).
     Stop,
-    /// New tempo.
+    /// New tempo at the playhead.
     SetBpm(f64),
-    /// New time signature.
+    /// New time signature at the playhead.
     SetTimeSig(TimeSig),
+    /// Switch between pattern and song mode (the model holds the new value).
+    SetSongMode(bool),
     /// Loop on/off or region changed (the model holds the new values).
     LoopChanged,
     /// Metronome on/off.
     SetMetronome(bool),
 }
 
-/// Draws the bar. Edits change `m` in place and are reported as actions.
+/// Draws the bar. Edits change `m` in place and are reported as actions. `sigs` places bar
+/// numbers.
 pub fn transport_bar(
     ui: &mut Ui,
     theme: &GloomTheme,
     m: &mut TransportModel,
+    sigs: &TimeSigMap,
 ) -> Vec<TransportAction> {
     let mut actions = Vec::new();
     let dim = |s: &str| RichText::new(s).color(theme.text_dim);
@@ -98,8 +105,23 @@ pub fn transport_bar(
             actions.push(TransportAction::Stop);
         }
 
+        for (song, label, tip) in [
+            (false, "Pat", "Pattern mode: loop the current pattern (L)"),
+            (true, "Song", "Song mode: play the playlist (L)"),
+        ] {
+            if ui
+                .add(egui::Button::selectable(m.song_mode == song, label))
+                .on_hover_text(tip)
+                .clicked()
+                && m.song_mode != song
+            {
+                m.song_mode = song;
+                actions.push(TransportAction::SetSongMode(song));
+            }
+        }
+
         ui.separator();
-        let pos = BarBeatTick::from_tick(m.position, m.time_sig);
+        let pos = sigs.bbt(m.position);
         let colour = if m.audio_online {
             theme.accent
         } else {
@@ -114,7 +136,8 @@ pub fn transport_bar(
         .on_hover_text("Bar : beat : tick (960 ticks per quarter note)");
 
         ui.separator();
-        ui.label(dim("BPM"));
+        ui.label(dim("BPM"))
+            .on_hover_text("Tempo at the playhead; add changes in the playlist ruler");
         let mut bpm = m.bpm;
         let r = ui.add(
             DragValue::new(&mut bpm)
@@ -154,16 +177,19 @@ pub fn transport_bar(
             m.loop_enabled = !m.loop_enabled;
             actions.push(TransportAction::LoopChanged);
         }
+        // The loop is shown in bars; editing here snaps it to bar lines (the playlist ruler
+        // sets any region).
+        let first = sigs.bar_of(m.loop_start.0);
+        let mut start_bar = first + 1;
+        let mut bars = (sigs.bar_of(m.loop_end.0 - 1) - first + 1).max(1);
         ui.label(dim("bar"));
-        let a = ui.add(
-            DragValue::new(&mut m.loop_start_bar)
-                .range(1..=9999)
-                .speed(0.05),
-        );
+        let a = ui.add(DragValue::new(&mut start_bar).range(1..=9999).speed(0.05));
         ui.label(dim("for"));
-        let b = ui.add(DragValue::new(&mut m.loop_bars).range(1..=999).speed(0.05));
+        let b = ui.add(DragValue::new(&mut bars).range(1..=999).speed(0.05));
         ui.label(dim("bars"));
         if a.changed() || b.changed() {
+            m.loop_start = Tick(sigs.bar_start(start_bar - 1));
+            m.loop_end = Tick(sigs.bar_start(start_bar - 1 + bars));
             actions.push(TransportAction::LoopChanged);
         }
 

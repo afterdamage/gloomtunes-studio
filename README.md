@@ -4,10 +4,11 @@ An original, open-source, pattern-based digital audio workstation written in Rus
 Windows 10/11 and Ubuntu 22.04+ from a single codebase. Channel rack, piano roll, mixer and
 playlist, with built-in instruments and effects, wrapped in a dark, moody "Gloom" interface.
 
-> **Status:** early development. Step 6 of the [roadmap](ROADMAP.md): a mixer with 64 inserts,
-> 4 send buses and eight built-in effects (EQ, compressor, delay, reverb, chorus, distortion,
-> limiter, stereo width), on top of Gloom Synth, a subtractive polysynth with presets, a piano roll with undo/redo, a channel rack with
-> a step sequencer, patterns, a sampler with ADSR, a sample browser, four built-in drums and a
+> **Status:** early development. Step 7 of the [roadmap](ROADMAP.md): a playlist that arranges
+> pattern, audio and automation clips on unlimited tracks, with tempo and time-signature changes,
+> markers and a loop region, on top of a mixer with 64 inserts, 4 send buses and eight built-in
+> effects, Gloom Synth (a subtractive polysynth with presets), a piano roll with undo/redo, a
+> channel rack with a step sequencer, a sampler, a sample browser, four built-in drums and a
 > sample-accurate transport. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 
 ## Goals
@@ -48,9 +49,29 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
 
 ### Using it
 
-- **Space** plays and pauses. The demo pattern (kick, snare, hat, clap and a Gloom Synth bass)
-  starts looping.
-- Click a step to toggle it; scroll over a lit step to change its velocity.
+- **Space** plays and pauses. The app opens on the **Playlist** with a 12-bar demo song (an
+  intro, the main beat, a break with a delay swell and the beat again) in **Song** mode. **Pat**
+  (or **L** to toggle) loops just the current pattern instead.
+- **Playlist** (tab or **F5**):
+  - Tools: Draw (**P**) places the pattern picked in the toolbar, Select (**E**) or Ctrl+drag
+    draws a selection box, Slice (**C**) splits a clip where you click. Snap is bar, beat, 1/8,
+    1/16 or off; hold Alt to ignore it.
+  - Drag a clip to move it (also to another track), drag either edge to resize, Shift+drag to
+    slip the content inside the clip, right-click or right-drag to delete, double-click a
+    pattern clip to open it in the piano roll. Delete, Ctrl+A, Ctrl+D (duplicate after the
+    selection) and **M** (mute clips) work while the mouse is over the playlist.
+  - Drag a file from the browser onto a track to add an audio clip; its waveform appears once it
+    has loaded. The track's "audio to" box picks the mixer insert its audio goes to.
+  - **+ Automation** adds a clip for a mixer fader, pan or any effect knob. Click inside it to add
+    a point, drag points, right-click one to delete it.
+  - Track names are editable; M and S mute and solo a track; right-click a header for colours,
+    insert and delete. **+ Track** adds one; there is no limit.
+  - The ruler: click the bars row to move the playhead, drag it to set the loop. Right-click to
+    add a marker, tempo change or time-signature change; drag a flag to move it, double-click to
+    edit it.
+  - Wheel scrolls tracks, Shift+wheel scrolls time, Ctrl+wheel zooms, Alt+wheel changes track
+    height.
+- **Channel rack** (tab or **F6**): click a step to toggle it; scroll over a lit step to change its velocity.
 - **M** and **S** mute and solo a channel; the two small knobs are volume and pan (drag up/down,
   Shift for fine, double-click to reset).
 - Hold a channel's name to hear it; right-click it to delete the channel. **+ Sampler** and
@@ -94,7 +115,7 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
     with the kick and has a limiter on the master. Latency added by the limiter is compensated on
     every path and shown on the master strip.
 - **Undo** and **Redo** (top right, Ctrl+Z and Ctrl+Shift+Z or Ctrl+Y) cover notes, steps,
-  channels, patterns, the mixer and settings.
+  channels, patterns, the mixer, the playlist, tempo and time signatures and settings.
 
 ### Checks
 
