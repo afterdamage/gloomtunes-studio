@@ -12,7 +12,9 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+gt-core.workspace = true
 gt-dsp.workspace = true
+rtrb.workspace = true
 
 [dev-dependencies]
 assert_no_alloc.workspace = true

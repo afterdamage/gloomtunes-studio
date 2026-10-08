@@ -23,6 +23,7 @@ egui = "0.36"
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
 assert_no_alloc = "1.1"
+rtrb = "0.4"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

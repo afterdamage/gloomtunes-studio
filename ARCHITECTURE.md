@@ -1,6 +1,6 @@
 # GloomTunes Studio: Architecture
 
-Status: **design baseline (Prompt 0), Step 1 implemented** (workspace, test tone, device panel, CI). This document is the contract that
+Status: **design baseline (Prompt 0); Steps 1 and 2 implemented** (workspace, device panel, CI, command queue, transport, scheduler, metronome). This document is the contract that
 Prompts 1 to 12 implement; when an implementation step has to deviate, the step updates this file
 and adds an entry to the [decision log](#9-decision-log).
 
@@ -309,6 +309,11 @@ Each producer thread gets its own queue, so there is never a multi-producer queu
 Every variant is small (target: at most 32 bytes); large payloads travel as a `Box` whose
 allocation happened on the UI side.
 
+As of Step 2 the implemented variants are `Play`, `Pause`, `Stop`, `Locate`, `SetLoop`,
+`SetTempoMap(Box<TempoMap>)` (the tempo part of `ApplySong`, until the song snapshot exists),
+`SetTimeSig`, `SetMetronome`, `SetTestTone`, `FadeOut` and `FadeIn`. The size limit is enforced
+by a compile-time assertion. The rest of the enum below arrives with the steps that need it.
+
 ```rust
 pub enum EngineCommand {
     // transport
@@ -457,10 +462,13 @@ what makes export bit-identical to playback (§7.5).
 
 Per quantum `[q0, q0 + 64)`:
 
-1. **Timeline splits.** If the loop end, a tempo change, or a transport command falls inside the
-   quantum, the quantum is split at that frame into sub-blocks, and each sub-block is scheduled with
-   its own anchor. This is the "split each buffer at event boundaries" requirement at the level
-   where it matters: time itself changes.
+1. **Timeline splits.** If the loop end falls inside the quantum, the quantum is split at that
+   frame and the second part is scheduled from a new anchor at the loop start. Whether the loop
+   end is "ahead" is decided in the frame domain with the same rounding as events; if playback was
+   located past the loop end it plays on without wrapping. Tempo changes need no split: the
+   tempo map's piecewise conversion places events after a change exactly. Transport commands
+   take effect at quantum boundaries (they come from the UI, whose timing is not sample-exact
+   anyway). Implemented in `gt-engine/src/transport.rs`.
 2. **Event gathering.** For each sub-block the scheduler binary-searches the compiled event array
    (sorted by sample time, see §7.2) for events in range and writes `(offset, event)` pairs into
    preallocated per-node event lists (fixed capacity, overflow counted in telemetry and the excess
@@ -791,9 +799,13 @@ polled), and float determinism across compilers.
 | D11 | `catch_unwind` around the audio callback, release keeps `panic = "unwind"` | Last-resort protection; output silence instead of tearing down the process | If it costs measurable CPU (it should not) |
 | D12 | Rust edition 2021, stable toolchain | As specified in the project instructions | Edition 2024 migration can be a standalone chore later |
 | D13 | License GPL-3.0-or-later | Project instructions say GPL-3.0; "or later" is the FSF-recommended form | Owner may prefer GPL-3.0-only |
-| D14 | Step 1 controls the engine with two atomics (`tone_on`, telemetry) instead of the `rtrb` command queue | The only command is start/stop; the queue arrives with real commands in Step 2 | Step 2 (planned replacement) |
+| D14 | Step 1 controlled the engine with two atomics instead of the `rtrb` command queue | The only command was start/stop | **Done in Step 2:** replaced by the queue |
 | D15 | Ship both eframe renderers: wgpu by default, glow (OpenGL) as automatic fallback | Machines without Vulkan/DX12 drivers (VMs, old GPUs, remote desktops) still get a window | If glow is never needed in practice, drop it in Step 12 to save binary size |
 | D16 | cpal 0.18 and eframe/egui 0.36 | Current releases at Step 1 | Upgrade deliberately, one step at a time |
+| D17 | Stop returns to where playback last started; Stop while stopped returns to bar 1. Pause holds the position | Familiar from pattern-based DAWs; two keypresses reach bar 1 | — |
+| D18 | Loop wrap decided in the frame domain; playback located past the loop end plays on without wrapping | Same rounding as events, so the wrap frame and the loop-start event can never disagree | — |
+| D19 | The render quantum is mono until the mixer exists; it is copied to every device channel | Nothing stereo exists yet; avoids half-built bus code | Step 3 or 6 introduces planar stereo |
+| D20 | Metronome: 60 ms damped sine burst (1 kHz, 1.6 kHz downbeat, -9 dBFS), cosine start | Original synthesized sound, no sample needed; non-zero first sample makes onsets measurable in tests | — |
 
 ---
 
