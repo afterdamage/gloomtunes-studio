@@ -7,7 +7,7 @@
 //! - when only notes changed, one [`Edit::Notes`] per changed (pattern, channel) list, holding
 //!   that list before and after (a step of a 10,000-note pattern costs only the lists it
 //!   touched);
-//! - anything else (channels, pattern list, swing) is recorded as [`Edit::Whole`], a before/after
+//! - anything else (channels, pattern list, swing, the mixer) is recorded as [`Edit::Whole`], a before/after
 //!   copy of the document. Those edits are rare and small.
 //!
 //! Which pattern is selected is view state and is never undone. A drag that moves notes for a
@@ -186,6 +186,7 @@ fn apply(p: &mut Project, e: &Edit, side: Side) {
 fn diff(a: &Project, b: &Project) -> Vec<Edit> {
     let same_shape = a.channels == b.channels
         && a.swing == b.swing
+        && a.mixer == b.mixer
         && a.patterns.len() == b.patterns.len()
         && a.patterns
             .iter()
@@ -307,5 +308,18 @@ mod tests {
         p.swing = 0.0;
         h.commit(&p, "Swing");
         assert!(h.redo_label().is_none());
+    }
+
+    #[test]
+    fn mixer_changes_are_undoable() {
+        let mut p = Project::demo();
+        let mut h = History::new(&p);
+        p.mixer.strips[3].volume = 0.25;
+        p.mixer.strips[2].slots[4] = Some(gt_core::EffectSlot::new(gt_core::EffectKind::Chorus));
+        assert!(h.commit(&p, "Mixer"));
+        h.undo(&mut p);
+        assert_eq!(p.mixer, Project::demo().mixer);
+        h.redo(&mut p);
+        assert_eq!(p.mixer.strips[3].volume, 0.25);
     }
 }

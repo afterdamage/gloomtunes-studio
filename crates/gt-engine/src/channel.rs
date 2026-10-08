@@ -150,6 +150,11 @@ impl ChannelSlot {
         }
     }
 
+    /// Mixer strip this channel plays into.
+    pub(crate) fn route(&self) -> u8 {
+        self.params.route
+    }
+
     /// True if any voice is sounding.
     pub(crate) fn is_active(&self) -> bool {
         self.voices.iter().any(SamplerVoice::is_active) || self.synth.is_active()

@@ -19,3 +19,7 @@ insta.workspace = true
 [[bench]]
 name = "synth"
 harness = false
+
+[[bench]]
+name = "fx"
+harness = false

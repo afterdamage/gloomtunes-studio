@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use gt_core::{SampleData, TempoMap, Tick, TimeSig};
 
+use crate::mixer::{EffectBox, MixerParams};
 use crate::song::{ChannelParams, SongSnapshot};
 
 /// Loop region in ticks. Playback wraps from `end` back to `start` while `enabled`.
@@ -93,6 +94,29 @@ pub enum EngineCommand {
     },
     /// Play a sample once through the preview voice (sample browser), or stop it with `None`.
     PreviewSample(Option<Arc<SampleData>>),
+    /// Replace the mixer settings (faders, pans, routing, processing order, effect bypass).
+    /// Levels glide; effects keep their state.
+    SetMixer(Box<MixerParams>),
+    /// Put an effect into a mixer slot, or empty it. The previous effect comes back as garbage.
+    SetEffect {
+        /// Strip index.
+        strip: u8,
+        /// Slot index, below `FX_SLOTS`.
+        slot: u8,
+        /// The new effect, built with [`crate::create_effect`].
+        effect: Option<EffectBox>,
+    },
+    /// Change one effect parameter (plain value; the effect smooths it).
+    SetEffectParam {
+        /// Strip index.
+        strip: u8,
+        /// Slot index.
+        slot: u8,
+        /// Parameter index in the effect's table.
+        index: u8,
+        /// New value.
+        value: f32,
+    },
 }
 
 impl EngineCommand {
@@ -106,6 +130,8 @@ impl EngineCommand {
                 | Self::SetChannelParams { .. }
                 | Self::SetChannelSample { .. }
                 | Self::PreviewSample(_)
+                | Self::SetMixer(_)
+                | Self::SetEffect { .. }
         )
     }
 }
@@ -160,4 +186,8 @@ pub enum Garbage {
     Params(Box<ChannelParams>),
     /// A sample no longer used by a channel or the preview voice.
     Sample(Arc<SampleData>),
+    /// A mixer-settings box, already copied into the mixer.
+    Mixer(Box<MixerParams>),
+    /// An effect taken out of a slot.
+    Effect(EffectBox),
 }

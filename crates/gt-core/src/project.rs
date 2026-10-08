@@ -6,6 +6,8 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::effects::{EffectKind, EffectSlot};
+use crate::mixer::{Mixer, StripKind, FIRST_SEND, FX_SLOTS, INSERTS, MASTER};
 use crate::synth::SynthPatch;
 use crate::time::PPQ;
 
@@ -157,6 +159,8 @@ pub struct Channel {
     pub solo: bool,
     /// What makes the sound.
     pub instrument: Instrument,
+    /// Mixer strip the channel plays into ([`crate::MASTER`] or an insert).
+    pub insert: usize,
 }
 
 /// The sound source of a channel.
@@ -326,6 +330,8 @@ pub struct Project {
     /// Channel-rack swing from 0 (straight) to 1: delays every second 1/16 step by up to half
     /// a step. About 0.67 gives a triplet feel.
     pub swing: f32,
+    /// Master, inserts and send buses.
+    pub mixer: Mixer,
     next_id: u32,
 }
 
@@ -343,6 +349,7 @@ impl Project {
             patterns: Vec::new(),
             current_pattern: PatternId(0),
             swing: 0.0,
+            mixer: Mixer::new(),
             next_id: 1,
         };
         let id = p.new_pattern();
@@ -403,7 +410,69 @@ impl Project {
                 })
                 .collect(),
         );
+        p.demo_mix(bass);
         p
+    }
+
+    /// Mixer settings for the demo: each channel on its own insert (from `add_instrument`), a
+    /// reverb send and a delay send, the bass ducked by the kick through a sidechain compressor,
+    /// and a limiter on the master.
+    fn demo_mix(&mut self, bass: ChannelId) {
+        let insert_of = |p: &Self, name: &str| {
+            p.channels
+                .iter()
+                .find(|c| c.name == name)
+                .map_or(MASTER, |c| c.insert)
+        };
+        let (kick, snare, hat, clap) = (
+            insert_of(self, "Kick"),
+            insert_of(self, "Snare"),
+            insert_of(self, "Hat"),
+            insert_of(self, "Clap"),
+        );
+        let bass = self
+            .channel_index(bass)
+            .map_or(MASTER, |i| self.channels[i].insert);
+        let reverb = FIRST_SEND;
+        let delay = FIRST_SEND + 1;
+        let m = &mut self.mixer;
+        m.strips[reverb].name = "Reverb".to_owned();
+        m.strips[reverb].slots[0] = Some(
+            EffectSlot::new(EffectKind::Reverb)
+                .with("decay", 1.8)
+                .with("mix", 1.0)
+                .with("damping", 5000.0),
+        );
+        m.strips[delay].name = "Delay".to_owned();
+        m.strips[delay].slots[0] = Some(
+            EffectSlot::new(EffectKind::Delay)
+                .with("time", 6.0)
+                .with("mix", 1.0)
+                .with("feedback", 0.35),
+        );
+        m.strips[delay].volume = 0.7;
+        m.strips[snare].sends[0] = 0.35;
+        m.strips[clap].sends[0] = 0.45;
+        m.strips[hat].sends[1] = 0.25;
+        m.strips[hat].pan = 0.2;
+        m.strips[bass].slots[0] = Some(
+            EffectSlot::new(EffectKind::Eq)
+                .with("b1.type", 4.0)
+                .with("b1.freq", 35.0)
+                .with("b4.freq", 400.0)
+                .with("b4.gain", -3.0),
+        );
+        m.strips[bass].slots[1] = Some(
+            EffectSlot::new(EffectKind::Compressor)
+                .with("sidechain", 1.0)
+                .with("threshold", -30.0)
+                .with("ratio", 6.0)
+                .with("attack", 1.0)
+                .with("release", 140.0),
+        );
+        m.strips[bass].sidechain = Some(kick);
+        m.strips[MASTER].slots[FX_SLOTS - 1] =
+            Some(EffectSlot::new(EffectKind::Limiter).with("ceiling", -0.3));
     }
 
     fn next_id(&mut self) -> u32 {
@@ -433,6 +502,16 @@ impl Project {
             return None;
         }
         let id = ChannelId(self.next_id());
+        // Each new channel gets the first insert no other channel uses, named after it.
+        let insert = (1..=INSERTS)
+            .find(|&i| self.channels.iter().all(|c| c.insert != i))
+            .unwrap_or(MASTER);
+        if insert != MASTER {
+            let strip = &mut self.mixer.strips[insert];
+            if strip.name == StripKind::Insert(insert).default_name() {
+                strip.name = name.to_owned();
+            }
+        }
         self.channels.push(Channel {
             id,
             name: name.to_owned(),
@@ -441,6 +520,7 @@ impl Project {
             mute: false,
             solo: false,
             instrument,
+            insert,
         });
         Some(id)
     }
@@ -552,6 +632,19 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demo_mix_routes_each_channel_to_its_own_insert() {
+        let p = Project::demo();
+        let inserts: Vec<usize> = p.channels.iter().map(|c| c.insert).collect();
+        assert_eq!(inserts, vec![1, 2, 3, 4, 5]);
+        assert_eq!(p.mixer.strips[1].name, "Kick");
+        assert_eq!(p.mixer.strips[5].sidechain, Some(1));
+        assert!(p.mixer.processing_order().is_some());
+        let mut copy = p.mixer.clone();
+        copy.sanitize();
+        assert_eq!(copy, p.mixer);
+    }
 
     #[test]
     fn demo_has_drums_a_beat_and_a_synth_bass() {

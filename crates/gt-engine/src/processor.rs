@@ -9,6 +9,7 @@ use rtrb::{Consumer, Producer};
 
 use crate::channel::ChannelSlot;
 use crate::command::{EngineCommand, EngineEvent, Garbage, TransportState};
+use crate::mixer::MixerEngine;
 use crate::song::{ChannelParams, SongSnapshot};
 use crate::transport::{EventBuf, EventKind, ScheduledEvent, Transport};
 use crate::{EngineConfig, Telemetry, FADE_SECONDS, RENDER_QUANTUM, SCOPE_LEN};
@@ -63,6 +64,8 @@ pub struct AudioProcessor {
     voice_age: u64,
     /// Channel slot that feeds the oscilloscope.
     scope_slot: Option<usize>,
+    /// Mixer strips, effects and routing.
+    mixer: Box<MixerEngine>,
 
     click: Click,
     click_gain: f32,
@@ -121,6 +124,7 @@ impl AudioProcessor {
             preview,
             voice_age: 0,
             scope_slot: None,
+            mixer: Box::new(MixerEngine::new(sr)),
             click: Click::new(sr),
             click_gain: db_to_gain(CLICK_DBFS),
             metronome: true,
@@ -216,6 +220,15 @@ impl AudioProcessor {
         for slot in 0..self.channels.len() {
             self.render_channel(slot);
         }
+        let bpm = self.transport.bpm_at(self.frame_clock) as f32;
+        self.mixer.process(
+            &mut self.scratch_l,
+            &mut self.scratch_r,
+            bpm,
+            &self.telemetry,
+        );
+        self.quantum_l.copy_from_slice(&self.scratch_l);
+        self.quantum_r.copy_from_slice(&self.scratch_r);
         if self.preview.is_active() {
             self.scratch_l.fill(0.0);
             self.scratch_r.fill(0.0);
@@ -277,7 +290,8 @@ impl AudioProcessor {
             }
         }
         ch.render_voices(&mut sl[cursor..], &mut sr[cursor..]);
-        let peak = ch.mix_into((sl, sr), (&mut self.quantum_l, &mut self.quantum_r));
+        let (ml, mr) = self.mixer.direct_mut(usize::from(ch.route()));
+        let peak = ch.mix_into((sl, sr), (ml, mr));
         self.telemetry.channel_peaks[slot].fetch_max(peak, Ordering::Relaxed);
         if self.scope_slot == Some(slot) {
             for (l, r) in self.scratch_l.iter_mut().zip(&self.scratch_r) {
@@ -394,6 +408,39 @@ impl AudioProcessor {
                     ch.note_off(key);
                 }
             }
+            EngineCommand::SetMixer(params) => {
+                self.mixer.set_params(&params);
+                self.telemetry
+                    .latency_frames
+                    .store(self.mixer.latency() as u32, Ordering::Relaxed);
+                self.retire(Garbage::Mixer(params));
+            }
+            EngineCommand::SetEffect {
+                strip,
+                slot,
+                effect,
+            } => {
+                let old = self
+                    .mixer
+                    .set_effect(usize::from(strip), usize::from(slot), effect);
+                self.telemetry
+                    .latency_frames
+                    .store(self.mixer.latency() as u32, Ordering::Relaxed);
+                if let Some(old) = old {
+                    self.retire(Garbage::Effect(old));
+                }
+            }
+            EngineCommand::SetEffectParam {
+                strip,
+                slot,
+                index,
+                value,
+            } => self.mixer.set_effect_param(
+                usize::from(strip),
+                usize::from(slot),
+                usize::from(index),
+                value,
+            ),
             EngineCommand::PreviewSample(sample) => {
                 let start = sample.is_some();
                 if let Some(old) = self.preview.set_sample(sample) {
@@ -408,6 +455,11 @@ impl AudioProcessor {
         let after = self.transport.state();
         if before == TransportState::Playing && after != TransportState::Playing {
             self.release_all_channels();
+        }
+        if before == TransportState::Stopped && after == TransportState::Playing {
+            // Effects start from silence at play, so a capture from a stopped transport matches
+            // an offline export of the same range (ARCHITECTURE.md §7.5).
+            self.mixer.reset_effects();
         }
         if before != after {
             self.post(EngineEvent::TransportChanged {

@@ -196,6 +196,12 @@ impl Transport {
         }
     }
 
+    /// Tempo in BPM at the position of engine frame `now`.
+    pub fn bpm_at(&self, now: u64) -> f64 {
+        self.tempo
+            .bpm_at(gt_core::Tick(self.position_at(now).floor() as i64))
+    }
+
     /// Starts playback at frame `now`. No-op while already playing.
     pub fn play(&mut self, now: u64) {
         if self.state == TransportState::Playing {
