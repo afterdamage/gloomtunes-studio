@@ -5,12 +5,16 @@
 
 use std::sync::Arc;
 
-use gt_core::playlist::norm_to_volume;
-use gt_core::synth::{ModDest as DocDest, ModSource as DocSource, SynthParam as P};
-use gt_core::{
-    Adsr, AutoPoint, AutoTarget, Channel, ClipKind, Instrument, LoopMode, ParamInfo, Pattern,
-    Project, SampleData, SampleSource, SynthPatch, STEP_TICKS,
+use gt_core::playlist::Curve;
+use gt_core::synth::{
+    ModDest as DocDest, ModSlot as DocModSlot, ModSource as DocSource, SynthParam as P,
 };
+use gt_core::{
+    Adsr, AutoPoint, Channel, ClipKind, Instrument, LoopMode, ParamId, ParamInfo, Pattern, Project,
+    SampleData, SampleSource, SynthPatch, STEP_TICKS,
+};
+
+use crate::control::ParamDest;
 use gt_dsp::synth::{
     EnvSettings, LfoSettings, ModDest, ModSlot, ModSource, OscSettings, SynthSettings, MOD_SLOTS,
 };
@@ -76,45 +80,19 @@ pub struct AudioPlay {
     pub fade_out: bool,
 }
 
-/// What an automation lane moves, as the engine addresses it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AutoDest {
-    /// A strip's fader; normalized values follow the fader law.
-    StripVolume(u8),
-    /// A strip's balance; 0..1 maps to -1..1.
-    StripPan(u8),
-    /// An effect parameter; `info` maps 0..1 to the plain value.
-    Effect {
-        /// Strip.
-        strip: u8,
-        /// Slot.
-        slot: u8,
-        /// Parameter index.
-        index: u8,
-        /// Range and taper.
-        info: ParamInfo,
-    },
-}
-
-impl AutoDest {
-    /// Plain value for a normalized one.
-    pub fn plain(&self, t: f32) -> f32 {
-        match self {
-            Self::StripVolume(_) => norm_to_volume(t),
-            Self::StripPan(_) => t.clamp(0.0, 1.0) * 2.0 - 1.0,
-            Self::Effect { info, .. } => info.from_normalized(t),
-        }
-    }
-}
-
-/// One automated parameter over the whole timeline: absolute (tick, normalized value) points,
-/// interpolated linearly, holding the first and last values outside them.
+/// One automated parameter over the whole timeline: absolute (tick, normalized value) points
+/// shaped by their curves, holding the first and last values outside them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AutoLane {
-    /// Target.
-    pub dest: AutoDest,
+    /// Where the parameter lives.
+    pub dest: ParamDest,
+    /// Range and taper, to turn normalized values into plain ones.
+    pub info: ParamInfo,
     /// Points sorted by tick.
     pub points: Vec<AutoPoint>,
+    /// Set by the engine when a modulator of the same parameter adds to this lane (the lane
+    /// is then applied with the modulation instead of on its own).
+    pub(crate) modulated: bool,
 }
 
 /// What the engine plays, flattened from the document.
@@ -186,7 +164,7 @@ impl SongSnapshot {
         let tempo = &project.tempo;
         let mut events = Vec::new();
         let mut audio: Vec<AudioPlay> = Vec::new();
-        let mut lanes: Vec<(AutoTarget, Vec<Span<'_>>)> = Vec::new();
+        let mut lanes: Vec<(ParamId, Vec<Span<'_>>)> = Vec::new();
         for clip in &pl.clips {
             if clip.muted || !pl.is_track_audible(clip.track) {
                 continue;
@@ -223,7 +201,7 @@ impl SongSnapshot {
                     });
                 }
                 ClipKind::Automation(a) => {
-                    if !a.target.is_valid(&project.mixer) || a.points.is_empty() {
+                    if !a.target.is_valid(project) || a.points.is_empty() {
                         continue;
                     }
                     let span = (clip.start, clip.end(), clip.offset, a.points.as_slice());
@@ -240,8 +218,10 @@ impl SongSnapshot {
             .into_iter()
             .filter_map(|(target, spans)| {
                 Some(AutoLane {
-                    dest: auto_dest(target)?,
+                    dest: ParamDest::resolve(&target, project)?,
+                    info: *target.info(),
                     points: lane_points(spans),
+                    modulated: false,
                 })
             })
             .collect();
@@ -330,28 +310,13 @@ fn expand_pattern(
     }
 }
 
-fn auto_dest(t: AutoTarget) -> Option<AutoDest> {
-    let u = |x: usize| u8::try_from(x).ok();
-    Some(match t {
-        AutoTarget::StripVolume(s) => AutoDest::StripVolume(u(s)?),
-        AutoTarget::StripPan(s) => AutoDest::StripPan(u(s)?),
-        AutoTarget::EffectParam {
-            strip,
-            slot,
-            kind,
-            index,
-        } => AutoDest::Effect {
-            strip: u(strip)?,
-            slot: u(slot)?,
-            index: u(index)?,
-            info: *kind.params().get(index)?,
-        },
-    })
-}
+/// Segments a clip cut inside a curved segment is resampled into (straight pieces).
+const CUT_PIECES: usize = 16;
 
 /// Lays clip spans `(start, end, offset, points)` out on the timeline. Spans are taken in start
-/// order and each is cut where the next begins; every span contributes its value at both edges
-/// plus the points inside it.
+/// order and each is cut where the next begins. Inside a span the clip's points keep their
+/// curves; a curved segment that the cut splits is resampled into straight pieces, since a
+/// piece of an S-curve is not an S-curve. Between spans the last value holds.
 fn lane_points(mut spans: Vec<Span<'_>>) -> Vec<AutoPoint> {
     spans.sort_by_key(|s| s.0);
     let mut out = Vec::new();
@@ -360,25 +325,64 @@ fn lane_points(mut spans: Vec<Span<'_>>) -> Vec<AutoPoint> {
         if end <= start {
             continue;
         }
-        let at = |t: i64| gt_core::playlist::value_at(points, (t - start + offset) as f64);
-        out.push(AutoPoint {
-            at: start,
-            value: at(start),
-        });
-        for p in points {
-            let t = start + p.at - offset;
-            if t > start && t < end {
+        let (lo, hi) = (offset, offset + (end - start));
+        let to_tick = |x: i64| start + x - offset;
+        let value = |x: f64| gt_core::playlist::value_at(points, x);
+        let mut x = lo;
+        while x < hi {
+            // The segment containing x: from points[k - 1] to points[k].
+            let k = points.partition_point(|p| p.at <= x);
+            // Several points on one tick make a step: keep all but the last (which starts the
+            // segment below), so the value just before x stays what the clip drew.
+            let first = points.partition_point(|p| p.at < x);
+            for p in points.get(first..k.saturating_sub(1)).unwrap_or(&[]) {
                 out.push(AutoPoint {
-                    at: t,
+                    at: to_tick(x),
                     value: p.value,
+                    curve: p.curve,
                 });
             }
+            let seg_end = points.get(k).map_or(hi, |p| p.at.min(hi));
+            let curve = match k {
+                0 => Curve::Hold,
+                k if k == points.len() => Curve::Hold,
+                k => points[k - 1].curve,
+            };
+            let whole = k > 0 && points[k - 1].at == x && points.get(k).is_some_and(|p| p.at <= hi);
+            if whole || curve.cuts_cleanly() {
+                out.push(AutoPoint {
+                    at: to_tick(x),
+                    value: value(x as f64),
+                    curve,
+                });
+            } else {
+                let span = (seg_end - x) as f64;
+                for j in 0..CUT_PIECES {
+                    let at = x as f64 + span * j as f64 / CUT_PIECES as f64;
+                    out.push(AutoPoint {
+                        at: to_tick(at.round() as i64),
+                        value: value(at),
+                        curve: Curve::Linear,
+                    });
+                }
+            }
+            x = seg_end;
         }
         out.push(AutoPoint {
             at: end,
-            value: at(end),
+            value: value(hi as f64),
+            curve: Curve::Hold,
         });
     }
+    // Resampling can round two points onto one tick; keep the later.
+    out.dedup_by(|b, a| {
+        if a.at == b.at && a.curve == Curve::Linear && b.curve == Curve::Linear {
+            *a = *b;
+            true
+        } else {
+            false
+        }
+    });
     out
 }
 
@@ -397,10 +401,12 @@ pub enum InstrumentKind {
 pub struct ChannelParams {
     /// Instrument.
     pub kind: InstrumentKind,
-    /// Synth settings (used when `kind` is `Synth`).
-    pub synth: SynthSettings,
-    /// Linear gain; 0 when muted or silenced by another channel's solo.
+    /// The synth's knobs and modulation matrix (used when `kind` is `Synth`).
+    pub patch: PatchValues,
+    /// Linear gain (the channel's volume).
     pub gain: f32,
+    /// Muted, or silenced by another channel's solo: the channel plays at gain 0.
+    pub silenced: bool,
     /// Pan, -1 to 1.
     pub pan: f32,
     /// Transposition in semitones.
@@ -421,8 +427,9 @@ impl Default for ChannelParams {
     fn default() -> Self {
         Self {
             kind: InstrumentKind::Sampler,
-            synth: SynthSettings::default(),
+            patch: PatchValues::default(),
             gain: 0.0,
+            silenced: false,
             pan: 0.0,
             pitch: 0.0,
             start: 0.0,
@@ -439,11 +446,8 @@ impl ChannelParams {
     /// another channel is soloed).
     pub fn from_channel(ch: &Channel, silenced: bool) -> Self {
         let mut p = Self {
-            gain: if silenced {
-                0.0
-            } else {
-                ch.volume.clamp(0.0, Channel::MAX_VOLUME)
-            },
+            gain: ch.volume.clamp(0.0, Channel::MAX_VOLUME),
+            silenced,
             pan: ch.pan.clamp(-1.0, 1.0),
             route: ch.insert.min(gt_core::STRIPS - 1) as u8,
             ..Self::default()
@@ -458,16 +462,55 @@ impl ChannelParams {
             }
             Instrument::Synth(patch) => {
                 p.kind = InstrumentKind::Synth;
-                p.synth = synth_settings(patch);
+                p.patch = PatchValues {
+                    values: patch.values,
+                    mods: patch.mods,
+                };
             }
         }
         p
     }
 }
 
+/// A Gloom Synth patch without its name: plain values by `SynthParam` index and the
+/// modulation matrix. Copyable, so the engine can keep one per channel and apply automation
+/// to it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PatchValues {
+    /// Values in plain units, indexed by `SynthParam`.
+    pub values: [f32; P::COUNT],
+    /// Modulation matrix.
+    pub mods: [DocModSlot; gt_core::synth::MOD_SLOTS],
+}
+
+impl Default for PatchValues {
+    fn default() -> Self {
+        let p = SynthPatch::default();
+        Self {
+            values: p.values,
+            mods: p.mods,
+        }
+    }
+}
+
+impl PatchValues {
+    /// The synth's typed settings.
+    pub fn settings(&self) -> SynthSettings {
+        synth_settings_of(&self.values, &self.mods)
+    }
+}
+
 /// Converts a document patch (values by parameter index) to the synth's typed settings.
 pub fn synth_settings(patch: &SynthPatch) -> SynthSettings {
-    let v = |p: P| p.info().clamp(patch.get(p));
+    synth_settings_of(&patch.values, &patch.mods)
+}
+
+/// [`synth_settings`] from the values and matrix alone. Real-time safe.
+fn synth_settings_of(
+    values: &[f32; P::COUNT],
+    doc_mods: &[DocModSlot; gt_core::synth::MOD_SLOTS],
+) -> SynthSettings {
+    let v = |p: P| p.info().clamp(values[p as usize]);
     let wave = |x: f32| match x as u8 {
         0 => Wave::Sine,
         1 => Wave::Triangle,
@@ -496,7 +539,7 @@ pub fn synth_settings(patch: &SynthPatch) -> SynthSettings {
         release_ms: v(r),
     };
     let mut mods = [ModSlot::default(); MOD_SLOTS];
-    for (m, d) in mods.iter_mut().zip(&patch.mods) {
+    for (m, d) in mods.iter_mut().zip(doc_mods) {
         *m = ModSlot {
             source: match d.source {
                 DocSource::Off => ModSource::Off,
@@ -667,17 +710,16 @@ mod tests {
         let p = Project::demo();
         let bass = ChannelParams::from_channel(&p.channels[4], false);
         assert_eq!(bass.kind, InstrumentKind::Synth);
-        assert_eq!(bass.synth.sub_level, 0.5);
+        assert_eq!(bass.patch.settings().sub_level, 0.5);
     }
 
     #[test]
-    fn silenced_channels_have_zero_gain() {
+    fn silenced_channels_keep_their_volume_and_say_so() {
         let p = Project::demo();
-        assert_eq!(ChannelParams::from_channel(&p.channels[0], true).gain, 0.0);
-        assert_eq!(
-            ChannelParams::from_channel(&p.channels[0], false).gain,
-            0.63
-        );
+        let a = ChannelParams::from_channel(&p.channels[0], true);
+        assert!(a.silenced);
+        assert_eq!(a.gain, 0.63);
+        assert!(!ChannelParams::from_channel(&p.channels[0], false).silenced);
     }
 
     fn song_project() -> (Project, gt_core::ChannelId, gt_core::PatternId) {
@@ -768,17 +810,11 @@ mod tests {
     fn automation_lanes_merge_clips_and_last_start_wins() {
         let mut p = Project::demo();
         let t = p.playlist.tracks[6].id;
-        let target = AutoTarget::StripPan(2);
+        let target = ParamId::strip_pan(2);
         let auto = |v0, v1| {
             ClipKind::Automation(gt_core::Automation {
                 target,
-                points: vec![
-                    AutoPoint { at: 0, value: v0 },
-                    AutoPoint {
-                        at: 1000,
-                        value: v1,
-                    },
-                ],
+                points: vec![AutoPoint::new(0, v0), AutoPoint::new(1000, v1)],
             })
         };
         p.playlist.add_clip(t, 0, 1000, auto(0.0, 1.0));
@@ -787,7 +823,13 @@ mod tests {
         let lane = s
             .automation
             .iter()
-            .find(|l| l.dest == AutoDest::StripPan(2))
+            .find(|l| {
+                l.dest
+                    == ParamDest::Strip {
+                        strip: 2,
+                        param: gt_core::StripParam::Pan,
+                    }
+            })
             .expect("lane");
         let v = |t: f64| gt_core::playlist::value_at(&lane.points, t);
         assert_eq!(v(0.0), 0.0);
@@ -795,8 +837,69 @@ mod tests {
         assert_eq!(v(499.0), 0.499);
         assert_eq!(v(500.0), 0.2, "the later clip takes over");
         assert_eq!(v(5000.0), 0.2, "holds after the last clip");
-        assert_eq!(lane.dest.plain(0.25), -0.5);
-        // The demo's delay swell is there too.
-        assert_eq!(s.automation.len(), 2);
+        assert_eq!(lane.info.from_normalized(0.25), -0.5);
+        // The demo's delay swell and bass filter are there too.
+        assert_eq!(s.automation.len(), 3);
+    }
+
+    #[test]
+    fn lanes_keep_curves_and_resample_cut_ones() {
+        let mut p = Project::empty();
+        let t = p.playlist.tracks[0].id;
+        let target = ParamId::strip_pan(3);
+        let pts = vec![
+            AutoPoint {
+                at: 0,
+                value: 0.0,
+                curve: Curve::Smooth,
+            },
+            AutoPoint {
+                at: 1000,
+                value: 1.0,
+                curve: Curve::Bezier(0.6),
+            },
+            AutoPoint::new(2000, 0.0),
+        ];
+        let c = p.playlist.add_clip(
+            t,
+            5000,
+            2000,
+            ClipKind::Automation(gt_core::Automation {
+                target,
+                points: pts.clone(),
+            }),
+        );
+        // An uncut clip keeps the points and curves as they are.
+        let s = SongSnapshot::compile_song(&p, |_| None);
+        assert_eq!(
+            s.automation[0].points[..2]
+                .iter()
+                .map(|q| (q.at - 5000, q.value, q.curve))
+                .collect::<Vec<_>>(),
+            pts[..2]
+                .iter()
+                .map(|q| (q.at, q.value, q.curve))
+                .collect::<Vec<_>>()
+        );
+        // Slipped 300 ticks: the clip starts inside the S-curve and ends inside the Bézier.
+        p.playlist.clip_mut(c).unwrap().offset = 300;
+        p.playlist.clip_mut(c).unwrap().length = 1600;
+        let s = SongSnapshot::compile_song(&p, |_| None);
+        let lane = &s.automation[0];
+        let want = |tick: i64| gt_core::playlist::value_at(&pts, (tick - 5000 + 300) as f64);
+        let got = |tick: i64| gt_core::playlist::value_at(&lane.points, tick as f64);
+        for tick in (5000..6600).step_by(37) {
+            assert!(
+                (got(tick) - want(tick)).abs() < 0.01,
+                "{tick}: {} vs {}",
+                got(tick),
+                want(tick)
+            );
+        }
+        // Both segments are cut, so both are resampled, but the peak point survives exactly;
+        // the value holds after the clip.
+        assert!(lane.points.iter().any(|q| q.at == 5700 && q.value == 1.0));
+        assert!((got(9000) - want(6600)).abs() < 1e-6);
+        assert!(lane.points.windows(2).all(|w| w[0].at <= w[1].at));
     }
 }

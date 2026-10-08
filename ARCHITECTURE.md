@@ -334,7 +334,9 @@ Option<Arc<SampleData>> }` (stand-in for `ApplyGraph` until the mixer graph of P
 `NoteOn`, `NoteOff` and `PreviewSample(Option<Arc<SampleData>>)` (`None` replaces
 `StopPreview`). Step 5 added `SetScopeChannel(Option<u16>)`, and Step 6 `SetMixer(Box<MixerParams>)`,
 `SetEffect { strip, slot, Option<EffectBox> }` and `SetEffectParam { strip, slot, index, value }`
-(stand-ins for `ApplyGraph` and `SetParam`, D39). Commands that hand something back are only taken when the garbage queue has a
+(stand-ins for `ApplyGraph` and `SetParam`, D39). Step 8 added `SetModulation(Box<ModPlan>)`
+(D55); knob edits still travel as `SetChannelParams`, `SetMixer` and `SetEffectParam`, since the
+`ParamId` registry made a separate `SetParam` unnecessary so far. Commands that hand something back are only taken when the garbage queue has a
 free slot. The size limit is enforced by a compile-time assertion. The rest of the enum below
 arrives with the steps that need it.
 
@@ -472,15 +474,15 @@ map, there is no cumulative rounding error however long the song plays.
 
 ### 5.3 Fixed render quantum
 
-The engine renders in fixed **quanta of 64 frames** (`RENDER_QUANTUM`, a constant), counted from the
-play anchor. The device callback may ask for any number of frames (cpal does not guarantee the
-requested size; WASAPI shared mode commonly delivers 480 or 441); a small output FIFO inside
-`AudioProcessor` adapts quanta to callback sizes. For power-of-two device buffers of 64 or more this
-adds zero latency; otherwise it adds at most 63 frames (1.3 ms at 48 kHz).
+The engine renders in fixed **quanta of 32 frames** (`RENDER_QUANTUM`, a constant; 64 until Step 8,
+D51), counted from the play anchor. The device callback may ask for any number of frames (cpal does
+not guarantee the requested size; WASAPI shared mode commonly delivers 480 or 441); a small output
+FIFO inside `AudioProcessor` adapts quanta to callback sizes. For power-of-two device buffers of 32
+or more this adds zero latency; otherwise it adds at most 31 frames (0.65 ms at 48 kHz).
 
-Why: anything that runs at "control rate" (automation evaluation every 32 frames, LFOs, meter
-computation, smoother targets) then happens at the same frames in real time and offline, which is
-what makes export bit-identical to playback (§7.5).
+Why: anything that runs at "control rate" (automation, LFOs, envelope followers, meter computation,
+smoother targets) runs once per quantum, so it happens at the same frames in real time and offline,
+which is what makes export bit-identical to playback (§7.5).
 
 ### 5.4 Scheduler: splitting at event boundaries
 
@@ -622,6 +624,21 @@ pub enum ClipKind {
 > separate map (D50). Signatures are a `TimeSigMap` of changes on bar boundaries (D46).
 
 ### Automation and parameters
+
+> **As built (Step 8, D51-D56):** the address is `gt_core::ParamId`, an enum rather than
+> owner + index: `Channel { channel, param: ChannelParam }` (volume, pan, sampler pitch, start,
+> end, ADSR), `Synth { channel, param: SynthParam }`, `SynthMod { channel, slot }` (a mod-matrix
+> amount), `Strip { strip, param: StripParam }` (volume, pan, `Send(k)`) and
+> `Effect { strip, slot, kind, index }`. Each has a stable text key for files
+> (`channel/3/synth/filter.cutoff`, `mixer/5/send/1`, `mixer/5/fx/2/eq/b1.freq`; D52) and a
+> static `ParamInfo`. The document keeps plain values in its own structs (a fader is linear gain,
+> a cutoff is Hz); automation points and modulation depths are normalized, and `ParamId::get`,
+> `set` and `normalized` convert. Automation clips are `ClipKind::Automation(Automation { target,
+> points })` (D50) with `AutoPoint { at, value, curve }` and
+> `Curve { Hold, Linear, Smooth, Bezier(tension) }` (D53). Modulators are a flat
+> `Project::modulators: Vec<Modulator { id, target, source, amount, enabled }>` (D54).
+>
+> The sketch below is the original plan.
 
 ```rust
 pub struct AutomationClip {
@@ -774,14 +791,41 @@ ramps of filter `g` and output gains (D33).
 
 ### 7.4 Parameters, smoothing and automation
 
-- The engine holds a flat array of `ParamState { target, smoother }` indexed by `ParamSlot`.
-- Sources, in priority order per quantum: automation lane value (if the transport is playing and the
-  lane exists), otherwise the last `SetParam`/MIDI-learn value.
-- Automation is evaluated at control rate (every 32 frames, two points per quantum); the smoother
-  turns those steps into a per-sample ramp. Note events stay sample-accurate. Prompt 8 documents
-  the trade-off in detail and may make cheap parameters sample-accurate.
-- Default smoothing: 10 ms one-pole for gains and pans, 20 ms for filter cutoff (smoothed in the
-  log-frequency domain so sweeps sound even).
+As built in Step 8 (D51-D56):
+
+- **One control period per quantum.** At the start of each 32-frame quantum, before any channel
+  renders, `AudioProcessor::apply_controls` computes every driven parameter's value for the end
+  of the quantum and writes it to its destination (`ParamDest`, a `ParamId` resolved to engine
+  indices when the song or modulation plan is compiled).
+- **Sources.** An automation lane (song mode, while playing) gives the base value; otherwise the
+  document value baked into the plan is the base. Modulators add `amount · source` in normalized
+  units and the sum is clamped to 0..1, then mapped to plain units by the parameter's
+  `ParamInfo`. Lanes and modulation targets that share a destination are linked when either is
+  installed (`ModPlan::inherit`, `link_lanes`), so each parameter is written once per quantum.
+- **Sample-accurate where cheap.** Gains (channel volume and pan, strip volume, pan and sends)
+  ramp linearly from their current value to the new one across the 32 frames, so fader
+  automation follows its curve with straight 0.67 ms pieces; the fader test measures the error
+  against the exact curve below 2e-4 (-74 dB). Everything else (synth knobs, sampler settings,
+  effect parameters) is set once per quantum and smoothed by the device's own smoother (effects:
+  about 20 ms one-pole; Gloom Synth: its 16-frame control rate). Note events stay
+  sample-accurate. Making everything per-sample would mean recomputing filter coefficients and
+  envelope stages on every frame for every voice; at 32 frames the parameter cost is 1/32 of
+  that and the steps are inaudible under the smoothers. The price of halving the quantum from
+  64 was measured with `cargo run --release -p gt-engine --example render_cost` (the demo song
+  with every channel busy): about 3.1-3.35 % of real time at 64 frames, 3.4-3.7 % at 32.
+- **Jumps.** On play, locate or a loop wrap the first control period jumps straight to the new
+  value instead of ramping from wherever the parameter was (`control_tick` tracks continuity).
+- **Overrides.** Channel and strip values written by automation or modulation are overrides on
+  top of the document values; `SetSong` and `SetModulation` clear them and re-apply the new
+  lanes in the same quantum, so a removed lane never leaves a parameter stuck. Effect
+  parameters have no override slot: the app resends the document value of any effect
+  parameter that neither the song nor the plan drives any more.
+- **Modulators** keep their run-time state (LFO phase, S&H level, follower envelope) in the
+  plan and carry it over by `ModulatorId` when a new plan replaces the old one, so editing a
+  depth does not restart an LFO. A synced LFO derives its phase from the song position while
+  playing and runs free at the tempo when stopped. An envelope follower reads its strip's
+  post-fader peak from the previous quantum (0.67 ms late), which keeps the mixer's one-pass
+  order intact.
 
 ### 7.5 Offline equals real time
 
@@ -864,9 +908,9 @@ polled), and float determinism across compilers.
 | D2 | gt-engine does not depend on cpal | Same `process` for device, export and tests | — |
 | D3 | `rtrb` SPSC queues, one per producer thread | Wait-free, tiny, MIT/Apache; avoids MPMC on RT path | If a third producer appears, add a queue rather than switching type |
 | D4 | Snapshot swap + garbage queue instead of shared mutable state | No locks, no frees on the audio thread | — |
-| D5 | Fixed 64-frame render quantum with FIFO adapter | Deterministic control-rate grid; offline parity | If plugin hosting shows overhead from small blocks, raise to 128 |
+| D5 | Fixed 64-frame render quantum with FIFO adapter (32 since Step 8, D51) | Deterministic control-rate grid; offline parity | If plugin hosting shows overhead from small blocks, raise to 128 |
 | D6 | 960 PPQ integer ticks; absolute conversion via anchors | Exact triplets and straight divisions; no drift | — |
-| D7 | Control-rate automation (32 frames) + per-sample smoothing; sample-accurate notes | Cheap and click-free; matches Prompt 8 | Prompt 8 may promote cheap params to sample-accurate |
+| D7 | Control-rate automation (32 frames) + per-sample smoothing; sample-accurate notes | Cheap and click-free; matches Prompt 8 | Done in Step 8: gains ramp per sample (D51) |
 | D8 | Notes are the only storage for steps and piano-roll notes | One model, two views; no sync bugs | — |
 | D9 | JSON in a zip container (`.gloom`) | Easy migrations on `serde_json::Value`, universal tooling | — |
 | D10 | Parameters stored normalized 0..1 with explicit stable indices | Uniform automation, MIDI learn and plugin parity (CLAP uses the same idea) | — |
@@ -910,6 +954,12 @@ polled), and float determinism across compilers.
 | D48 | Each playlist track has an `insert`; its audio clips render into that mixer strip's input. Pattern clips still play through their channels' own routing | Audio clips need a destination without a channel; keeps channel routing unchanged | Per-clip routing |
 | D49 | Waveform peaks: a min/max pyramid (64 frames per pair at the base, 4x per level) built by the sample loader thread alongside decoding; the UI picks the coarsest level whose pairs are at most 1/16 of a pixel column | One pass on a worker thread; drawing costs a few reads per column at any zoom | Disk cache of peaks next to the project (Step 9) |
 | D50 | Automation points live inside their clip (`ClipKind::Automation(Automation)`), so duplicating a clip copies its curve | Simpler undo and duplication than a shared `IdMap<AutomationId, _>`; Step 8 may add linked clips | Linked/"ghost" automation clips |
+| D51 | The render quantum drops from 64 to 32 frames and the control rate equals it: automation and modulation are evaluated once per quantum, gains ramp linearly across it, other parameters are set per quantum and smoothed by their device | One control grid, no second scheduler; 32 frames is the prompt's control rate and costs about 0.3 % of real time more than 64 on the demo (§7.4) | If CLAP plugins show per-block overhead, process plugins in 64- or 128-frame blocks while keeping 32-frame control |
+| D52 | Parameters are addressed by `ParamId`, an enum over owners, with a text key per parameter (`channel/3/synth/filter.cutoff`); effect parameters include the effect kind, so a target stays invalid instead of silently moving to another effect's parameter when a slot changes | Keys survive reordering of internal tables and are readable in project files (Step 9); the kind check prevents automation driving the wrong knob | Plugin parameters (Step 11) add a `Plugin { strip, slot, param_id }` variant keyed by the plugin's own stable ids |
+| D53 | Curve per segment, stored on the segment's first point: hold, linear, smooth (raised cosine) or a quadratic bezier whose tension (-1..1) moves the control point along the anti-diagonal. Where a clip edge cuts a curved segment, the compiler resamples that segment into 16 linear pieces | One float per point; the engine only interpolates linearly between compiled points, so it never evaluates curves | Per-segment bezier handles if users want S-curves |
+| D54 | Modulators live in a flat project list, not inside devices; any `ParamId` can be a target and several modulators on one target add up. Sources: LFO (sine, triangle, saw up/down, square, sample & hold; free 0.01-40 Hz or synced 4 bars to 1/16 triplets) and envelope follower (any strip, attack, release, gain) | Works for every parameter, including effects and mixer, with one engine path; undo covers it through the whole-document diff | Modulating a modulator's rate or depth; MIDI-note-triggered envelopes |
+| D55 | `SetModulation(Box<ModPlan>)` replaces the plan as a whole, sent by the app whenever a modulator, a target's document value or where a target lives changes; state is inherited by `ModulatorId` and the old plan returns as garbage | Same snapshot-swap pattern as songs (D4); comparing a small key each frame is cheap for at most 64 modulators | Incremental updates if plans grow large |
+| D56 | Envelope followers hear the previous quantum's post-fader peak of their strip | The mixer renders strips in one pass; reading the previous quantum avoids ordering constraints and costs 0.67 ms of lag, well inside any musical attack | Pre-fader or sidechain-input followers |
 
 ---
 

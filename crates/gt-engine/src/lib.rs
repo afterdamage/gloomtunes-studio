@@ -18,6 +18,7 @@
 mod atomic;
 mod channel;
 mod command;
+pub mod control;
 mod mixer;
 mod processor;
 pub mod song;
@@ -26,11 +27,12 @@ pub mod transport;
 pub use atomic::AtomicF32;
 pub use channel::VOICES_PER_CHANNEL;
 pub use command::{EngineCommand, EngineEvent, Garbage, LoopRegion, TransportState};
+pub use control::{ModPlan, ParamDest};
 pub use gt_core::MAX_CHANNELS;
 pub use mixer::{create_effect, EffectBox, MixerParams, StripParams, MAX_PDC_FRAMES};
 pub use processor::{AudioProcessor, PREVIEW_GAIN, TEST_TONE_DBFS, TEST_TONE_HZ};
 pub use song::{
-    synth_settings, AudioPlay, AutoDest, AutoLane, ChannelParams, InstrumentKind, NoteKind,
+    synth_settings, AudioPlay, AutoLane, ChannelParams, InstrumentKind, NoteKind, PatchValues,
     SongEvent, SongSnapshot,
 };
 
@@ -42,7 +44,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 /// Frames per render quantum. The engine always renders in blocks of exactly this size, counted
 /// from engine start, whatever the device buffer size is (ARCHITECTURE.md §5.3).
-pub const RENDER_QUANTUM: usize = 64;
+pub const RENDER_QUANTUM: usize = 32;
 /// Fade time for test tone and output fades, in seconds.
 pub const FADE_SECONDS: f32 = 0.02;
 

@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use gt_core::{
-    AutoPoint, AutoTarget, Automation, ClipKind, Project, SampleData, SampleSource, TempoMap,
-    TempoPoint, Tick, MASTER,
+    AutoPoint, Automation, ClipKind, Project, SampleData, SampleSource, TempoMap, TempoPoint, Tick,
+    MASTER_VOLUME,
 };
 use gt_engine::{create, EngineCommand, EngineConfig, EngineHandle, LoopRegion, SongSnapshot};
 
@@ -116,34 +116,30 @@ fn automation_moves_the_master_fader() {
     audio_clip(&mut p, 0, 4 * 3840, 0);
     let t = p.playlist.tracks[1].id;
     // Master at unity for the first second, then down to -inf over 0 ticks (a step), held.
-    let unity = gt_core::playlist::volume_to_norm(1.0);
+    let unity = MASTER_VOLUME.info().to_normalized(1.0);
     p.playlist.add_clip(
         t,
         0,
         3840,
         ClipKind::Automation(Automation {
-            target: AutoTarget::StripVolume(MASTER),
+            target: MASTER_VOLUME,
             points: vec![
-                AutoPoint {
-                    at: 0,
-                    value: unity,
-                },
-                AutoPoint {
-                    at: 1920,
-                    value: unity,
-                },
-                AutoPoint {
-                    at: 1920,
-                    value: 0.0,
-                },
+                AutoPoint::new(0, unity),
+                AutoPoint::new(1920, unity),
+                AutoPoint::new(1920, 0.0),
             ],
         }),
     );
     let dc = Arc::new(SampleData::mono(SR, vec![0.5; 3 * SR as usize]));
     let out = left(&render(&p, &dc, 2.0));
-    assert!((out[SR as usize / 2] - 0.5).abs() < 1e-6);
-    // The fader ramps down within about 10 ms + one quantum of 1 s.
-    assert!(out[SR as usize + 1000..].iter().all(|&x| x == 0.0));
+    assert!(
+        (out[SR as usize / 2] - 0.5).abs() < 1e-6,
+        "{}",
+        out[SR as usize / 2]
+    );
+    // The step lands within one control quantum (32 frames) of 1 s.
+    assert!(out[SR as usize + 32..].iter().all(|&x| x == 0.0));
+    assert!(out[SR as usize - 40] > 0.49);
 }
 
 #[test]

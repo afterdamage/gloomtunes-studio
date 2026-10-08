@@ -227,6 +227,7 @@ struct Strip {
     /// for that strip changes.
     auto_gain: Option<f32>,
     auto_pan: Option<f32>,
+    auto_sends: [Option<f32>; SENDS],
     gain_l: LinearRamp,
     gain_r: LinearRamp,
     sends: [LinearRamp; SENDS],
@@ -255,6 +256,7 @@ impl Strip {
             params: StripParams::default(),
             auto_gain: None,
             auto_pan: None,
+            auto_sends: [None; SENDS],
             gain_l: LinearRamp::new(1.0),
             gain_r: LinearRamp::new(1.0),
             sends: std::array::from_fn(|_| LinearRamp::new(0.0)),
@@ -345,10 +347,15 @@ impl MixerEngine {
             if sp.pan != s.params.pan {
                 s.auto_pan = None;
             }
+            for (k, auto) in s.auto_sends.iter_mut().enumerate() {
+                if sp.sends[k] != s.params.sends[k] {
+                    *auto = None;
+                }
+            }
             s.params = *sp;
             s.retarget(ramp);
-            for (ramp_k, &level) in s.sends.iter_mut().zip(&sp.sends) {
-                ramp_k.set_target(level.clamp(0.0, 1.0), ramp);
+            for ((ramp_k, &level), auto) in s.sends.iter_mut().zip(&sp.sends).zip(&s.auto_sends) {
+                ramp_k.set_target(auto.unwrap_or(level).clamp(0.0, 1.0), ramp);
             }
             for (slot, &on) in s.fx.iter_mut().zip(&sp.enabled) {
                 if slot.enabled != on {
@@ -364,9 +371,15 @@ impl MixerEngine {
         self.update_latency();
     }
 
-    /// Sets a strip's fader gain and balance from automation (`None` leaves that one alone).
-    pub(crate) fn automate(&mut self, strip: usize, gain: Option<f32>, pan: Option<f32>) {
-        let ramp = self.ramp_frames;
+    /// Sets a strip's fader gain and balance from automation or modulation (`None` leaves
+    /// that one alone); the fader ramps to it over `frames`.
+    pub(crate) fn automate(
+        &mut self,
+        strip: usize,
+        gain: Option<f32>,
+        pan: Option<f32>,
+        frames: u32,
+    ) {
         let Some(s) = self.strips.get_mut(strip) else {
             return;
         };
@@ -379,11 +392,25 @@ impl MixerEngine {
             if pan.is_some() {
                 s.auto_pan = pan;
             }
-            s.retarget(ramp);
+            s.retarget(frames);
         }
     }
 
-    /// Drops all automation overrides of faders and balances.
+    /// Sets a send level from automation or modulation; it ramps there over `frames`.
+    pub(crate) fn automate_send(&mut self, strip: usize, send: usize, level: f32, frames: u32) {
+        let Some(s) = self.strips.get_mut(strip) else {
+            return;
+        };
+        let (Some(auto), Some(ramp)) = (s.auto_sends.get_mut(send), s.sends.get_mut(send)) else {
+            return;
+        };
+        if *auto != Some(level) {
+            *auto = Some(level);
+            ramp.set_target(level.clamp(0.0, 1.0), frames);
+        }
+    }
+
+    /// Drops all automation overrides of faders, balances and sends.
     pub(crate) fn clear_automation(&mut self) {
         let ramp = self.ramp_frames;
         for s in &mut self.strips {
@@ -392,7 +419,22 @@ impl MixerEngine {
                 s.auto_pan = None;
                 s.retarget(ramp);
             }
+            for k in 0..SENDS {
+                if s.auto_sends[k].take().is_some() {
+                    s.sends[k].set_target(s.params.sends[k].clamp(0.0, 1.0), ramp);
+                }
+            }
         }
+    }
+
+    /// Peak level of a strip's output in the last quantum (post-fader).
+    pub(crate) fn strip_peak(&self, strip: usize) -> f32 {
+        self.strips.get(strip).map_or(0.0, |s| {
+            s.out_l
+                .iter()
+                .chain(&s.out_r)
+                .fold(0.0_f32, |m, x| m.max(x.abs()))
+        })
     }
 
     /// Puts an effect into a slot (or empties it) and returns the previous one.

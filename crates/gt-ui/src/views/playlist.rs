@@ -27,7 +27,7 @@ use egui::{
 };
 use gt_core::playlist::TRACK_COLORS;
 use gt_core::{
-    AutoPoint, AutoTarget, Automation, ClipId, ClipKind, Mixer, PatternId, Peaks, Project,
+    AutoPoint, Automation, ClipId, ClipKind, Curve, ParamId, PatternId, Peaks, Project,
     SampleSource, SigChange, StripKind, TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, TrackId,
     FX_SLOTS, MASTER, PPQ, STRIPS,
 };
@@ -154,6 +154,13 @@ enum Drag {
         clip: ClipId,
         index: usize,
     },
+    /// Ctrl+drag on an automation segment bends it (a Bézier tension).
+    Tension {
+        clip: ClipId,
+        index: usize,
+        grab_y: f32,
+        orig: f32,
+    },
     Loop {
         from: i64,
     },
@@ -173,6 +180,11 @@ enum Drag {
 enum Popup {
     Marker(usize),
     Tempo(usize),
+    /// The curve of the automation segment starting at point `index`.
+    Segment {
+        clip: ClipId,
+        index: usize,
+    },
     Sig(usize),
 }
 
@@ -383,7 +395,9 @@ pub fn playlist(
 
     paint(ui, theme, st, &geo, area, ruler, project, &view);
     changed |= track_headers(ui, theme, st, headers, &geo, project);
-    let timing = timing | show_popup(ui, theme, st, project);
+    let (popup_timing, popup_changed) = show_popup(ui, theme, st, project);
+    let timing = timing | popup_timing;
+    changed |= popup_changed;
     if changed {
         actions.push(PlaylistAction::Changed);
     }
@@ -459,7 +473,7 @@ fn toolbar(
             &project.signatures,
         );
         ui.menu_button("+ Automation", |ui| {
-            if let Some(target) = automation_menu(ui, &project.mixer) {
+            if let Some(target) = automation_menu(ui, project) {
                 add_automation(project, st, target, start);
                 actions.push(PlaylistAction::Changed);
                 ui.close();
@@ -478,57 +492,88 @@ fn toolbar(
     });
 }
 
-/// Strips worth automating: the master, inserts that are named or have effects, and sends.
-fn automation_menu(ui: &mut Ui, mixer: &Mixer) -> Option<AutoTarget> {
+/// Every parameter, by owner: channels (with their synth knobs) and the mixer strips worth
+/// automating (the master, named inserts or inserts with effects, and the sends).
+fn automation_menu(ui: &mut Ui, project: &Project) -> Option<ParamId> {
     let mut picked = None;
-    for i in 0..STRIPS {
-        let s = &mixer.strips[i];
-        let kind = StripKind::of(i);
-        let used = i == MASTER
-            || matches!(kind, StripKind::Send(_))
-            || s.name != kind.default_name()
-            || s.slots.iter().any(Option::is_some);
-        if !used {
-            continue;
+    let mut list = |ui: &mut Ui, ids: Vec<ParamId>| {
+        for id in ids {
+            if ui.button(id.label()).clicked() {
+                picked = Some(id);
+            }
         }
-        ui.menu_button(format!("{} {}", kind.short(), s.name), |ui| {
-            if ui.button("Volume").clicked() {
-                picked = Some(AutoTarget::StripVolume(i));
+    };
+    ui.menu_button("Channels", |ui| {
+        for ch in &project.channels {
+            ui.menu_button(&ch.name, |ui| {
+                let all = ParamId::of_channel(ch);
+                let (synth, rest): (Vec<ParamId>, Vec<ParamId>) = all
+                    .into_iter()
+                    .partition(|id| !matches!(id, ParamId::Channel { .. }));
+                list(ui, rest);
+                if !synth.is_empty() {
+                    ui.menu_button("Gloom Synth", |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(420.0)
+                            .show(ui, |ui| list(ui, synth));
+                    });
+                }
+            });
+        }
+    });
+    ui.menu_button("Mixer", |ui| {
+        let mixer = &project.mixer;
+        for i in 0..STRIPS {
+            let s = &mixer.strips[i];
+            let kind = StripKind::of(i);
+            let used = i == MASTER
+                || matches!(kind, StripKind::Send(_))
+                || s.name != kind.default_name()
+                || s.slots.iter().any(Option::is_some);
+            if !used {
+                continue;
             }
-            if ui.button("Pan").clicked() {
-                picked = Some(AutoTarget::StripPan(i));
-            }
-            for k in 0..FX_SLOTS {
-                let Some(slot) = &s.slots[k] else {
-                    continue;
-                };
-                ui.menu_button(format!("{} {}", k + 1, slot.kind.name()), |ui| {
-                    for (index, p) in slot.kind.params().iter().enumerate() {
-                        if ui.button(p.name).clicked() {
-                            picked = Some(AutoTarget::EffectParam {
-                                strip: i,
-                                slot: k,
-                                kind: slot.kind,
-                                index,
-                            });
-                        }
-                    }
-                });
-            }
-        });
-    }
+            ui.menu_button(format!("{} {}", kind.short(), s.name), |ui| {
+                let (fx, strip): (Vec<ParamId>, Vec<ParamId>) = ParamId::of_strip(project, i)
+                    .into_iter()
+                    .partition(|id| matches!(id, ParamId::Effect { .. }));
+                list(ui, strip);
+                for k in 0..FX_SLOTS {
+                    let Some(slot) = &s.slots[k] else {
+                        continue;
+                    };
+                    ui.menu_button(format!("{} {}", k + 1, slot.kind.name()), |ui| {
+                        let mine = fx
+                            .iter()
+                            .copied()
+                            .filter(|id| matches!(id, ParamId::Effect { slot, .. } if *slot == k))
+                            .collect();
+                        egui::ScrollArea::vertical()
+                            .max_height(420.0)
+                            .show(ui, |ui| list(ui, mine));
+                    });
+                }
+            });
+        }
+    });
     picked
 }
 
 /// Adds a flat four-bar automation clip at `start` on the selected track if it is free there,
 /// else on the first free track (a new one if none is).
-fn add_automation(project: &mut Project, st: &mut PlaylistState, target: AutoTarget, start: i64) {
+/// Returns the new clip.
+pub fn add_automation(
+    project: &mut Project,
+    st: &mut PlaylistState,
+    target: ParamId,
+    start: i64,
+) -> ClipId {
     let len = project
         .signatures
         .bar_start(project.signatures.bar_of(start) + 4)
         - start;
-    let value = target.current(&project.mixer);
-    let name = target.name(&project.mixer);
+    let value = target.normalized(project);
+    let name = target.name(project);
     let pl = &mut project.playlist;
     let free = |pl: &gt_core::Playlist, t: TrackId| {
         !pl.clips
@@ -551,10 +596,11 @@ fn add_automation(project: &mut Project, st: &mut PlaylistState, target: AutoTar
         len,
         ClipKind::Automation(Automation {
             target,
-            points: vec![AutoPoint { at: 0, value }, AutoPoint { at: len, value }],
+            points: vec![AutoPoint::new(0, value), AutoPoint::new(len, value)],
         }),
     );
     st.selected = vec![id];
+    id
 }
 
 fn handle_wheel(ui: &Ui, st: &mut PlaylistState, grid: Rect) {
@@ -665,6 +711,17 @@ fn curve_rect(r: Rect) -> Rect {
     )
 }
 
+/// The automation segment of clip `c` under screen x: the index of its first point, if x is
+/// between two points.
+fn segment_at(geo: &Geo, c: &gt_core::Clip, x: f32) -> Option<usize> {
+    let ClipKind::Automation(a) = &c.kind else {
+        return None;
+    };
+    let src = geo.tick_f(x) - c.start as f64 + c.offset as f64;
+    let k = a.points.partition_point(|p| (p.at as f64) <= src);
+    (k > 0 && k < a.points.len()).then(|| k - 1)
+}
+
 fn snap_of(ui: &Ui, st: &PlaylistState) -> PlaylistSnap {
     if ui.input(|i| i.modifiers.alt) {
         PlaylistSnap::Off
@@ -727,6 +784,30 @@ fn grid_input(
                 (_, Some((id, Zone::Point(i)))) => {
                     st.drag = Some(Drag::Point { clip: id, index: i });
                 }
+                (_, Some((id, Zone::Curve)))
+                    if ctrl
+                        && project
+                            .playlist
+                            .clip(id)
+                            .and_then(|c| segment_at(geo, c, p.x))
+                            .is_some() =>
+                {
+                    let c = project.playlist.clip(id).expect("checked");
+                    let index = segment_at(geo, c, p.x).expect("checked");
+                    let orig = match &c.kind {
+                        ClipKind::Automation(a) => match a.points[index].curve {
+                            Curve::Bezier(t) => t,
+                            _ => 0.0,
+                        },
+                        _ => 0.0,
+                    };
+                    st.drag = Some(Drag::Tension {
+                        clip: id,
+                        index,
+                        grab_y: p.y,
+                        orig,
+                    });
+                }
                 (_, Some((id, Zone::Curve))) => {
                     // Add a point under the pointer and drag it.
                     if let Some(c) = project.playlist.clip_mut(id) {
@@ -742,7 +823,7 @@ fn grid_input(
                         let at = at.clamp(c.offset, c.offset + c.length);
                         let value = ((body.bottom() - p.y) / body.height()).clamp(0.0, 1.0);
                         if let ClipKind::Automation(a) = &mut c.kind {
-                            let i = a.insert_point(AutoPoint { at, value });
+                            let i = a.insert_point(AutoPoint::new(at, value));
                             st.drag = Some(Drag::Point { clip: id, index: i });
                             changed = true;
                         }
@@ -820,7 +901,19 @@ fn grid_input(
     {
         st.drag = Some(Drag::Erase);
         if let Some(p) = gesture_origin(ui, resp) {
-            if let Some((id, Zone::Point(i))) = hit_clip(geo, project, p) {
+            let hit = hit_clip(geo, project, p);
+            if let Some((id, Zone::Curve)) = hit {
+                // Right-click on a curve: pick the segment's shape instead of erasing.
+                if let Some(index) = project
+                    .playlist
+                    .clip(id)
+                    .and_then(|c| segment_at(geo, c, p.x))
+                {
+                    st.drag = None;
+                    st.popup = Some((Popup::Segment { clip: id, index }, p, 0));
+                }
+            }
+            if let Some((id, Zone::Point(i))) = hit {
                 if let Some(ClipKind::Automation(a)) =
                     project.playlist.clip_mut(id).map(|c| &mut c.kind)
                 {
@@ -1005,6 +1098,27 @@ fn drag_update(
                 }
             }
             true
+        }
+        Some(Drag::Tension {
+            clip,
+            index,
+            grab_y,
+            orig,
+        }) => {
+            // 80 px of travel bends a straight segment fully; up is "rise fast".
+            let t = (orig + (grab_y - p.y) / 80.0).clamp(-1.0, 1.0);
+            let t = if t.abs() < 0.03 { 0.0 } else { t };
+            if let Some(ClipKind::Automation(a)) =
+                project.playlist.clip_mut(clip).map(|c| &mut c.kind)
+            {
+                if let Some(pt) = a.points.get_mut(index) {
+                    if pt.curve != Curve::Bezier(t) {
+                        pt.curve = Curve::Bezier(t);
+                        return true;
+                    }
+                }
+            }
+            false
         }
         Some(Drag::Point { clip, index }) => {
             let Some(track) = project.playlist.clip(clip).map(|c| c.track) else {
@@ -1417,13 +1531,19 @@ fn ruler_input(
     timing
 }
 
-/// Small editor for a marker name, a tempo or a time signature. Returns true if timing
-/// changed.
-fn show_popup(ui: &Ui, theme: &GloomTheme, st: &mut PlaylistState, project: &mut Project) -> bool {
+/// Small editor for a marker name, a tempo, a time signature or an automation segment's
+/// curve. Returns whether timing changed and whether the playlist changed.
+fn show_popup(
+    ui: &Ui,
+    theme: &GloomTheme,
+    st: &mut PlaylistState,
+    project: &mut Project,
+) -> (bool, bool) {
     let Some((popup, pos, age)) = st.popup else {
-        return false;
+        return (false, false);
     };
     let mut timing = false;
+    let mut changed = false;
     let mut close = false;
     let area = egui::Area::new(ui.id().with("pl_popup"))
         .order(egui::Order::Foreground)
@@ -1466,6 +1586,41 @@ fn show_popup(ui: &Ui, theme: &GloomTheme, st: &mut PlaylistState, project: &mut
                             p.bpm = bpm;
                             project.tempo = TempoMap::from_points_lossy(&pts);
                             timing = true;
+                        }
+                    }
+                    Popup::Segment { clip, index } => {
+                        let Some(ClipKind::Automation(a)) =
+                            project.playlist.clip_mut(clip).map(|c| &mut c.kind)
+                        else {
+                            close = true;
+                            return;
+                        };
+                        let Some(pt) = a.points.get_mut(index) else {
+                            close = true;
+                            return;
+                        };
+                        ui.label(RichText::new("Curve").color(theme.text_dim));
+                        for (k, name) in Curve::NAMES.iter().enumerate() {
+                            if ui.selectable_label(pt.curve.index() == k, *name).clicked()
+                                && pt.curve.index() != k
+                            {
+                                pt.curve = Curve::from_index(k);
+                                changed = true;
+                            }
+                        }
+                        if let Curve::Bezier(t) = &mut pt.curve {
+                            if ui
+                                .add(
+                                    egui::DragValue::new(t)
+                                        .range(-1.0..=1.0)
+                                        .speed(0.01)
+                                        .fixed_decimals(2),
+                                )
+                                .on_hover_text("Tension: positive rises fast, negative slowly")
+                                .changed()
+                            {
+                                changed = true;
+                            }
                         }
                     }
                     Popup::Sig(i) => {
@@ -1513,7 +1668,7 @@ fn show_popup(ui: &Ui, theme: &GloomTheme, st: &mut PlaylistState, project: &mut
     } else {
         st.popup = Some((popup, pos, age.saturating_add(1)));
     }
-    timing
+    (timing, changed)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1655,7 +1810,7 @@ fn paint(
             }
             ClipKind::Automation(a) => {
                 paint_curve(&cp, geo, c, a, r, ink, theme.accent);
-                a.target.name(&project.mixer)
+                a.target.name(project)
             }
         };
         cp.text(
@@ -2097,8 +2252,21 @@ mod tests {
         st: &mut PlaylistState,
         events: Vec<egui::Event>,
     ) -> Vec<PlaylistAction> {
+        frame_mods(ctx, project, st, events, egui::Modifiers::NONE)
+    }
+
+    /// [`frame`] with modifier keys held.
+    fn frame_mods(
+        ctx: &egui::Context,
+        project: &mut Project,
+        st: &mut PlaylistState,
+        events: Vec<egui::Event>,
+        modifiers: egui::Modifiers,
+    ) -> Vec<PlaylistAction> {
         let theme = GloomTheme::default();
         let mut actions = Vec::new();
+        let mut events = events;
+        events.insert(0, egui::Event::ModifiersChanged(modifiers));
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 600.0))),
             events,
@@ -2272,5 +2440,89 @@ mod tests {
         assert!(actions.contains(&PlaylistAction::Changed));
         assert_eq!(st.selected, vec![c.id]);
         assert!(!st.is_dragging());
+    }
+
+    /// The demo's "Bass filter" automation clip and the screen point in the middle of its first
+    /// segment (on the curve's band, between the first two points).
+    fn bass_filter_segment(p: &Project, g: &Geo) -> (ClipId, Pos2) {
+        let c = p
+            .playlist
+            .clips
+            .iter()
+            .find(|c| {
+                matches!(c.kind, ClipKind::Automation(_)) && c.track == p.playlist.tracks[4].id
+            })
+            .unwrap();
+        let ClipKind::Automation(a) = &c.kind else {
+            unreachable!()
+        };
+        let mid = c.start - c.offset + (a.points[0].at + a.points[1].at) / 2;
+        (c.id, pos2(g.x(mid), g.row_top(4) + g.track_h * 0.75))
+    }
+
+    fn first_curve(p: &Project, id: ClipId) -> Curve {
+        match &p.playlist.clip(id).unwrap().kind {
+            ClipKind::Automation(a) => a.points[0].curve,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn ctrl_dragging_a_segment_bends_it() {
+        let ctx = egui::Context::default();
+        let mut p = Project::demo();
+        let mut st = PlaylistState {
+            tool: PlaylistTool::Select,
+            ..Default::default()
+        };
+        frame(&ctx, &mut p, &mut st, vec![]);
+        let g = st.last_geo.unwrap();
+        let (id, at) = bass_filter_segment(&p, &g);
+        let points = |p: &Project| match &p.playlist.clip(id).unwrap().kind {
+            ClipKind::Automation(a) => a.points.len(),
+            _ => 0,
+        };
+        let n = points(&p);
+        // 40 px up is half of the full bend.
+        for ev in drag(at, at - vec2(0.0, 40.0)) {
+            frame_mods(&ctx, &mut p, &mut st, ev, egui::Modifiers::COMMAND);
+        }
+        match first_curve(&p, id) {
+            Curve::Bezier(t) => assert!((t - 0.5).abs() < 0.02, "{t}"),
+            c => panic!("{c:?}"),
+        }
+        assert_eq!(points(&p), n, "bending adds no point");
+        assert!(!st.is_dragging());
+    }
+
+    #[test]
+    fn right_clicking_a_segment_opens_its_curve_menu() {
+        let ctx = egui::Context::default();
+        let mut p = Project::demo();
+        let mut st = PlaylistState::default();
+        frame(&ctx, &mut p, &mut st, vec![]);
+        let g = st.last_geo.unwrap();
+        let (id, at) = bass_filter_segment(&p, &g);
+        let n = p.playlist.clips.len();
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        for ev in [
+            vec![egui::Event::PointerMoved(at)],
+            vec![press(true)],
+            vec![press(false)],
+            vec![],
+        ] {
+            frame(&ctx, &mut p, &mut st, ev);
+        }
+        assert!(
+            matches!(st.popup, Some((Popup::Segment { clip, index: 0 }, _, _)) if clip == id),
+            "{:?}",
+            st.popup.as_ref().map(|p| p.1)
+        );
+        assert_eq!(p.playlist.clips.len(), n, "the clip is not erased");
     }
 }

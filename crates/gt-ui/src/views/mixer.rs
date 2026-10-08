@@ -5,10 +5,12 @@ use egui::{pos2, vec2, Color32, RichText, Sense, Shape, Stroke, Ui};
 use gt_core::effects::EQ_BANDS;
 use gt_core::mixer::FIRST_SEND;
 use gt_core::{
-    EffectKind, EffectSlot, Mixer, MixerStrip, StripKind, FX_SLOTS, MASTER, SENDS, STRIPS,
+    EffectKind, EffectSlot, Mixer, MixerStrip, ParamId, StripKind, StripParam, FX_SLOTS, MASTER,
+    SENDS, STRIPS,
 };
 use gt_dsp::fx::{eq_band_response, BandType};
 
+use crate::param_ui::param_menu;
 use crate::widgets::{fader, format_gain, format_pan, knob, param_knob, stereo_meter};
 use crate::GloomTheme;
 
@@ -180,25 +182,25 @@ fn strip(
                     ui.add_space(2.0);
                     stereo_meter(ui, theme, meter.peak_db, meter.rms_db, vec2(12.0, meter_h));
                     let mut v = s.volume;
-                    if fader(
+                    let r = fader(
                         ui,
                         theme,
                         &mut v,
                         MixerStrip::MAX_VOLUME,
                         vec2(30.0, meter_h),
-                    )
-                    .changed()
-                    {
+                    );
+                    param_menu(theme, &r, ParamId::strip_volume(i));
+                    if r.changed() {
                         s.volume = v;
                         changed = true;
                     }
                 });
                 let mut pan = s.pan;
-                if knob(ui, theme, &mut pan, -1.0..=1.0, 0.0, 22.0, |p| {
+                let r = knob(ui, theme, &mut pan, -1.0..=1.0, 0.0, 22.0, |p| {
                     format!("Pan {}", format_pan(p))
-                })
-                .changed()
-                {
+                });
+                param_menu(theme, &r, ParamId::strip_pan(i));
+                if r.changed() {
                     s.pan = pan;
                     changed = true;
                 }
@@ -360,6 +362,14 @@ fn detail(
                         },
                     )
                     .inner;
+                param_menu(
+                    theme,
+                    &r,
+                    ParamId::Strip {
+                        strip: i,
+                        param: StripParam::Send(k),
+                    },
+                );
                 if r.changed() {
                     mixer.strips[i].sends[k] = v;
                     changed = true;
@@ -472,7 +482,20 @@ fn knobs(
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(2.0, 2.0);
         for p in range {
-            changed |= param_knob(ui, theme, (id.0, id.1, p), &table[p], &mut slot.params[p]);
+            let target = ParamId::Effect {
+                strip: id.0,
+                slot: id.1,
+                kind: slot.kind,
+                index: p,
+            };
+            changed |= param_knob(
+                ui,
+                theme,
+                (id.0, id.1, p),
+                &table[p],
+                &mut slot.params[p],
+                Some(target),
+            );
         }
     });
     changed

@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use egui::{pos2, vec2, Pos2, RichText, Sense, Shape, Stroke, Ui};
 use gt_core::synth::{ModDest, ModSource, SynthParam as P, SynthPatch};
+use gt_core::{ChannelId, ParamId};
 
 use crate::GloomTheme;
 
@@ -24,6 +25,8 @@ pub struct SynthPanelView<'a> {
     pub sample_rate: f32,
     /// Message from the last preset operation.
     pub status: Option<&'a str>,
+    /// The channel, so knobs get the automation and modulation menu.
+    pub channel: Option<ChannelId>,
 }
 
 /// Things the app must do.
@@ -47,6 +50,7 @@ pub fn synth_panel(
 ) -> Vec<SynthPanelAction> {
     let mut actions = Vec::new();
     let mut changed = false;
+    let ch = view.channel;
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(name).desired_width(120.0))
             .on_hover_text("Channel name");
@@ -115,13 +119,14 @@ pub fn synth_panel(
                         ]
                     };
                     section(ui, theme, right, title, |ui| {
-                        changed |= knob_rows(ui, theme, patch, &[&ps[..3], &ps[3..]]);
+                        changed |= knob_rows(ui, theme, ch, patch, &[&ps[..3], &ps[3..]]);
                     });
                 }
                 section(ui, theme, right, "SUB · NOISE · UNISON", |ui| {
                     changed |= knob_rows(
                         ui,
                         theme,
+                        ch,
                         patch,
                         &[
                             &[P::SubLevel, P::NoiseLevel],
@@ -135,6 +140,7 @@ pub fn synth_panel(
                             changed |= knob_rows(
                                 ui,
                                 theme,
+                                ch,
                                 patch,
                                 &[
                                     &[P::Cutoff, P::Resonance, P::Drive],
@@ -158,7 +164,7 @@ pub fn synth_panel(
                     ] {
                         ui.horizontal(|ui| {
                             row_label(ui, theme, label);
-                            changed |= knob_rows(ui, theme, patch, &[&row]);
+                            changed |= knob_rows(ui, theme, ch, patch, &[&row]);
                         });
                     }
                 });
@@ -172,12 +178,12 @@ pub fn synth_panel(
                     ] {
                         ui.horizontal(|ui| {
                             row_label(ui, theme, label);
-                            changed |= knob_rows(ui, theme, patch, &[row]);
+                            changed |= knob_rows(ui, theme, ch, patch, &[row]);
                         });
                     }
                 });
                 section(ui, theme, right, "MOD MATRIX", |ui| {
-                    changed |= mod_matrix(ui, theme, patch);
+                    changed |= mod_matrix(ui, theme, ch, patch);
                 });
                 section(ui, theme, right, "SCOPE", |ui| scope(ui, theme, view.scope));
             });
@@ -221,14 +227,20 @@ fn section(ui: &mut Ui, theme: &GloomTheme, right: f32, title: &str, body: impl 
 }
 
 /// Rows of parameter knobs. Returns true if any value changed.
-fn knob_rows(ui: &mut Ui, theme: &GloomTheme, patch: &mut SynthPatch, rows: &[&[P]]) -> bool {
+fn knob_rows(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    ch: Option<ChannelId>,
+    patch: &mut SynthPatch,
+    rows: &[&[P]],
+) -> bool {
     let mut changed = false;
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
         for row in rows {
             ui.horizontal(|ui| {
                 for &p in *row {
-                    changed |= param_knob(ui, theme, patch, p);
+                    changed |= param_knob(ui, theme, ch, patch, p);
                 }
             });
         }
@@ -236,16 +248,29 @@ fn knob_rows(ui: &mut Ui, theme: &GloomTheme, patch: &mut SynthPatch, rows: &[&[
     changed
 }
 
-fn param_knob(ui: &mut Ui, theme: &GloomTheme, patch: &mut SynthPatch, p: P) -> bool {
+fn param_knob(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    ch: Option<ChannelId>,
+    patch: &mut SynthPatch,
+    p: P,
+) -> bool {
     let mut v = patch.get(p);
-    let changed = crate::widgets::param_knob(ui, theme, ("synth", p as usize), p.info(), &mut v);
+    let target = ch.map(|channel| ParamId::Synth { channel, param: p });
+    let changed =
+        crate::widgets::param_knob(ui, theme, ("synth", p as usize), p.info(), &mut v, target);
     if changed {
         patch.set(p, v);
     }
     changed
 }
 
-fn mod_matrix(ui: &mut Ui, theme: &GloomTheme, patch: &mut SynthPatch) -> bool {
+fn mod_matrix(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    ch: Option<ChannelId>,
+    patch: &mut SynthPatch,
+) -> bool {
     let mut changed = false;
     egui::Grid::new("synth_mods")
         .num_columns(4)
@@ -274,7 +299,7 @@ fn mod_matrix(ui: &mut Ui, theme: &GloomTheme, patch: &mut SynthPatch) -> bool {
                         }
                     });
                 let mut pct = m.amount * 100.0;
-                if ui
+                let r = ui
                     .add(
                         egui::DragValue::new(&mut pct)
                             .range(-100.0..=100.0)
@@ -282,9 +307,11 @@ fn mod_matrix(ui: &mut Ui, theme: &GloomTheme, patch: &mut SynthPatch) -> bool {
                             .suffix(" %")
                             .fixed_decimals(0),
                     )
-                    .on_hover_text("Amount. 100 % is the full range of the destination")
-                    .changed()
-                {
+                    .on_hover_text("Amount. 100 % is the full range of the destination");
+                if let Some(channel) = ch {
+                    crate::param_ui::param_menu(theme, &r, ParamId::SynthMod { channel, slot: i });
+                }
+                if r.changed() {
                     m.amount = pct / 100.0;
                     changed = true;
                 }

@@ -8,12 +8,13 @@ use assert_no_alloc::{assert_no_alloc, AllocDisabler};
 use std::sync::Arc;
 
 use gt_core::{
-    ClipKind, EffectKind, EffectSlot, Project, SampleData, SampleSource, SigChange, TempoMap,
-    TempoPoint, Tick, TimeSig, TimeSigMap, MAX_CHANNELS,
+    ChannelParam, ClipKind, EffectKind, EffectSlot, LfoRate, LfoShape, ModSourceKind, ParamId,
+    Project, SampleData, SampleSource, SigChange, StripParam, SynthParam, TempoMap, TempoPoint,
+    Tick, TimeSig, TimeSigMap, MAX_CHANNELS,
 };
 use gt_engine::{
     create, create_effect, ChannelParams, EngineCommand, EngineConfig, LoopRegion, MixerParams,
-    SongSnapshot,
+    ModPlan, SongSnapshot,
 };
 
 #[global_allocator]
@@ -215,16 +216,30 @@ fn process_does_not_allocate() {
             );
             song.playlist.clip_mut(c).unwrap().offset = 200;
         }
-        for target in [
-            gt_core::AutoTarget::StripPan(3),
-            gt_core::AutoTarget::EffectParam {
+        let (kick, bass) = (song.channels[0].id, song.channels[4].id);
+        let targets = [
+            ParamId::strip_pan(3),
+            ParamId::Effect {
                 strip: 10,
                 slot: 2,
                 kind: EffectKind::Delay,
                 index: 1,
             },
-        ] {
-            song.mixer.strips[10].slots[2] = Some(EffectSlot::new(EffectKind::Delay));
+            ParamId::Synth {
+                channel: bass,
+                param: SynthParam::Resonance,
+            },
+            ParamId::Channel {
+                channel: kick,
+                param: ChannelParam::Pitch,
+            },
+            ParamId::Strip {
+                strip: 2,
+                param: StripParam::Send(1),
+            },
+        ];
+        song.mixer.strips[10].slots[2] = Some(EffectSlot::new(EffectKind::Delay));
+        for target in targets {
             song.playlist.add_clip(
                 tracks[5],
                 0,
@@ -232,19 +247,53 @@ fn process_does_not_allocate() {
                 ClipKind::Automation(gt_core::Automation {
                     target,
                     points: vec![
-                        gt_core::AutoPoint { at: 0, value: 0.0 },
                         gt_core::AutoPoint {
-                            at: 7680,
-                            value: 1.0,
+                            at: 0,
+                            value: 0.0,
+                            curve: gt_core::Curve::Bezier(0.4),
                         },
+                        gt_core::AutoPoint::new(7680, 1.0),
                     ],
                 }),
             );
         }
+        // Modulators of every kind, some on automated parameters.
+        for (k, shape) in LfoShape::ALL.into_iter().enumerate() {
+            song.add_modulator(
+                targets[k % targets.len()],
+                ModSourceKind::Lfo {
+                    shape,
+                    rate: if k % 2 == 0 {
+                        LfoRate::Sync(k)
+                    } else {
+                        LfoRate::Hz(3.0)
+                    },
+                    phase: 0.1,
+                },
+            );
+        }
+        song.add_modulator(
+            ParamId::Synth {
+                channel: bass,
+                param: SynthParam::Cutoff,
+            },
+            ModSourceKind::default_follower(1),
+        );
+        for (slot, ch) in song.channels.iter().enumerate() {
+            h.send(EngineCommand::SetChannelParams {
+                slot: slot as u16,
+                params: Box::new(ChannelParams::from_channel(ch, false)),
+            })
+            .unwrap();
+        }
+        h.send(EngineCommand::SetModulation(Box::new(ModPlan::compile(
+            &song,
+        ))))
+        .unwrap();
         let snare = Arc::new(SampleData::mono(sr, gt_dsp::drums::snare(sr as f32)));
         let compiled = SongSnapshot::compile_song(&song, |_| Some(Arc::clone(&snare)));
         assert_eq!(compiled.audio.len(), tracks.len());
-        assert_eq!(compiled.automation.len(), 3);
+        assert_eq!(compiled.automation.len(), 2 + targets.len());
         h.send(EngineCommand::SetTempoMap(Box::new(song.tempo.clone())))
             .unwrap();
         h.send(EngineCommand::SetSong(Box::new(compiled))).unwrap();
@@ -258,6 +307,24 @@ fn process_does_not_allocate() {
         h.send(EngineCommand::Locate(Tick(0))).unwrap();
         run(&mut p, 5 * sr as usize / block);
         h.collect_garbage();
+        // Edit a modulator while playing (state carries over), then remove them all.
+        song.modulators[0].amount = -0.8;
+        h.send(EngineCommand::SetModulation(Box::new(ModPlan::compile(
+            &song,
+        ))))
+        .unwrap();
+        run(&mut p, 50);
+        song.modulators.clear();
+        h.send(EngineCommand::SetModulation(Box::new(ModPlan::compile(
+            &song,
+        ))))
+        .unwrap();
+        run(&mut p, 50);
+        assert_eq!(
+            h.collect_garbage(),
+            3,
+            "two replaced plans and the empty one"
+        );
 
         h.send(EngineCommand::Pause).unwrap();
         h.send(EngineCommand::Locate(Tick(12_345))).unwrap();
