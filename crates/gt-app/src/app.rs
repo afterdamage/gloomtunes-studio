@@ -93,8 +93,9 @@ impl GloomApp {
         }
     }
 
-    /// Sends channel `i`'s sample to the engine if it is loaded (otherwise it is sent when the
-    /// load finishes).
+    /// Sends channel `i`'s sample to the engine. If it is not loaded yet, the slot is silenced
+    /// and the sample is sent when the load finishes, so a failed load never leaves the
+    /// previous sample playing.
     fn push_sample(&mut self, i: usize) {
         let sample = match &self.project.channels[i].sampler.sample {
             None => None,
@@ -103,7 +104,7 @@ impl GloomApp {
                 None => {
                     let rate = self.rate();
                     self.library.request(&src.clone(), rate);
-                    return;
+                    None
                 }
             },
         };
