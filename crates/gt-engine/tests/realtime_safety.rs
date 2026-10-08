@@ -7,7 +7,10 @@
 use assert_no_alloc::{assert_no_alloc, AllocDisabler};
 use std::sync::Arc;
 
-use gt_core::{EffectKind, EffectSlot, Project, SampleData, TempoMap, Tick, TimeSig, MAX_CHANNELS};
+use gt_core::{
+    ClipKind, EffectKind, EffectSlot, Project, SampleData, SampleSource, SigChange, TempoMap,
+    TempoPoint, Tick, TimeSig, TimeSigMap, MAX_CHANNELS,
+};
 use gt_engine::{
     create, create_effect, ChannelParams, EngineCommand, EngineConfig, LoopRegion, MixerParams,
     SongSnapshot,
@@ -32,8 +35,17 @@ fn process_does_not_allocate() {
         run(&mut p, 10);
 
         h.send(EngineCommand::SetTestTone(true)).unwrap();
-        h.send(EngineCommand::SetTimeSig(TimeSig::new(7, 8)))
-            .unwrap();
+        h.send(EngineCommand::SetSignatures(Box::new(TimeSigMap::new(&[
+            SigChange {
+                bar: 0,
+                sig: TimeSig::new(7, 8),
+            },
+            SigChange {
+                bar: 1,
+                sig: TimeSig::new(3, 4),
+            },
+        ]))))
+        .unwrap();
         h.send(EngineCommand::SetLoop(LoopRegion {
             start: Tick(960),
             end: Tick(960 * 3),
@@ -42,6 +54,7 @@ fn process_does_not_allocate() {
         .unwrap();
         h.send(EngineCommand::Play).unwrap();
         run(&mut p, 200);
+        assert_eq!(h.collect_garbage(), 1, "the old signatures");
 
         // Tempo swaps: the Box is allocated here, the old one is freed by collect_garbage().
         for bpm in [90.0, 300.0, 61.5] {
@@ -175,6 +188,76 @@ fn process_does_not_allocate() {
             run(&mut p, 10);
             h.collect_garbage();
         }
+
+        // Song mode: the demo arrangement with an audio clip on every track, automation of a
+        // fader, a pan and an effect parameter, and tempo changes, played across loop wraps.
+        let mut song = Project::demo();
+        song.tempo = TempoMap::from_points_lossy(&[
+            TempoPoint {
+                at: Tick(0),
+                bpm: 128.0,
+            },
+            TempoPoint {
+                at: Tick(3840),
+                bpm: 97.0,
+            },
+        ]);
+        let tracks: Vec<_> = song.playlist.tracks.iter().map(|t| t.id).collect();
+        for (k, &t) in tracks.iter().enumerate() {
+            let c = song.playlist.add_clip(
+                t,
+                k as i64 * 700,
+                3000,
+                ClipKind::Audio {
+                    source: SampleSource::BuiltIn(gt_core::BuiltInSample::Snare),
+                    gain: 0.8,
+                },
+            );
+            song.playlist.clip_mut(c).unwrap().offset = 200;
+        }
+        for target in [
+            gt_core::AutoTarget::StripPan(3),
+            gt_core::AutoTarget::EffectParam {
+                strip: 10,
+                slot: 2,
+                kind: EffectKind::Delay,
+                index: 1,
+            },
+        ] {
+            song.mixer.strips[10].slots[2] = Some(EffectSlot::new(EffectKind::Delay));
+            song.playlist.add_clip(
+                tracks[5],
+                0,
+                7680,
+                ClipKind::Automation(gt_core::Automation {
+                    target,
+                    points: vec![
+                        gt_core::AutoPoint { at: 0, value: 0.0 },
+                        gt_core::AutoPoint {
+                            at: 7680,
+                            value: 1.0,
+                        },
+                    ],
+                }),
+            );
+        }
+        let snare = Arc::new(SampleData::mono(sr, gt_dsp::drums::snare(sr as f32)));
+        let compiled = SongSnapshot::compile_song(&song, |_| Some(Arc::clone(&snare)));
+        assert_eq!(compiled.audio.len(), tracks.len());
+        assert_eq!(compiled.automation.len(), 3);
+        h.send(EngineCommand::SetTempoMap(Box::new(song.tempo.clone())))
+            .unwrap();
+        h.send(EngineCommand::SetSong(Box::new(compiled))).unwrap();
+        // Two bars (about 4.3 s) looped, played for 5 s: clips, tempo change and a wrap.
+        h.send(EngineCommand::SetLoop(LoopRegion {
+            start: Tick(0),
+            end: Tick(7680),
+            enabled: true,
+        }))
+        .unwrap();
+        h.send(EngineCommand::Locate(Tick(0))).unwrap();
+        run(&mut p, 5 * sr as usize / block);
+        h.collect_garbage();
 
         h.send(EngineCommand::Pause).unwrap();
         h.send(EngineCommand::Locate(Tick(12_345))).unwrap();

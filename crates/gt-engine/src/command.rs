@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use gt_core::{SampleData, TempoMap, Tick, TimeSig};
+use gt_core::{SampleData, TempoMap, Tick, TimeSigMap};
 
 use crate::mixer::{EffectBox, MixerParams};
 use crate::song::{ChannelParams, SongSnapshot};
@@ -46,8 +46,8 @@ pub enum EngineCommand {
     SetLoop(LoopRegion),
     /// Replace the tempo map. The playhead keeps its musical position.
     SetTempoMap(Box<TempoMap>),
-    /// Set the time signature (used for beats, bars and the metronome).
-    SetTimeSig(TimeSig),
+    /// Replace the time signatures (used for beats, bars and the metronome).
+    SetSignatures(Box<TimeSigMap>),
     /// Metronome clicks while playing.
     SetMetronome(bool),
     /// The 440 Hz device test tone from Step 1.
@@ -57,7 +57,8 @@ pub enum EngineCommand {
     FadeOut,
     /// Undo `FadeOut`.
     FadeIn,
-    /// Replace the playing pattern. Held notes are released.
+    /// Replace what plays (a pattern, or the arrangement). Held notes are released and
+    /// automation overrides of faders are dropped.
     SetSong(Box<SongSnapshot>),
     /// Replace a channel's settings. Gain and pan glide; the rest applies to new notes.
     SetChannelParams {
@@ -126,6 +127,7 @@ impl EngineCommand {
         matches!(
             self,
             Self::SetTempoMap(_)
+                | Self::SetSignatures(_)
                 | Self::SetSong(_)
                 | Self::SetChannelParams { .. }
                 | Self::SetChannelSample { .. }
@@ -180,6 +182,8 @@ pub enum EngineEvent {
 pub enum Garbage {
     /// A replaced tempo map.
     TempoMap(Box<TempoMap>),
+    /// Replaced time signatures.
+    Signatures(Box<TimeSigMap>),
     /// A replaced song.
     Song(Box<SongSnapshot>),
     /// A channel-settings box, already copied into the channel.

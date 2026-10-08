@@ -1,7 +1,8 @@
 //! Sample browser: the built-in sounds and one folder on disk.
 //!
 //! Click a sound to hear it, double-click (or use the button) to load it into the selected
-//! channel. The app lists folders and loads files; this view only shows them.
+//! channel, or drag it onto a playlist track. The app lists folders and loads files; this view
+//! only shows them.
 
 use std::path::PathBuf;
 
@@ -140,8 +141,21 @@ fn entry(
 ) {
     let selected = m.selected.as_ref() == Some(&src);
     let r = ui
-        .add(egui::Button::selectable(selected, name).truncate())
-        .on_hover_text("Click to hear, double-click to load into the selected channel");
+        .add(
+            egui::Button::selectable(selected, name)
+                .truncate()
+                .sense(egui::Sense::click_and_drag()),
+        )
+        .on_hover_text(
+            "Click to hear, double-click to load into the selected channel, drag onto a \
+             playlist track for an audio clip",
+        );
+    if r.drag_started() {
+        // Load it while it is being dragged, so the clip gets its length and waveform.
+        m.selected = Some(src.clone());
+        actions.push(BrowserAction::Preview(src.clone()));
+    }
+    r.dnd_set_drag_payload(src.clone());
     if r.double_clicked() {
         m.selected = Some(src.clone());
         actions.push(BrowserAction::Assign(src));

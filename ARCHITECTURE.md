@@ -327,7 +327,7 @@ allocation happened on the UI side.
 
 As of Step 3 the implemented variants are `Play`, `Pause`, `Stop`, `Locate`, `SetLoop`,
 `SetTempoMap(Box<TempoMap>)` (the tempo part of `ApplySong`, until the full song snapshot exists),
-`SetTimeSig`, `SetMetronome`, `SetTestTone`, `FadeOut`, `FadeIn`, and from Step 3
+`SetTimeSig` (`SetSignatures` from Step 7), `SetMetronome`, `SetTestTone`, `FadeOut`, `FadeIn`, and from Step 3
 `SetSong(Box<SongSnapshot>)` (the playing pattern), `SetChannelParams { slot, Box<ChannelParams> }`
 (stand-in for `SetParam` until the parameter system of Prompt 8), `SetChannelSample { slot,
 Option<Arc<SampleData>> }` (stand-in for `ApplyGraph` until the mixer graph of Prompt 6),
@@ -614,6 +614,13 @@ pub enum ClipKind {
 }
 ```
 
+> **As built (Step 7, D44-D50):** `gt_core::playlist` keeps tracks and clips in plain `Vec`s
+> (order is the vector order; clips carry their `TrackId`) and markers sorted by tick. The loop
+> region lives in the transport, not the document. `ClipKind::Audio` holds a `SampleSource`
+> (path or built-in) and a linear gain; the track's `insert` says where its audio goes.
+> `ClipKind::Automation` embeds its `Automation { target, points }` instead of pointing into a
+> separate map (D50). Signatures are a `TimeSigMap` of changes on bar boundaries (D46).
+
 ### Automation and parameters
 
 ```rust
@@ -735,6 +742,14 @@ Typical topology: channel nodes (instrument) → channel strip (vol/pan) → ins
 
 Sample times are resolved from ticks at schedule time using the anchor (§5.2), so a snapshot does
 not depend on where playback starts.
+
+> **As built (Step 7, D44-D49):** `SongSnapshot { length, repeat, events, audio, automation }`.
+> Pattern mode compiles the current pattern with `repeat = true`; song mode (`compile_song`)
+> expands every audible pattern clip into absolute ticks with `repeat = false`, so notes play once
+> per pass and the loop region decides what repeats (D44). Audio clips become `AudioPlay`
+> entries in seconds, read at `(song seconds - origin) x rate` with linear interpolation and a
+> 2 ms fade only at cut edges (D45). Automation becomes one `AutoLane` per target (D47). There is
+> no per-bar locate index yet.
 
 ### 7.3 Voices
 
@@ -888,6 +903,13 @@ polled), and float determinism across compilers.
 | D41 | Effect designs: RBJ biquads (TDF-II) for the EQ; feed-forward compressor with soft knee, dB-domain attack/release; delay with one-pole "tone" in the feedback and linear interpolation; 8-line FDN reverb with Hadamard feedback, per-line RT60 gains, damping and 4 input allpasses; chorus with one swept line per side; distortion with first-order ADAA (antiderivatives in f64) instead of oversampling; limiter with instant-attack release, running minimum and moving average over a 1.5 ms look-ahead, so the ceiling is guaranteed | Each is the simplest design that meets the step's bar at under 4 ms per second of audio | Oversampled distortion and a Dattorro plate as alternatives later |
 | D42 | Delay compensation: each strip's input latency is the largest output latency feeding it; every edge (channel input, output, each send) gets a fixed-capacity delay line (512 frames) set to the difference; the total is published as `latency_frames`. Latency counts enabled effects only | Real PDC at low cost (only the limiter has latency in v1); the same scheme serves CLAP plugins in Prompt 11 | Larger capacity for plugins with long latency |
 | D43 | Effects are reset when playback starts from Stop, not on pause or locate | Offline export (Step 9) must match a real-time capture from a stopped transport (§7.5) | Revisit if users want tails to continue across a restart |
+| D44 | One `SongSnapshot` type for both play modes: a `repeat` flag says whether events loop at `length` (pattern mode) or sit on the absolute timeline (song mode). Song mode loops 0 to the bar after the last clip when the user loop is off | One scheduler path; switching modes is just another `SetSong` | Per-bar index for faster locate in long songs |
+| D45 | Audio clips are scheduled in seconds, not ticks: the compiler converts clip start, end and origin (start minus slip offset) through the tempo map, and the transport records each quantum's `PlaySegment { offset, frames, seconds }` so the processor reads the right sample frame even across tempo changes and loop wraps | Sample-accurate audio under tempo changes without stretching; matches the exact-frame test in `tests/song.rs` | Time-stretch mode per clip (post-v1) |
+| D46 | Time signatures are a `TimeSigMap` of changes on bar indices (`SigChange { bar, sig }`), not ticks; the transport derives beats and downbeats from it and the UI snaps to it | A signature change mid-bar has no musical meaning; storing bars makes it impossible | — |
+| D47 | Automation: clips on the same target merge into one lane (later-starting clip wins where they overlap), evaluated once per 64-frame quantum while playing in song mode. Strip volume and pan are written to override fields on the strip (`auto_gain`, `auto_pan`) so the document value survives; an override clears on `SetSong` and when the user moves the control. Effect parameters go through the same `set_param` path as the UI, and the app resends document values of parameters the previous song automated | No allocation or locks; the strip smoothing hides the 1.3 ms steps. Replaced by the general parameter registry in Step 8 | Per-sample ramps, curve types (Step 8) |
+| D48 | Each playlist track has an `insert`; its audio clips render into that mixer strip's input. Pattern clips still play through their channels' own routing | Audio clips need a destination without a channel; keeps channel routing unchanged | Per-clip routing |
+| D49 | Waveform peaks: a min/max pyramid (64 frames per pair at the base, 4x per level) built by the sample loader thread alongside decoding; the UI picks the coarsest level whose pairs are at most 1/16 of a pixel column | One pass on a worker thread; drawing costs a few reads per column at any zoom | Disk cache of peaks next to the project (Step 9) |
+| D50 | Automation points live inside their clip (`ClipKind::Automation(Automation)`), so duplicating a clip copies its curve | Simpler undo and duplication than a shared `IdMap<AutomationId, _>`; Step 8 may add linked clips | Linked/"ghost" automation clips |
 
 ---
 

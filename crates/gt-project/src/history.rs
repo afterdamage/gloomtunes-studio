@@ -7,8 +7,9 @@
 //! - when only notes changed, one [`Edit::Notes`] per changed (pattern, channel) list, holding
 //!   that list before and after (a step of a 10,000-note pattern costs only the lists it
 //!   touched);
-//! - anything else (channels, pattern list, swing, the mixer) is recorded as [`Edit::Whole`], a before/after
-//!   copy of the document. Those edits are rare and small.
+//! - anything else (channels, pattern list, swing, the mixer, the playlist, tempo and time
+//!   signatures) is recorded as [`Edit::Whole`], a before/after copy of the document. Those
+//!   edits are rare and small.
 //!
 //! Which pattern is selected is view state and is never undone. A drag that moves notes for a
 //! second is one undo step because it is committed once, on release.
@@ -187,6 +188,9 @@ fn diff(a: &Project, b: &Project) -> Vec<Edit> {
     let same_shape = a.channels == b.channels
         && a.swing == b.swing
         && a.mixer == b.mixer
+        && a.playlist == b.playlist
+        && a.tempo == b.tempo
+        && a.signatures == b.signatures
         && a.patterns.len() == b.patterns.len()
         && a.patterns
             .iter()
@@ -277,7 +281,7 @@ mod tests {
         p.select_pattern(second);
         h.undo(&mut p);
         h.undo(&mut p);
-        assert_eq!(p.patterns.len(), 1);
+        assert_eq!(p.patterns.len(), Project::demo().patterns.len());
         assert_eq!(p.current_pattern, first, "deleted selection falls back");
         assert!(h.undo(&mut p).is_none());
     }
@@ -308,6 +312,25 @@ mod tests {
         p.swing = 0.0;
         h.commit(&p, "Swing");
         assert!(h.redo_label().is_none());
+    }
+
+    #[test]
+    fn playlist_and_timing_changes_are_undoable() {
+        let mut p = Project::demo();
+        let mut h = History::new(&p);
+        let id = p.playlist.clips[0].id;
+        p.playlist.split_clip(id, 960).unwrap();
+        p.playlist.add_marker(100, "x");
+        assert!(h.commit(&p, "Playlist"));
+        p.tempo = gt_core::TempoMap::constant(90.0);
+        p.signatures = gt_core::TimeSigMap::constant(gt_core::TimeSig::new(6, 8));
+        assert!(h.commit(&p, "Timing"));
+        h.undo(&mut p);
+        assert_eq!(p.tempo, Project::demo().tempo);
+        h.undo(&mut p);
+        assert_eq!(p.playlist, Project::demo().playlist);
+        h.redo(&mut p);
+        assert_eq!(p.playlist.markers.len(), 4);
     }
 
     #[test]

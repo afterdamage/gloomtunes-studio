@@ -17,9 +17,9 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 3 | Sampler + channel rack | Done (2026-10-08) |
 | 4 | Piano roll | Done (2026-10-08) |
 | 5 | Gloom Synth | Done (2026-10-08) |
-| 6 | Mixer and effects | **In review** |
-| 7 | Playlist / arrangement | Next |
-| 8 | Automation and parameter system | Planned |
+| 6 | Mixer and effects | Done (2026-10-08) |
+| 7 | Playlist / arrangement | **In review** |
+| 8 | Automation and parameter system | Next |
 | 9 | Save/load, export, recovery | Planned |
 | 10 | MIDI input and recording | Planned |
 | 11 | CLAP plugin hosting | Planned (can move after v1.0) |
@@ -158,6 +158,24 @@ for schedule; Phase E is the riskiest technically.
 - Song/pattern play modes.
 - **You should hear** a full arrangement playing from the playlist.
 - Cut if late: slip edit, markers.
+- Delivered (2026-10-08): everything above, nothing cut. A **Playlist** view (F5, the default)
+  with Draw, Select and Slice tools; snap to bar, beat, 1/8, 1/16 or off (Alt bypasses it);
+  Ctrl+wheel zoom. Clips are patterns, audio (drag a file from the browser) or automation.
+  Clips move across tracks and bars, resize from either edge, split, duplicate (Ctrl+D), mute
+  (M) and slip-edit (Shift+drag). Tracks have names, colours, mute, solo and an "audio to"
+  insert for their audio clips; there is no track limit. The ruler holds markers, tempo and
+  time-signature changes (right-click to add, drag to move, double-click to edit) and a bars
+  row: click to locate, drag to set the loop. Song mode (Song button or L) plays the
+  arrangement; pattern mode loops the current pattern as before. Tempo changes move audio
+  clips with them to the exact frame (D45); signature changes move bars, the metronome and
+  snap (D46). Waveform peaks are built on the loader thread (D49). Automation clips drive
+  mixer volume, pan and every effect parameter (D47). The demo is now a 12-bar arrangement.
+  Known limits: automation is linear between points and evaluated every 64 frames; locating
+  mid-song does not chase notes already playing; audio clips are not time-stretched, start
+  abruptly when you locate into their middle and stop without a fade; the mixer view does not
+  show automated fader positions; automation can only target mixer and effect parameters (all
+  of them come in Step 8); peaks are cached in memory only; any song edit while playing
+  releases held notes; nothing is saved yet (Step 9).
 
 ### Step 8: Automation and parameter system (3 to 5 weeks)
 - Stable `ParamAddress` for every parameter; range, curve, display formatting.

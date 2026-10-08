@@ -5,20 +5,20 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use gt_core::{
-    EffectKind, Instrument, Project, SampleSource, TempoMap, Tick, FX_SLOTS, MAX_CHANNELS,
-    ROOT_KEY, STEP_TICKS, STRIPS,
+    ClipKind, EffectKind, Instrument, Project, SampleSource, SigChange, TempoPoint, Tick,
+    TimeSigMap, FX_SLOTS, MAX_CHANNELS, ROOT_KEY, STEP_TICKS, STRIPS,
 };
 use gt_engine::{
-    create_effect, ChannelParams, EngineCommand, LoopRegion, MixerParams, SongSnapshot,
+    create_effect, AutoDest, ChannelParams, EngineCommand, LoopRegion, MixerParams, SongSnapshot,
     TransportState,
 };
 use gt_project::{ops, presets, History};
 use gt_ui::views::{
-    audio_panel, browser, channel_rack, mixer_view, piano_roll, sampler_panel, synth_panel,
-    transport_bar, AudioAction, AudioPanelModel, BrowserAction, BrowserModel, MixerState,
-    MixerView, PianoRollAction, PianoRollState, PianoRollView, PlayState, RackAction, RackState,
-    RackView, SamplerPanelView, StripMeter, SynthPanelAction, SynthPanelView, TransportAction,
-    TransportModel,
+    audio_panel, browser, channel_rack, mixer_view, piano_roll, playlist, sampler_panel,
+    synth_panel, transport_bar, AudioAction, AudioPanelModel, BrowserAction, BrowserModel,
+    MixerState, MixerView, PianoRollAction, PianoRollState, PianoRollView, PlayState,
+    PlaylistAction, PlaylistState, PlaylistView, RackAction, RackState, RackView, SamplerPanelView,
+    StripMeter, SynthPanelAction, SynthPanelView, TransportAction, TransportModel,
 };
 use gt_ui::widgets::MeterBallistics;
 use gt_ui::GloomTheme;
@@ -34,6 +34,7 @@ const ACTIVITY_FALL_PER_S: f32 = 4.0;
 /// What the central area shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MainView {
+    Playlist,
     Rack,
     PianoRoll,
     Mixer,
@@ -86,6 +87,11 @@ pub struct GloomApp {
     strip_meters: Vec<[MeterBallistics; 2]>,
     strip_view: Vec<StripMeter>,
     fx_meters: Vec<[f32; FX_SLOTS]>,
+
+    playlist: PlaylistState,
+    /// Effect parameters the last song sent automates; their document values are sent again
+    /// when that song is replaced.
+    automated_fx: Vec<(usize, usize, usize)>,
 }
 
 impl GloomApp {
@@ -98,7 +104,11 @@ impl GloomApp {
             theme,
             audio: AudioIo::new(),
             meter: MeterBallistics::default(),
-            transport: TransportModel::default(),
+            // The demo opens on its arrangement, ready to play.
+            transport: TransportModel {
+                song_mode: true,
+                ..TransportModel::default()
+            },
             test_tone: false,
             show_audio: false,
             project,
@@ -108,7 +118,7 @@ impl GloomApp {
             preview_pending: None,
             slots_in_use: 0,
             activity: [0.0; MAX_CHANNELS],
-            main_view: MainView::Rack,
+            main_view: MainView::Playlist,
             roll: PianoRollState::default(),
             history,
             pending_edit: None,
@@ -124,6 +134,8 @@ impl GloomApp {
             strip_meters: vec![Default::default(); STRIPS],
             strip_view: vec![StripMeter::default(); STRIPS],
             fx_meters: vec![[0.0; FX_SLOTS]; STRIPS],
+            playlist: PlaylistState::default(),
+            automated_fx: Vec::new(),
         };
         app.refresh_presets();
         app.open_folder(default_folder());
@@ -149,12 +161,22 @@ impl GloomApp {
         }
     }
 
-    /// Starts loading every sample the project uses.
+    /// Starts loading every sample the project uses (channels and audio clips).
     fn request_channel_samples(&mut self) {
         let rate = self.rate();
         for ch in &self.project.channels {
             if let Some(src) = ch.sample() {
                 self.library.request(src, rate);
+            }
+        }
+        self.request_clip_audio();
+    }
+
+    fn request_clip_audio(&mut self) {
+        let rate = self.rate();
+        for c in &self.project.playlist.clips {
+            if let ClipKind::Audio { source, .. } = &c.kind {
+                self.library.request(source, rate);
             }
         }
     }
@@ -191,9 +213,53 @@ impl GloomApp {
         }
     }
 
+    /// Sends what plays: the current pattern (pattern mode) or the playlist (song mode). Audio
+    /// clips whose sound is still loading join when it arrives.
     fn push_song(&mut self) {
-        let song = SongSnapshot::compile(&self.project);
-        self.send(EngineCommand::SetSong(Box::new(song)));
+        let song = if self.transport.song_mode {
+            self.request_clip_audio();
+            let lib = &self.library;
+            SongSnapshot::compile_song(&self.project, |src| {
+                lib.get(src).map(|l| std::sync::Arc::clone(&l.data))
+            })
+        } else {
+            SongSnapshot::compile(&self.project)
+        };
+        let automated: Vec<(usize, usize, usize)> = song
+            .automation
+            .iter()
+            .filter_map(|l| match l.dest {
+                AutoDest::Effect {
+                    strip, slot, index, ..
+                } => Some((usize::from(strip), usize::from(slot), usize::from(index))),
+                _ => None,
+            })
+            .collect();
+        if self.try_send(EngineCommand::SetSong(Box::new(song))) {
+            // Parameters the old song automated go back to their document values (faders are
+            // reset by the engine itself).
+            for (strip, slot, index) in std::mem::replace(&mut self.automated_fx, automated) {
+                if let Some(Some(e)) = self.sent_fx.get_mut(strip).and_then(|s| s.get_mut(slot)) {
+                    if let Some(v) = e.params.get_mut(index) {
+                        *v = f32::NAN;
+                    }
+                }
+            }
+        }
+        // The song's end is the loop in song mode.
+        self.send(EngineCommand::SetLoop(self.loop_region()));
+    }
+
+    /// Sends the tempo and time-signature maps, then the song (audio clip times depend on the
+    /// tempo).
+    fn push_timing(&mut self) {
+        self.send(EngineCommand::SetTempoMap(Box::new(
+            self.project.tempo.clone(),
+        )));
+        self.send(EngineCommand::SetSignatures(Box::new(
+            self.project.signatures.clone(),
+        )));
+        self.push_song();
     }
 
     /// Sends every channel's sample and settings, clears slots no longer used, and the song.
@@ -214,6 +280,17 @@ impl GloomApp {
     }
 
     fn on_samples_ready(&mut self, ready: Vec<SampleSource>) {
+        let clips_waiting = self.transport.song_mode
+            && ready.iter().any(|src| {
+                self.project
+                    .playlist
+                    .clips
+                    .iter()
+                    .any(|c| matches!(&c.kind, ClipKind::Audio { source, .. } if source == src))
+            });
+        if clips_waiting {
+            self.push_song();
+        }
         for src in ready {
             for i in 0..self.project.channels.len() {
                 if self.project.channels[i].sample() == Some(&src) {
@@ -424,7 +501,8 @@ impl GloomApp {
         };
         let busy = ctx.input(|i| i.pointer.any_down())
             || ctx.text_edit_focused()
-            || self.roll.is_dragging();
+            || self.roll.is_dragging()
+            || self.playlist.is_dragging();
         if !busy {
             self.history.commit(&self.project, label);
             self.pending_edit = None;
@@ -441,6 +519,7 @@ impl GloomApp {
     fn undo(&mut self, redo: bool) {
         // The roll's drag holds indices into the notes that are about to be replaced.
         self.cancel_roll_gesture();
+        self.playlist.cancel();
         // Finish the current gesture first so it becomes its own step.
         if let Some(label) = self.pending_edit.take() {
             self.history.commit(&self.project, label);
@@ -455,6 +534,7 @@ impl GloomApp {
             let n = self.project.channels.len();
             self.rack.selected = self.rack.selected.min(n.saturating_sub(1));
             self.push_channels();
+            self.push_timing();
         }
     }
 
@@ -572,10 +652,12 @@ impl GloomApp {
 
     /// Brings a freshly created engine up to date with the current settings.
     fn sync_new_engine(&mut self) {
-        self.send(EngineCommand::SetTempoMap(Box::new(TempoMap::constant(
-            self.transport.bpm,
-        ))));
-        self.send(EngineCommand::SetTimeSig(self.transport.time_sig));
+        self.send(EngineCommand::SetTempoMap(Box::new(
+            self.project.tempo.clone(),
+        )));
+        self.send(EngineCommand::SetSignatures(Box::new(
+            self.project.signatures.clone(),
+        )));
         self.send(EngineCommand::SetLoop(self.loop_region()));
         self.send(EngineCommand::SetMetronome(self.transport.metronome));
         self.send(EngineCommand::Locate(self.transport.position));
@@ -586,6 +668,7 @@ impl GloomApp {
         // A new engine has an empty mixer.
         self.sent_mixer = None;
         self.sent_fx = vec![Default::default(); STRIPS];
+        self.automated_fx.clear();
     }
 
     /// Draws the piano roll for the selected channel of the current pattern.
@@ -600,7 +683,7 @@ impl GloomApp {
             return Vec::new();
         };
         let (id, name) = (ch.id, ch.name.clone());
-        let bar_ticks = self.transport.time_sig.bar_ticks();
+        let bar_ticks = self.project.signatures.sig_of_bar(0).bar_ticks();
         let pat = self.project.current_pattern_mut();
         self.roll.set_target(pat.id.0, id.0);
         let pattern_len = pat.length_ticks();
@@ -626,14 +709,97 @@ impl GloomApp {
         actions
     }
 
+    /// The loop the engine plays: the user's loop when on; in song mode without one, the
+    /// whole song (from bar 1 to the end of the last clip, whole bars).
     fn loop_region(&self) -> LoopRegion {
-        let bar = self.transport.time_sig.bar_ticks();
-        let start = (self.transport.loop_start_bar - 1) * bar;
-        LoopRegion {
-            start: Tick(start),
-            end: Tick(start + self.transport.loop_bars * bar),
-            enabled: self.transport.loop_enabled,
+        let t = &self.transport;
+        if t.loop_enabled || !t.song_mode {
+            return LoopRegion {
+                start: t.loop_start,
+                end: t.loop_end,
+                enabled: t.loop_enabled,
+            };
         }
+        let sigs = &self.project.signatures;
+        let end = self.project.playlist.song_end();
+        let end = sigs.bar_start(sigs.bar_of(end - 1) + 1);
+        LoopRegion {
+            start: Tick(0),
+            end: Tick(end),
+            enabled: end > 0,
+        }
+    }
+
+    /// Where the current pattern is playing, in pattern ticks: the transport position in
+    /// pattern mode; in song mode, inside a clip of the current pattern under the playhead.
+    fn pattern_position(&self) -> Option<i64> {
+        let pos = self.transport.position.0;
+        let len = self.project.current_pattern().length_ticks().max(1);
+        if !self.transport.song_mode {
+            return Some(pos.rem_euclid(len));
+        }
+        let pl = &self.project.playlist;
+        pl.clips
+            .iter()
+            .find(|c| {
+                c.kind == ClipKind::Pattern(self.project.current_pattern)
+                    && !c.muted
+                    && pl.is_track_audible(c.track)
+                    && c.start <= pos
+                    && pos < c.end()
+            })
+            .map(|c| (pos - c.start + c.offset).rem_euclid(len))
+    }
+
+    fn on_playlist(&mut self, action: PlaylistAction) {
+        match action {
+            PlaylistAction::Changed => {
+                self.push_song();
+                self.pending_edit = Some("Edit playlist");
+            }
+            PlaylistAction::TimingChanged => {
+                self.push_timing();
+                self.pending_edit = Some("Tempo or time signature");
+            }
+            PlaylistAction::Locate(t) => self.send(EngineCommand::Locate(Tick(t))),
+            PlaylistAction::SetLoop { start, end } => {
+                self.transport.loop_start = Tick(start);
+                self.transport.loop_end = Tick(end);
+                self.transport.loop_enabled = true;
+                self.send(EngineCommand::SetLoop(self.loop_region()));
+            }
+            PlaylistAction::Load(src) => {
+                let rate = self.rate();
+                self.library.request(&src, rate);
+            }
+            PlaylistAction::EditPattern(id) => {
+                self.project.select_pattern(id);
+                self.main_view = MainView::PianoRoll;
+                self.push_song();
+            }
+        }
+    }
+
+    /// Sets the tempo of the segment the playhead is in.
+    fn set_bpm_at_playhead(&mut self, bpm: f64) {
+        let pos = self.transport.position;
+        let mut pts: Vec<TempoPoint> = self.project.tempo.points().collect();
+        let i = pts.partition_point(|p| p.at <= pos).saturating_sub(1);
+        pts[i].bpm = bpm;
+        self.project.tempo = gt_core::TempoMap::from_points_lossy(&pts);
+        self.push_timing();
+        self.pending_edit = Some("Tempo");
+    }
+
+    /// Sets the time signature in effect at the playhead.
+    fn set_sig_at_playhead(&mut self, sig: gt_core::TimeSig) {
+        let bar = self.project.signatures.bar_of(self.transport.position.0);
+        let mut ch: Vec<SigChange> = self.project.signatures.changes().collect();
+        let i = ch.partition_point(|c| c.bar <= bar).saturating_sub(1);
+        ch[i].sig = sig;
+        self.project.signatures = TimeSigMap::new(&ch);
+        self.push_timing();
+        self.pending_edit = Some("Time signature");
     }
 
     fn on_transport(&mut self, action: TransportAction) {
@@ -647,17 +813,9 @@ impl GloomApp {
                 self.send(cmd);
             }
             TransportAction::Stop => self.send(EngineCommand::Stop),
-            TransportAction::SetBpm(bpm) => {
-                // Allocated here on the UI thread; the old map comes back as garbage.
-                self.send(EngineCommand::SetTempoMap(Box::new(TempoMap::constant(
-                    bpm,
-                ))));
-            }
-            TransportAction::SetTimeSig(sig) => {
-                self.send(EngineCommand::SetTimeSig(sig));
-                // The loop is defined in bars, so its tick range depends on the signature.
-                self.send(EngineCommand::SetLoop(self.loop_region()));
-            }
+            TransportAction::SetBpm(bpm) => self.set_bpm_at_playhead(bpm),
+            TransportAction::SetTimeSig(sig) => self.set_sig_at_playhead(sig),
+            TransportAction::SetSongMode(_) => self.push_song(),
             TransportAction::LoopChanged => self.send(EngineCommand::SetLoop(self.loop_region())),
             TransportAction::SetMetronome(on) => self.send(EngineCommand::SetMetronome(on)),
         }
@@ -710,6 +868,9 @@ impl eframe::App for GloomApp {
             self.activity = [0.0; MAX_CHANNELS];
         }
         self.meter.update(self.audio.take_peak(), dt);
+        // The tempo and signature shown are the ones at the playhead.
+        self.transport.bpm = self.project.tempo.bpm_at(self.transport.position);
+        self.transport.time_sig = self.project.signatures.sig_at(self.transport.position);
 
         // Space toggles play. Consumed before any widget runs, so a focused button does not
         // also react to it; left alone while a text field (e.g. typing a BPM) has focus.
@@ -727,8 +888,15 @@ impl eframe::App for GloomApp {
             } else if key(Modifiers::COMMAND, Key::Z) {
                 self.undo(false);
             }
+            if key(Modifiers::NONE, Key::F5) {
+                self.main_view = MainView::Playlist;
+            }
             if key(Modifiers::NONE, Key::F6) {
                 self.main_view = MainView::Rack;
+            }
+            if key(Modifiers::NONE, Key::L) {
+                self.transport.song_mode = !self.transport.song_mode;
+                self.push_song();
             }
             if key(Modifiers::NONE, Key::F7) {
                 self.main_view = MainView::PianoRoll;
@@ -752,7 +920,8 @@ impl eframe::App for GloomApp {
             .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(8))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let a = transport_bar(ui, &theme, &mut self.transport);
+                    let a =
+                        transport_bar(ui, &theme, &mut self.transport, &self.project.signatures);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add(egui::Button::selectable(self.show_audio, "Audio"))
@@ -842,7 +1011,7 @@ impl eframe::App for GloomApp {
             }
         }
         let sample_rate = self.rate() as f32;
-        let show_instrument = self.main_view != MainView::Mixer;
+        let show_instrument = matches!(self.main_view, MainView::Rack | MainView::PianoRoll);
         let (sampler_changed, synth_actions) = if !show_instrument {
             (false, Vec::new())
         } else {
@@ -886,19 +1055,22 @@ impl eframe::App for GloomApp {
         }
 
         let playing = self.transport.state == PlayState::Playing;
-        let pattern_pos = playing.then(|| {
-            let len = self.project.current_pattern().length_ticks().max(1);
-            self.transport.position.0.rem_euclid(len)
-        });
+        let pattern_pos = if playing {
+            self.pattern_position()
+        } else {
+            None
+        };
         if self.main_view == MainView::Mixer {
             self.read_meters(dt);
         }
         let mut mixer_changed = false;
+        let mut playlist_actions = Vec::new();
         let (rack_actions, roll_actions) = egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(ui.style()).inner_margin(10))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for (v, label, tip) in [
+                        (MainView::Playlist, "Playlist", "Arrangement of clips (F5)"),
                         (MainView::Rack, "Channel rack", "Step sequencer (F6)"),
                         (
                             MainView::PianoRoll,
@@ -918,6 +1090,21 @@ impl eframe::App for GloomApp {
                 });
                 ui.separator();
                 match self.main_view {
+                    MainView::Playlist => {
+                        let r = self.loop_region();
+                        playlist_actions = playlist(
+                            ui,
+                            &theme,
+                            &mut self.project,
+                            &mut self.playlist,
+                            PlaylistView {
+                                playhead: Some(self.transport.position.0),
+                                loop_region: (r.start.0, r.end.0, r.enabled),
+                                audio: &self.library,
+                            },
+                        );
+                        (Vec::new(), Vec::new())
+                    }
                     MainView::Rack => {
                         let a = channel_rack(
                             ui,
@@ -962,6 +1149,9 @@ impl eframe::App for GloomApp {
         }
         for a in roll_actions {
             self.on_roll(a);
+        }
+        for a in playlist_actions {
+            self.on_playlist(a);
         }
         if mixer_changed {
             self.pending_edit = Some("Mixer");

@@ -1,15 +1,16 @@
 //! Sample library: loads samples on worker threads and caches them for the engine.
 //!
 //! Each request runs on its own short-lived thread (decoding and resampling can take a while
-//! for long files); results come back over a channel that the UI polls once per frame.
+//! for long files), which also builds the waveform overview and the peak pyramid for the
+//! playlist; results come back over a channel that the UI polls once per frame.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
-use gt_core::{BuiltInSample, SampleData, SampleSource};
-use gt_ui::views::BrowserEntry;
+use gt_core::{BuiltInSample, Peaks, SampleData, SampleSource};
+use gt_ui::views::{AudioLookup, BrowserEntry};
 
 /// Waveform columns kept per sample for the sampler panel.
 const OVERVIEW_COLUMNS: usize = 260;
@@ -18,9 +19,10 @@ const OVERVIEW_COLUMNS: usize = 260;
 pub struct Loaded {
     pub data: Arc<SampleData>,
     pub overview: Vec<(f32, f32)>,
+    pub peaks: Peaks,
 }
 
-type LoadResult = (SampleSource, Result<SampleData, String>);
+type LoadResult = (SampleSource, Result<Loaded, String>);
 
 pub struct Library {
     cache: HashMap<SampleSource, Loaded>,
@@ -74,7 +76,11 @@ impl Library {
             .spawn({
                 let src = src.clone();
                 move || {
-                    let result = load(&src, rate);
+                    let result = load(&src, rate).map(|data| Loaded {
+                        overview: data.overview(OVERVIEW_COLUMNS),
+                        peaks: Peaks::build(&data),
+                        data: Arc::new(data),
+                    });
                     let _ = tx.send((src, result));
                 }
             });
@@ -90,7 +96,8 @@ impl Library {
         while let Ok((src, result)) = self.rx.try_recv() {
             self.pending.remove(&src);
             match result {
-                Ok(data) => {
+                Ok(loaded) => {
+                    let data = &loaded.data;
                     log::info!(
                         "loaded {} ({:.2} s, {} ch, {} Hz)",
                         src.display_name(),
@@ -98,14 +105,7 @@ impl Library {
                         data.channels.len(),
                         data.sample_rate
                     );
-                    let overview = data.overview(OVERVIEW_COLUMNS);
-                    self.cache.insert(
-                        src.clone(),
-                        Loaded {
-                            data: Arc::new(data),
-                            overview,
-                        },
-                    );
+                    self.cache.insert(src.clone(), loaded);
                     ready.push(src);
                 }
                 Err(e) => {
@@ -115,6 +115,12 @@ impl Library {
             }
         }
         ready
+    }
+}
+
+impl AudioLookup for Library {
+    fn peaks(&self, src: &SampleSource) -> Option<(&Peaks, u32)> {
+        self.cache.get(src).map(|l| (&l.peaks, l.data.sample_rate))
     }
 }
 
@@ -226,6 +232,12 @@ mod tests {
         let l = lib.get(&src).unwrap();
         assert_eq!(l.data.sample_rate, 44_100);
         assert_eq!(l.overview.len(), OVERVIEW_COLUMNS);
+        assert_eq!(
+            l.peaks.frames(),
+            l.data.frames(),
+            "peaks built on the loader thread"
+        );
+        assert!(lib.peaks(&src).is_some());
     }
 
     #[test]

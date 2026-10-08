@@ -14,7 +14,7 @@
 //! the later frame. Every tick maps to exactly one frame and render quanta partition the frames,
 //! so each event fires exactly once regardless of how the timeline is cut into buffers.
 
-use gt_core::{TempoMap, Tick, TimeSig, PPQ};
+use gt_core::{TempoMap, Tick, TimeSigMap, PPQ};
 
 use crate::command::{LoopRegion, TransportState};
 use crate::song::{NoteKind, SongSnapshot};
@@ -24,7 +24,7 @@ pub const MIN_LOOP_TICKS: i64 = PPQ / 4;
 /// Capacity of the per-quantum event list.
 pub const MAX_EVENTS_PER_QUANTUM: usize = 256;
 /// Upper bound on loop wraps inside one quantum (protects against pathological input).
-const MAX_SEGMENTS: usize = 64;
+pub const MAX_SEGMENTS: usize = 64;
 
 /// What happens at a scheduled event.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -91,12 +91,27 @@ const NO_EVENT: ScheduledEvent = ScheduledEvent {
     kind: EventKind::Beat { downbeat: false },
 };
 
-/// Fixed-capacity, allocation-free list of events for one quantum, sorted by offset.
+/// A stretch of a quantum during which song time runs continuously (a loop wrap starts a new
+/// one).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PlaySegment {
+    /// First frame, from the start of the quantum.
+    pub offset: u32,
+    /// Number of frames.
+    pub frames: u32,
+    /// Song time (seconds from tick 0 through the tempo map) at the first frame.
+    pub seconds: f64,
+}
+
+/// Fixed-capacity, allocation-free list of events for one quantum, sorted by offset, plus the
+/// stretches of continuous playback the quantum consists of.
 #[derive(Debug, Clone)]
 pub struct EventBuf {
     events: [ScheduledEvent; MAX_EVENTS_PER_QUANTUM],
     len: usize,
     dropped: u32,
+    segments: [PlaySegment; MAX_SEGMENTS],
+    seg_len: usize,
 }
 
 impl Default for EventBuf {
@@ -105,6 +120,8 @@ impl Default for EventBuf {
             events: [NO_EVENT; MAX_EVENTS_PER_QUANTUM],
             len: 0,
             dropped: 0,
+            segments: [PlaySegment::default(); MAX_SEGMENTS],
+            seg_len: 0,
         }
     }
 }
@@ -113,11 +130,24 @@ impl EventBuf {
     /// Empties the list (keeps the dropped counter).
     pub fn clear(&mut self) {
         self.len = 0;
+        self.seg_len = 0;
     }
 
     /// The events, in order.
     pub fn as_slice(&self) -> &[ScheduledEvent] {
         &self.events[..self.len]
+    }
+
+    /// Stretches of continuous playback in this quantum, in order (none while stopped).
+    pub fn segments(&self) -> &[PlaySegment] {
+        &self.segments[..self.seg_len]
+    }
+
+    fn push_segment(&mut self, s: PlaySegment) {
+        if self.seg_len < MAX_SEGMENTS && s.frames > 0 {
+            self.segments[self.seg_len] = s;
+            self.seg_len += 1;
+        }
     }
 
     /// Events that did not fit since creation.
@@ -146,7 +176,7 @@ impl EventBuf {
 pub struct Transport {
     sr: f64,
     tempo: Box<TempoMap>,
-    sig: TimeSig,
+    sig: Box<TimeSigMap>,
     looping: LoopRegion,
     state: TransportState,
     anchor_sample: u64,
@@ -163,7 +193,7 @@ impl Transport {
         Self {
             sr: f64::from(sample_rate.max(1)),
             tempo,
-            sig: TimeSig::default(),
+            sig: Box::default(),
             looping: LoopRegion::default(),
             state: TransportState::Stopped,
             anchor_sample: 0,
@@ -178,9 +208,9 @@ impl Transport {
         self.state
     }
 
-    /// Current time signature.
-    pub fn time_sig(&self) -> TimeSig {
-        self.sig
+    /// Current time signatures.
+    pub fn signatures(&self) -> &TimeSigMap {
+        &self.sig
     }
 
     /// Current loop region (after validation).
@@ -194,6 +224,11 @@ impl Transport {
             TransportState::Playing => self.tick_at_frame(now as f64),
             _ => self.held,
         }
+    }
+
+    /// Musical position (fractional ticks) at song time `seconds`.
+    pub fn tick_at_seconds(&self, seconds: f64) -> f64 {
+        self.tempo.seconds_to_tick(seconds)
     }
 
     /// Tempo in BPM at the position of engine frame `now`.
@@ -253,9 +288,9 @@ impl Transport {
         };
     }
 
-    /// Sets the time signature.
-    pub fn set_time_sig(&mut self, sig: TimeSig) {
-        self.sig = sig;
+    /// Swaps in new time signatures. Returns the old map for the garbage queue.
+    pub fn set_signatures(&mut self, sig: Box<TimeSigMap>) -> Box<TimeSigMap> {
+        core::mem::replace(&mut self.sig, sig)
     }
 
     /// Swaps in a new tempo map at frame `now`, keeping the musical position. Returns the old map
@@ -305,6 +340,11 @@ impl Transport {
                 }
             }
             let limit = if wrap { Some(self.looping.end.0) } else { None };
+            out.push_segment(PlaySegment {
+                offset: (seg_start - q_start) as u32,
+                frames: (seg_end - seg_start) as u32,
+                seconds: self.seconds_at_frame(seg_start as f64),
+            });
             self.collect(seg_start, seg_end, limit, q_start, song, out);
             if wrap {
                 self.anchor(self.looping.start.0 as f64, seg_end);
@@ -336,26 +376,19 @@ impl Transport {
         // decides membership, so widening can never double-fire an event.
         let t_lo = self.tick_at_frame(a as f64 - 1.0).floor() as i64 - 1;
         let t_hi = self.tick_at_frame(b as f64).ceil() as i64 + 1;
-        let beat = self.sig.beat_ticks();
-        let bar = self.sig.bar_ticks();
-        let mut k = t_lo.div_euclid(beat) + 1;
-        while k * beat <= t_hi {
-            let tick = k * beat;
-            k += 1;
+        self.sig.for_each_beat(t_lo + 1, t_hi, |tick, downbeat| {
             if limit.is_some_and(|l| tick >= l) {
-                break;
+                return;
             }
             let f = self.frame_of_tick(tick as f64);
             if f >= a as i64 && f < b as i64 {
                 out.push(ScheduledEvent {
                     offset: (f - q_start as i64) as u32,
                     tick: Tick(tick),
-                    kind: EventKind::Beat {
-                        downbeat: tick.rem_euclid(bar) == 0,
-                    },
+                    kind: EventKind::Beat { downbeat },
                 });
             }
-        }
+        });
         if let Some(song) = song.filter(|s| s.length > 0) {
             self.collect_notes(song, a, b, t_lo, t_hi, limit, q_start, out);
         }
@@ -379,8 +412,12 @@ impl Transport {
             return;
         }
         let len = song.length;
-        let first = t_lo.max(0).div_euclid(len);
-        let last = t_hi.div_euclid(len);
+        // Song mode: the events are already on the timeline.
+        let (first, last) = if song.repeat {
+            (t_lo.max(0).div_euclid(len), t_hi.div_euclid(len))
+        } else {
+            (0, 0)
+        };
         // A quantum spans far less than one pattern; the bound only guards odd input.
         for k in first..=last.min(first + 4) {
             let base = k * len;
@@ -418,9 +455,13 @@ impl Transport {
     }
 
     #[inline]
+    fn seconds_at_frame(&self, frame: f64) -> f64 {
+        self.anchor_seconds + (frame - self.anchor_sample as f64) / self.sr
+    }
+
+    #[inline]
     fn tick_at_frame(&self, frame: f64) -> f64 {
-        let seconds = self.anchor_seconds + (frame - self.anchor_sample as f64) / self.sr;
-        self.tempo.seconds_to_tick(seconds)
+        self.tempo.seconds_to_tick(self.seconds_at_frame(frame))
     }
 
     #[inline]
@@ -625,7 +666,7 @@ mod tests {
     #[test]
     fn odd_meter_marks_downbeats() {
         let mut t = Transport::new(48_000, Box::new(TempoMap::constant(120.0)));
-        t.set_time_sig(TimeSig::new(7, 8));
+        t.set_signatures(Box::new(TimeSigMap::constant(gt_core::TimeSig::new(7, 8))));
         t.play(0);
         let mut buf = EventBuf::default();
         let mut downbeats = Vec::new();
@@ -753,5 +794,76 @@ mod tests {
             .all(|w| w[0].2.rank() <= w[1].2.rank()));
         // Nothing at or past the loop end tick is scheduled.
         assert!(got.iter().all(|e| e.1 < PPQ * 4));
+    }
+
+    #[test]
+    fn metronome_follows_time_signature_changes() {
+        // 4/4 for one bar, then 3/4: downbeats at 0, 3840, 3840 + 2880, ...
+        let mut t = Transport::new(48_000, Box::new(TempoMap::constant(120.0)));
+        t.set_signatures(Box::new(TimeSigMap::new(&[gt_core::SigChange {
+            bar: 1,
+            sig: gt_core::TimeSig::new(3, 4),
+        }])));
+        t.play(0);
+        let got = run(&mut t, 48_000, 6.0, 100);
+        assert_eq!(got.len(), 12, "a beat every 0.5 s");
+        let mut buf = EventBuf::default();
+        let mut t = Transport::new(48_000, Box::new(TempoMap::constant(120.0)));
+        t.set_signatures(Box::new(TimeSigMap::new(&[gt_core::SigChange {
+            bar: 1,
+            sig: gt_core::TimeSig::new(3, 4),
+        }])));
+        t.play(0);
+        let mut downs = Vec::new();
+        let mut f = 0;
+        while f < 48_000 * 6 {
+            t.schedule(f, 64, None, &mut buf);
+            for e in buf.as_slice() {
+                if e.kind == (EventKind::Beat { downbeat: true }) {
+                    downs.push(e.tick.0);
+                }
+            }
+            f += 64;
+        }
+        assert_eq!(downs, vec![0, 3840, 6720, 9600]);
+    }
+
+    #[test]
+    fn segments_cover_the_quantum_and_restart_at_wraps() {
+        let mut t = Transport::new(48_000, Box::new(TempoMap::constant(120.0)));
+        // Loop of 1000 ticks (25 000 frames, not a multiple of the quantum) from beat 1.
+        t.set_loop(LoopRegion {
+            start: Tick(960),
+            end: Tick(1960),
+            enabled: true,
+        });
+        t.locate(Tick(960), 0);
+        t.play(0);
+        let mut buf = EventBuf::default();
+        let mut f = 0_u64;
+        let mut wraps = 0;
+        while f < 48_000 * 2 {
+            t.schedule(f, 64, None, &mut buf);
+            let segs = buf.segments();
+            assert_eq!(segs.iter().map(|s| s.frames).sum::<u32>(), 64);
+            assert_eq!(segs[0].offset, 0);
+            for s in segs {
+                // Song time stays inside the loop: 0.5 s .. 0.5 s + 25 000 frames.
+                assert!(
+                    (0.5..0.5 + 25_000.0 / 48_000.0).contains(&s.seconds),
+                    "{}",
+                    s.seconds
+                );
+            }
+            if segs.len() == 2 {
+                wraps += 1;
+                assert_eq!(segs[1].seconds, 0.5);
+            }
+            f += 64;
+        }
+        assert_eq!(wraps, 3);
+        t.pause(f);
+        t.schedule(f, 64, None, &mut buf);
+        assert!(buf.segments().is_empty());
     }
 }

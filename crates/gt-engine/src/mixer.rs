@@ -61,8 +61,10 @@ pub fn create_effect(slot: &EffectSlot, sample_rate: f32) -> EffectBox {
 /// Engine settings of one strip.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StripParams {
-    /// Fader gain, 0 when muted or silenced by a solo.
+    /// Fader gain.
     pub gain: f32,
+    /// False when muted or silenced by a solo: the strip outputs nothing.
+    pub audible: bool,
     /// Balance, -1 to 1. Centre is unity on both sides; turning right lowers the left side.
     pub pan: f32,
     /// Flip polarity.
@@ -81,6 +83,7 @@ impl Default for StripParams {
     fn default() -> Self {
         Self {
             gain: 1.0,
+            audible: true,
             pan: 0.0,
             invert: false,
             output: MASTER as u8,
@@ -107,7 +110,7 @@ impl Default for MixerParams {
 }
 
 impl MixerParams {
-    /// Engine settings for a document mixer. Mute and solo become a zero gain. A mixer whose
+    /// Engine settings for a document mixer. Mute and solo clear `audible`. A mixer whose
     /// routing has a cycle (which editing prevents) falls back to everything into the master.
     pub fn from_mixer(m: &Mixer) -> Self {
         let audible = m.audible();
@@ -115,7 +118,8 @@ impl MixerParams {
         let mut strips = [StripParams::default(); STRIPS];
         for (i, (p, s)) in strips.iter_mut().zip(&m.strips).enumerate() {
             *p = StripParams {
-                gain: if audible[i] { s.volume } else { 0.0 },
+                gain: s.volume,
+                audible: audible[i],
                 pan: s.pan.clamp(-1.0, 1.0),
                 invert: s.phase_invert,
                 output: if order.is_some() && s.output < STRIPS {
@@ -219,6 +223,10 @@ struct Strip {
     out_r: [f32; Q],
     fx: [FxSlot; FX_SLOTS],
     params: StripParams,
+    /// Fader and balance set by automation; they replace `params` until the document's value
+    /// for that strip changes.
+    auto_gain: Option<f32>,
+    auto_pan: Option<f32>,
     gain_l: LinearRamp,
     gain_r: LinearRamp,
     sends: [LinearRamp; SENDS],
@@ -245,6 +253,8 @@ impl Strip {
                 wet: LinearRamp::new(1.0),
             }),
             params: StripParams::default(),
+            auto_gain: None,
+            auto_pan: None,
             gain_l: LinearRamp::new(1.0),
             gain_r: LinearRamp::new(1.0),
             sends: std::array::from_fn(|_| LinearRamp::new(0.0)),
@@ -254,6 +264,19 @@ impl Strip {
             mean_square: [0.0; 2],
             fx_latency: 0,
         }
+    }
+
+    /// Points the fader and balance ramps at the current settings.
+    fn retarget(&mut self, frames: u32) {
+        let p = &self.params;
+        let gain = if p.audible {
+            self.auto_gain.unwrap_or(p.gain)
+        } else {
+            0.0
+        };
+        let (l, r) = balance(gain, self.auto_pan.unwrap_or(p.pan), p.invert);
+        self.gain_l.set_target(l, frames);
+        self.gain_r.set_target(r, frames);
     }
 
     /// True if the strip must run this quantum: it has input, an effect that may have a tail,
@@ -315,10 +338,15 @@ impl MixerEngine {
         self.order = p.order;
         let (ramp, bypass) = (self.ramp_frames, self.bypass_frames);
         for (s, sp) in self.strips.iter_mut().zip(&p.strips) {
+            // A document edit of an automated value takes over from the automation.
+            if sp.gain != s.params.gain {
+                s.auto_gain = None;
+            }
+            if sp.pan != s.params.pan {
+                s.auto_pan = None;
+            }
             s.params = *sp;
-            let (l, r) = balance(sp.gain, sp.pan, sp.invert);
-            s.gain_l.set_target(l, ramp);
-            s.gain_r.set_target(r, ramp);
+            s.retarget(ramp);
             for (ramp_k, &level) in s.sends.iter_mut().zip(&sp.sends) {
                 ramp_k.set_target(level.clamp(0.0, 1.0), ramp);
             }
@@ -334,6 +362,37 @@ impl MixerEngine {
             }
         }
         self.update_latency();
+    }
+
+    /// Sets a strip's fader gain and balance from automation (`None` leaves that one alone).
+    pub(crate) fn automate(&mut self, strip: usize, gain: Option<f32>, pan: Option<f32>) {
+        let ramp = self.ramp_frames;
+        let Some(s) = self.strips.get_mut(strip) else {
+            return;
+        };
+        let changed = gain.is_some_and(|g| s.auto_gain != Some(g))
+            || pan.is_some_and(|p| s.auto_pan != Some(p));
+        if changed {
+            if gain.is_some() {
+                s.auto_gain = gain;
+            }
+            if pan.is_some() {
+                s.auto_pan = pan;
+            }
+            s.retarget(ramp);
+        }
+    }
+
+    /// Drops all automation overrides of faders and balances.
+    pub(crate) fn clear_automation(&mut self) {
+        let ramp = self.ramp_frames;
+        for s in &mut self.strips {
+            if s.auto_gain.is_some() || s.auto_pan.is_some() {
+                s.auto_gain = None;
+                s.auto_pan = None;
+                s.retarget(ramp);
+            }
+        }
     }
 
     /// Puts an effect into a slot (or empties it) and returns the previous one.

@@ -10,7 +10,7 @@ use rtrb::{Consumer, Producer};
 use crate::channel::ChannelSlot;
 use crate::command::{EngineCommand, EngineEvent, Garbage, TransportState};
 use crate::mixer::MixerEngine;
-use crate::song::{ChannelParams, SongSnapshot};
+use crate::song::{AutoDest, ChannelParams, SongSnapshot};
 use crate::transport::{EventBuf, EventKind, ScheduledEvent, Transport};
 use crate::{EngineConfig, Telemetry, FADE_SECONDS, RENDER_QUANTUM, SCOPE_LEN};
 
@@ -26,6 +26,9 @@ const CLICK_DBFS: f32 = -9.0;
 const CLICK_HZ: f32 = 1000.0;
 const CLICK_DOWNBEAT_HZ: f32 = 1600.0;
 
+/// Audio clips fade in and out over this time at their edges, so a cut never clicks.
+const CLIP_FADE_S: f64 = 0.002;
+
 /// Commands applied per quantum at most, so a flood of commands cannot stall a callback.
 const MAX_COMMANDS_PER_QUANTUM: usize = 64;
 
@@ -39,6 +42,7 @@ pub struct AudioProcessor {
     events: Producer<EngineEvent>,
     garbage: Producer<Garbage>,
     out_channels: usize,
+    sample_rate: f64,
 
     transport: Transport,
     scheduled: EventBuf,
@@ -110,6 +114,7 @@ impl AudioProcessor {
             events,
             garbage,
             out_channels: config.out_channels.max(1),
+            sample_rate: f64::from(config.sample_rate.max(1)),
             transport: Transport::new(config.sample_rate, Box::default()),
             scheduled: EventBuf::default(),
             frame_clock: 0,
@@ -220,6 +225,8 @@ impl AudioProcessor {
         for slot in 0..self.channels.len() {
             self.render_channel(slot);
         }
+        self.render_audio_clips();
+        self.apply_automation();
         let bpm = self.transport.bpm_at(self.frame_clock) as f32;
         self.mixer.process(
             &mut self.scratch_l,
@@ -301,6 +308,96 @@ impl AudioProcessor {
         }
     }
 
+    /// Adds the audio clips sounding in this quantum to their strips. Each stretch of
+    /// continuous playback maps engine frames to song seconds linearly, so a clip's source
+    /// position is `(song time - origin) · sample rate`, read with linear interpolation.
+    fn render_audio_clips(&mut self) {
+        let Some(song) = self.song.as_deref() else {
+            return;
+        };
+        if song.audio.is_empty() {
+            return;
+        }
+        let sr = self.sample_rate;
+        for seg in self.scheduled.segments() {
+            let a = seg.seconds;
+            let n = (seg.frames as usize).min(Q - (seg.offset as usize).min(Q));
+            let b = a + n as f64 / sr;
+            for clip in &song.audio {
+                if clip.start_s >= b {
+                    break;
+                }
+                if clip.end_s <= a {
+                    continue;
+                }
+                let i0 = ((clip.start_s - a) * sr).ceil().max(0.0) as usize;
+                let i1 = (((clip.end_s - a) * sr).ceil().max(0.0) as usize).min(n);
+                let rate = f64::from(clip.sample.sample_rate.max(1));
+                let (src_l, src_r) = (clip.sample.left(), clip.sample.right());
+                let len = src_l.len().min(src_r.len());
+                let (dl, dr) = self.mixer.direct_mut(usize::from(clip.route));
+                for i in i0..i1.min(n) {
+                    let t = a + i as f64 / sr;
+                    let pos = (t - clip.origin_s) * rate;
+                    if pos < 0.0 {
+                        continue;
+                    }
+                    let k = pos as usize;
+                    if k >= len {
+                        break;
+                    }
+                    let frac = (pos - k as f64) as f32;
+                    let k1 = (k + 1).min(len - 1);
+                    let mut edge = 1.0_f64;
+                    if clip.fade_in {
+                        edge = edge.min((t - clip.start_s) / CLIP_FADE_S);
+                    }
+                    if clip.fade_out {
+                        edge = edge.min((clip.end_s - t) / CLIP_FADE_S);
+                    }
+                    let edge = edge.clamp(0.0, 1.0);
+                    let g = clip.gain * edge as f32;
+                    let o = seg.offset as usize + i;
+                    dl[o] += (src_l[k] + (src_l[k1] - src_l[k]) * frac) * g;
+                    dr[o] += (src_r[k] + (src_r[k1] - src_r[k]) * frac) * g;
+                }
+            }
+        }
+    }
+
+    /// Moves automated mixer parameters to their values at the start of this quantum (song
+    /// mode, while playing). Faders and balances glide over the mixer's ramp; effect
+    /// parameters glide in the effect's own smoothing.
+    fn apply_automation(&mut self) {
+        let Some(song) = self.song.as_deref() else {
+            return;
+        };
+        let Some(seg) = self.scheduled.segments().first() else {
+            return;
+        };
+        if song.automation.is_empty() {
+            return;
+        }
+        let tick = self.transport.tick_at_seconds(seg.seconds);
+        for lane in &song.automation {
+            let x = lane
+                .dest
+                .plain(gt_core::playlist::value_at(&lane.points, tick));
+            match lane.dest {
+                AutoDest::StripVolume(s) => self.mixer.automate(usize::from(s), Some(x), None),
+                AutoDest::StripPan(s) => self.mixer.automate(usize::from(s), None, Some(x)),
+                AutoDest::Effect {
+                    strip, slot, index, ..
+                } => self.mixer.set_effect_param(
+                    usize::from(strip),
+                    usize::from(slot),
+                    usize::from(index),
+                    x,
+                ),
+            }
+        }
+    }
+
     /// Appends `scratch_l` to the telemetry oscilloscope ring.
     fn write_scope(&self) {
         let t = &*self.telemetry;
@@ -349,7 +446,10 @@ impl AudioProcessor {
                 self.release_all_channels();
             }
             EngineCommand::SetLoop(region) => self.transport.set_loop(region),
-            EngineCommand::SetTimeSig(sig) => self.transport.set_time_sig(sig),
+            EngineCommand::SetSignatures(sig) => {
+                let old = self.transport.set_signatures(sig);
+                self.retire(Garbage::Signatures(old));
+            }
             EngineCommand::SetTempoMap(map) => {
                 let old = self.transport.set_tempo_map(map, now);
                 self.retire(Garbage::TempoMap(old));
@@ -369,6 +469,8 @@ impl AudioProcessor {
             EngineCommand::SetSong(song) => {
                 // Note-offs of the old pattern may never come; release what it started.
                 self.release_all_channels();
+                // Faders follow the document again until the new song's automation moves them.
+                self.mixer.clear_automation();
                 if let Some(old) = self.song.replace(song) {
                     self.retire(Garbage::Song(old));
                 }

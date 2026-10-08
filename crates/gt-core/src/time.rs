@@ -230,6 +230,42 @@ impl TempoMap {
         Ok(Self { segments })
     }
 
+    /// Builds a map from any list of points: sorts them, clamps tempos into range, keeps the
+    /// last of points that share a tick, drops points before tick 0 and adds 120 BPM at tick 0
+    /// if nothing is there. Never fails.
+    pub fn from_points_lossy(points: &[TempoPoint]) -> Self {
+        let mut v: Vec<TempoPoint> = points
+            .iter()
+            .filter(|p| p.at.0 >= 0)
+            .map(|p| TempoPoint {
+                at: p.at,
+                bpm: if p.bpm.is_finite() {
+                    p.bpm.clamp(MIN_BPM, MAX_BPM)
+                } else {
+                    120.0
+                },
+            })
+            .collect();
+        v.sort_by_key(|p| p.at);
+        let mut out: Vec<TempoPoint> = Vec::with_capacity(v.len() + 1);
+        for p in v {
+            match out.last_mut() {
+                Some(last) if last.at == p.at => *last = p,
+                _ => out.push(p),
+            }
+        }
+        if out.first().is_none_or(|p| p.at != Tick::ZERO) {
+            out.insert(
+                0,
+                TempoPoint {
+                    at: Tick::ZERO,
+                    bpm: 120.0,
+                },
+            );
+        }
+        Self::new(&out).unwrap_or_default()
+    }
+
     /// The tempo points this map was built from.
     pub fn points(&self) -> impl Iterator<Item = TempoPoint> + '_ {
         self.segments.iter().map(|s| TempoPoint {
@@ -269,6 +305,176 @@ impl TempoMap {
             .partition_point(|s| (s.start_tick as f64) <= t)
             .saturating_sub(1);
         &self.segments[i]
+    }
+}
+
+/// A time-signature change: from bar `bar` (counted from 0) the signature is `sig`.
+///
+/// Changes sit on bar lines, so they are stored by bar rather than tick: when an earlier
+/// signature changes, later changes stay on the same bar number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SigChange {
+    /// Bar index from 0 (bar 1 on screen).
+    pub bar: i64,
+    /// Signature from that bar on.
+    pub sig: TimeSig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SigSegment {
+    bar: i64,
+    tick: i64,
+    sig: TimeSig,
+}
+
+/// Time signatures over the whole timeline: bar lines, beats and bar:beat:tick positions.
+///
+/// Always starts at bar 0; before tick 0 the first signature continues backwards. Lookups are
+/// binary searches over a few segments and never allocate, so the audio thread can use them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimeSigMap {
+    segments: Vec<SigSegment>,
+}
+
+impl Default for TimeSigMap {
+    fn default() -> Self {
+        Self::constant(TimeSig::default())
+    }
+}
+
+impl TimeSigMap {
+    /// One signature for the whole song.
+    pub fn constant(sig: TimeSig) -> Self {
+        Self {
+            segments: vec![SigSegment {
+                bar: 0,
+                tick: 0,
+                sig,
+            }],
+        }
+    }
+
+    /// Builds a map from changes in any order. Changes before bar 0 are dropped, a later change
+    /// on the same bar wins, a change that repeats the signature before it is merged, and bar 0
+    /// defaults to 4/4 if no change is there.
+    pub fn new(changes: &[SigChange]) -> Self {
+        let mut sorted: Vec<SigChange> = changes.iter().copied().filter(|c| c.bar >= 0).collect();
+        sorted.sort_by_key(|c| c.bar);
+        let mut map = Self::constant(TimeSig::default());
+        for c in sorted {
+            let sig = TimeSig::new(c.sig.num, c.sig.den);
+            let last = map.segments.last_mut().expect("never empty");
+            if last.bar == c.bar {
+                last.sig = sig;
+                continue;
+            }
+            if last.sig == sig {
+                continue;
+            }
+            let tick = last.tick + (c.bar - last.bar) * last.sig.bar_ticks();
+            map.segments.push(SigSegment {
+                bar: c.bar,
+                tick,
+                sig,
+            });
+        }
+        // Merging may leave neighbours equal when bar 0 was overwritten.
+        map.segments.dedup_by(|b, a| a.sig == b.sig);
+        map
+    }
+
+    /// The changes this map holds, bar 0 first.
+    pub fn changes(&self) -> impl Iterator<Item = SigChange> + '_ {
+        self.segments.iter().map(|s| SigChange {
+            bar: s.bar,
+            sig: s.sig,
+        })
+    }
+
+    #[inline]
+    fn segment_for_tick(&self, t: i64) -> &SigSegment {
+        let i = self
+            .segments
+            .partition_point(|s| s.tick <= t)
+            .saturating_sub(1);
+        &self.segments[i]
+    }
+
+    #[inline]
+    fn segment_for_bar(&self, bar: i64) -> &SigSegment {
+        let i = self
+            .segments
+            .partition_point(|s| s.bar <= bar)
+            .saturating_sub(1);
+        &self.segments[i]
+    }
+
+    /// Signature in effect at `t`.
+    pub fn sig_at(&self, t: Tick) -> TimeSig {
+        self.segment_for_tick(t.0).sig
+    }
+
+    /// Signature of bar `bar` (from 0).
+    pub fn sig_of_bar(&self, bar: i64) -> TimeSig {
+        self.segment_for_bar(bar).sig
+    }
+
+    /// Tick where bar `bar` (from 0; negative before the song) starts.
+    pub fn bar_start(&self, bar: i64) -> i64 {
+        let s = self.segment_for_bar(bar);
+        s.tick + (bar - s.bar) * s.sig.bar_ticks()
+    }
+
+    /// Bar (from 0) containing tick `t`.
+    pub fn bar_of(&self, t: i64) -> i64 {
+        let s = self.segment_for_tick(t);
+        s.bar + (t - s.tick).div_euclid(s.sig.bar_ticks())
+    }
+
+    /// Splits `t` into bar, beat and tick, following signature changes.
+    pub fn bbt(&self, t: Tick) -> BarBeatTick {
+        let s = self.segment_for_tick(t.0);
+        let rel = t.0 - s.tick;
+        let bar = rel.div_euclid(s.sig.bar_ticks());
+        let in_bar = rel.rem_euclid(s.sig.bar_ticks());
+        let beat = s.sig.beat_ticks();
+        BarBeatTick {
+            bar: s.bar + bar + 1,
+            beat: in_bar / beat + 1,
+            tick: in_bar % beat,
+        }
+    }
+
+    /// Calls `f(tick, downbeat)` for every beat in `lo..=hi`, in order. No allocation.
+    pub fn for_each_beat(&self, lo: i64, hi: i64, mut f: impl FnMut(i64, bool)) {
+        if hi < lo {
+            return;
+        }
+        let mut i = self
+            .segments
+            .partition_point(|s| s.tick <= lo)
+            .saturating_sub(1);
+        let mut t = lo;
+        while t <= hi {
+            let s = self.segments[i];
+            let end = self.segments.get(i + 1).map_or(i64::MAX, |n| n.tick);
+            let beat = s.sig.beat_ticks();
+            let bar = s.sig.bar_ticks();
+            // First beat at or after `t` in this segment.
+            let mut b = s.tick + (t - s.tick).div_euclid(beat) * beat;
+            if b < t {
+                b += beat;
+            }
+            while b <= hi && b < end {
+                f(b, (b - s.tick).rem_euclid(bar) == 0);
+                b += beat;
+            }
+            if end > hi {
+                break;
+            }
+            t = end;
+            i += 1;
+        }
     }
 }
 
@@ -373,6 +579,95 @@ mod tests {
         assert_eq!(
             BarBeatTick::from_tick(Tick(-960), four).to_string(),
             "0:4:000"
+        );
+    }
+
+    #[test]
+    fn sig_map_places_bars_and_beats() {
+        // Two bars of 4/4, then 7/8 from bar 2 (0-based), then 3/4 from bar 4.
+        let m = TimeSigMap::new(&[
+            SigChange {
+                bar: 4,
+                sig: TimeSig::new(3, 4),
+            },
+            SigChange {
+                bar: 2,
+                sig: TimeSig::new(7, 8),
+            },
+        ]);
+        assert_eq!(m.changes().count(), 3);
+        assert_eq!(m.bar_start(2), 2 * 3840);
+        assert_eq!(m.bar_start(3), 2 * 3840 + 3360);
+        assert_eq!(m.bar_start(4), 2 * 3840 + 2 * 3360);
+        assert_eq!(m.bar_start(5), 2 * 3840 + 2 * 3360 + 2880);
+        assert_eq!(m.bar_start(-1), -3840);
+        for bar in -2..8 {
+            assert_eq!(m.bar_of(m.bar_start(bar)), bar);
+            assert_eq!(m.bar_of(m.bar_start(bar + 1) - 1), bar);
+        }
+        assert_eq!(m.sig_at(Tick(2 * 3840)), TimeSig::new(7, 8));
+        assert_eq!(m.bbt(Tick(2 * 3840 + 480 * 6)).to_string(), "3:7:000");
+        let mut beats = Vec::new();
+        m.for_each_beat(2 * 3840 - 960, 2 * 3840 + 960, |t, down| {
+            beats.push((t, down))
+        });
+        assert_eq!(
+            beats,
+            vec![(6720, false), (7680, true), (8160, false), (8640, false)]
+        );
+        // Every bar line of the 3/4 section is a downbeat.
+        let start = m.bar_start(4);
+        let mut downs = Vec::new();
+        m.for_each_beat(start, start + 3 * 2880 - 1, |t, d| {
+            if d {
+                downs.push(t);
+            }
+        });
+        assert_eq!(downs, vec![start, start + 2880, start + 5760]);
+    }
+
+    #[test]
+    fn sig_map_normalises_changes() {
+        let four = TimeSig::default();
+        let m = TimeSigMap::new(&[
+            SigChange {
+                bar: -3,
+                sig: TimeSig::new(5, 4),
+            },
+            SigChange {
+                bar: 0,
+                sig: TimeSig::new(3, 4),
+            },
+            SigChange {
+                bar: 2,
+                sig: TimeSig::new(3, 4),
+            },
+            SigChange { bar: 6, sig: four },
+        ]);
+        let got: Vec<_> = m.changes().collect();
+        assert_eq!(
+            got,
+            vec![
+                SigChange {
+                    bar: 0,
+                    sig: TimeSig::new(3, 4)
+                },
+                SigChange { bar: 6, sig: four }
+            ]
+        );
+        assert_eq!(TimeSigMap::new(&[]), TimeSigMap::constant(four));
+    }
+
+    #[test]
+    fn lossy_tempo_maps_are_always_valid() {
+        let p = |at, bpm| TempoPoint { at: Tick(at), bpm };
+        let m =
+            TempoMap::from_points_lossy(&[p(960, 90.0), p(-5, 60.0), p(960, 100.0), p(0, 5000.0)]);
+        let pts: Vec<_> = m.points().collect();
+        assert_eq!(pts, vec![p(0, MAX_BPM), p(960, 100.0)]);
+        assert_eq!(
+            TempoMap::from_points_lossy(&[p(480, 90.0)]).bpm_at(Tick(0)),
+            120.0
         );
     }
 }
