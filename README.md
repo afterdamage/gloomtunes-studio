@@ -4,9 +4,9 @@ An original, open-source, pattern-based digital audio workstation written in Rus
 Windows 10/11 and Ubuntu 22.04+ from a single codebase. Channel rack, piano roll, mixer and
 playlist, with built-in instruments and effects, wrapped in a dark, moody "Gloom" interface.
 
-> **Status:** early development. Step 3 of the [roadmap](ROADMAP.md): a channel rack with a
-> step sequencer, patterns, a sampler with ADSR, a sample browser and four built-in drums, on top
-> of a sample-accurate transport. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
+> **Status:** early development. Step 4 of the [roadmap](ROADMAP.md): a piano roll and undo/redo,
+> on top of a channel rack with a step sequencer, patterns, a sampler with ADSR, a sample browser
+> and four built-in drums, and a sample-accurate transport. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 
 ## Goals
 
@@ -57,6 +57,18 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
   when you double-click it (wav, flac, mp3, ogg). The panel at the bottom edits the selected
   channel's sample: pitch, start/end, one-shot or loop, and the ADSR envelope.
 - **Audio** (top right) opens the device settings.
+- **Piano roll** (tab, **F7**, or right-click a channel name) edits the selected channel's notes
+  in the current pattern; **F6** goes back to the channel rack.
+  - Click to draw a note, drag it to move, drag its right edge to resize, right-click to delete.
+    Ctrl+drag (or the Select tool, **E**) draws a selection box; Shift adds to the selection.
+  - Wheel scrolls, Shift+wheel scrolls sideways, Ctrl+wheel zooms time, Alt+wheel zooms keys.
+  - Drag in the velocity lane at the bottom to set velocities.
+  - Keys while the mouse is over the roll: Delete, Ctrl+A, Ctrl+C/X/V, Ctrl+D (duplicate),
+    arrows (move by the snap or a semitone), Shift+Up/Down (an octave), Q (quantize).
+  - The toolbar sets snap (1/4 to 1/32, triplets), scale highlighting, ghost notes from the other
+    channels, quantize strength and humanize amounts.
+- **Undo** and **Redo** (top right, Ctrl+Z and Ctrl+Shift+Z or Ctrl+Y) cover notes, steps,
+  channels, patterns and settings.
 
 ### Checks
 
@@ -64,6 +76,8 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+# Piano roll frame time with 10,000 notes (prints the median):
+cargo test --release -p gt-ui -- --ignored --nocapture
 ```
 
 ### Environment variables

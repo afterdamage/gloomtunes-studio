@@ -55,8 +55,8 @@ pub struct SongSnapshot {
 impl SongSnapshot {
     /// Compiles the current pattern of `project`. Slots are channel indices. Swing delays notes
     /// that start on an odd 1/16 step by `swing * STEP_TICKS / 2`. Note-offs past the pattern
-    /// end wrap around to the next repetition. Notes starting at or after the pattern end
-    /// (left over from a longer pattern length) are skipped.
+    /// end wrap around to the next repetition. The pattern length fits all notes
+    /// (`Pattern::length_ticks`); notes with a negative start are skipped.
     pub fn compile(project: &Project) -> Self {
         let pattern = project.current_pattern();
         let length = pattern.length_ticks();
@@ -211,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn notes_beyond_a_shortened_pattern_are_skipped() {
+    fn pattern_length_covers_notes_past_the_grid() {
         let mut p = Project::empty();
         let c = p.add_channel("c", None).unwrap();
         let pat = p.current_pattern_mut();
@@ -220,7 +220,8 @@ mod tests {
         pat.toggle_step(c, 2);
         pat.steps = 16;
         let s = SongSnapshot::compile(&p);
-        assert_eq!(ons(&s), vec![(480, 0)]);
+        assert_eq!(s.length, 32 * STEP_TICKS);
+        assert_eq!(ons(&s), vec![(480, 0), (20 * 240, 0)]);
     }
 
     #[test]

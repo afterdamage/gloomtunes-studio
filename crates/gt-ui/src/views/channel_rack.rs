@@ -34,6 +34,8 @@ pub enum RackAction {
     NoteOn(usize),
     /// Stop auditioning a channel.
     NoteOff(usize),
+    /// Open a channel in the piano roll.
+    OpenPianoRoll(usize),
 }
 
 /// Read-only playback information for the rack.
@@ -216,6 +218,11 @@ fn channel_row(
         actions.push(RackAction::NoteOff(i));
     }
     name.context_menu(|ui| {
+        if ui.button("Open in piano roll").clicked() {
+            state.selected = i;
+            actions.push(RackAction::OpenPianoRoll(i));
+            ui.close();
+        }
         if ui.button("Delete channel").clicked() {
             *remove = Some(i);
             ui.close();
