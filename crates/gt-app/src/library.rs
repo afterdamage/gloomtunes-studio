@@ -173,13 +173,22 @@ pub fn default_folder() -> std::path::PathBuf {
 }
 
 /// Where the program keeps its own files (presets, autosave, extracted samples):
-/// `%APPDATA%\GloomTunes Studio` on Windows, `$XDG_DATA_HOME/gloomtunes-studio` (default
-/// `~/.local/share/gloomtunes-studio`) elsewhere.
+/// `%APPDATA%\GloomTunes Studio` on Windows, `~/Library/Application Support/GloomTunes Studio`
+/// on macOS, `$XDG_DATA_HOME/gloomtunes-studio` (default `~/.local/share/gloomtunes-studio`)
+/// elsewhere.
 pub fn data_folder() -> std::path::PathBuf {
     use std::path::PathBuf;
     if cfg!(windows) {
         if let Some(appdata) = std::env::var_os("APPDATA") {
             return PathBuf::from(appdata).join("GloomTunes Studio");
+        }
+    }
+    if cfg!(target_os = "macos") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("GloomTunes Studio");
         }
     }
     let data = std::env::var_os("XDG_DATA_HOME")
@@ -194,10 +203,12 @@ pub fn data_folder() -> std::path::PathBuf {
     data.join("gloomtunes-studio")
 }
 
-/// Where the user's Gloom Synth presets are saved: `Presets\Gloom Synth` (Windows) or
+/// Where the user's Gloom Synth presets are saved: `Presets/Gloom Synth` (Windows, macOS) or
 /// `presets/gloom-synth` inside [`data_folder`].
 pub fn synth_preset_folder() -> std::path::PathBuf {
-    if cfg!(windows) && std::env::var_os("APPDATA").is_some() {
+    if (cfg!(windows) && std::env::var_os("APPDATA").is_some())
+        || (cfg!(target_os = "macos") && std::env::var_os("HOME").is_some())
+    {
         data_folder().join("Presets").join("Gloom Synth")
     } else {
         data_folder().join("presets").join("gloom-synth")

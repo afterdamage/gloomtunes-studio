@@ -580,9 +580,10 @@ pub fn first_run(
                 )
             } else {
                 format!(
-                    "{} CLAP plugin{} found. Add folders in the plugin browser (Ctrl+P).",
+                    "{} CLAP plugin{} found. Add folders in the plugin browser ({}+P).",
                     m.plugins_found,
-                    if m.plugins_found == 1 { "" } else { "s" }
+                    if m.plugins_found == 1 { "" } else { "s" },
+                    crate::keymap::COMMAND_KEY
                 )
             };
             text(ui, &plugins);

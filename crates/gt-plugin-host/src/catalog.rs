@@ -131,7 +131,8 @@ impl Catalog {
 
 /// The folders searched for CLAP plugins: those in `CLAP_PATH`, then the standard ones
 /// (`~/.clap`, `/usr/lib/clap` and `/usr/local/lib/clap` on Linux; `Common Files\CLAP` and
-/// `%LOCALAPPDATA%\Programs\Common\CLAP` on Windows).
+/// `%LOCALAPPDATA%\Programs\Common\CLAP` on Windows; `~/Library/Audio/Plug-Ins/CLAP` and
+/// `/Library/Audio/Plug-Ins/CLAP` on macOS).
 pub fn standard_folders() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("CLAP_PATH")
         .map(|p| std::env::split_paths(&p).collect())
@@ -148,6 +149,11 @@ pub fn standard_folders() -> Vec<PathBuf> {
                     .join("CLAP"),
             );
         }
+    } else if cfg!(target_os = "macos") {
+        if let Some(home) = std::env::var_os("HOME") {
+            dirs.push(PathBuf::from(home).join("Library/Audio/Plug-Ins/CLAP"));
+        }
+        dirs.push(PathBuf::from("/Library/Audio/Plug-Ins/CLAP"));
     } else {
         if let Some(home) = std::env::var_os("HOME") {
             dirs.push(PathBuf::from(home).join(".clap"));
@@ -160,7 +166,12 @@ pub fn standard_folders() -> Vec<PathBuf> {
     dirs
 }
 
-/// Every `.clap` file in `dirs` and their subfolders, sorted.
+/// A macOS plugin bundle: a `.clap` folder holding `Contents`, loaded as one plugin file.
+fn is_bundle(path: &Path) -> bool {
+    cfg!(target_os = "macos") && path.join("Contents").is_dir()
+}
+
+/// Every `.clap` file (or bundle, on macOS) in `dirs` and their subfolders, sorted.
 pub fn find_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
     fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         let Ok(rd) = std::fs::read_dir(dir) else {
@@ -173,7 +184,7 @@ pub fn find_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
                 .is_some_and(|e| e.eq_ignore_ascii_case("clap"));
             // Follows links, so linked plugin files and folders count.
             let meta = std::fs::metadata(&path);
-            if is_clap && meta.as_ref().is_ok_and(|m| m.is_file()) {
+            if is_clap && meta.as_ref().is_ok_and(|m| m.is_file() || is_bundle(&path)) {
                 out.push(path);
             } else if depth < MAX_DEPTH && meta.is_ok_and(|m| m.is_dir()) {
                 walk(&path, depth + 1, out);
@@ -313,15 +324,30 @@ pub fn scan_with_child(exe: &Path, file: &Path) -> Result<Vec<PluginInfo>, Strin
     }
 }
 
-/// Size and modification time of a file.
+/// Size and modification time of a file. For a bundle, the total size and newest time of the
+/// binaries in `Contents/MacOS`, since the bundle folder itself rarely changes on an update.
 fn stamp(path: &Path) -> Option<(u64, u64)> {
+    let secs = |m: &std::fs::Metadata| {
+        m.modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs())
+    };
     let m = std::fs::metadata(path).ok()?;
-    let modified = m
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_secs());
-    Some((m.len(), modified))
+    if !m.is_dir() {
+        return Some((m.len(), secs(&m)));
+    }
+    let (mut size, mut modified) = (0, secs(&m));
+    for entry in std::fs::read_dir(path.join("Contents").join("MacOS"))
+        .ok()?
+        .flatten()
+    {
+        if let Ok(m) = entry.metadata() {
+            size += m.len();
+            modified = modified.max(secs(&m));
+        }
+    }
+    Some((size, modified))
 }
 
 /// Builds a fresh catalog of `files`, reusing `old` results for unchanged files and scanning
@@ -383,6 +409,21 @@ mod tests {
             features: features.iter().map(|s| (*s).to_owned()).collect(),
             path: PathBuf::from(path),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundles_count_as_plugin_files_and_are_stamped_by_their_binary() {
+        let dir = std::env::temp_dir().join(format!("gt-bundles-{}", std::process::id()));
+        let bin = dir.join("Synth.clap").join("Contents").join("MacOS");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("Synth"), b"12345").unwrap();
+        // A plain folder with the extension but no bundle layout is walked into, not listed.
+        std::fs::create_dir_all(dir.join("Odd.clap")).unwrap();
+        let files = find_files(std::slice::from_ref(&dir));
+        assert_eq!(files, vec![dir.join("Synth.clap")]);
+        assert_eq!(stamp(&files[0]).map(|(size, _)| size), Some(5));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

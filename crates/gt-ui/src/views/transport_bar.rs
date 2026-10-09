@@ -122,9 +122,10 @@ pub fn transport_bar(
             actions.push(TransportAction::Stop);
         }
         if icon_button(ui, theme, Icon::Record, m.recording)
-            .on_hover_text(
-                "Record notes into the current pattern (Ctrl+R). From stop, counts in first",
-            )
+            .on_hover_text(format!(
+                "Record notes into the current pattern ({}+R). From stop, counts in first",
+                crate::keymap::COMMAND_KEY
+            ))
             .clicked()
         {
             actions.push(TransportAction::ToggleRecord);
@@ -234,10 +235,11 @@ pub fn transport_bar(
         }
         if ui
             .add(egui::Button::selectable(m.typing_keyboard, "Keys"))
-            .on_hover_text(
+            .on_hover_text(format!(
                 "Typing keyboard: play the selected channel with Z S X D C … and Q 2 W 3 E …, \
-                 - and = change octave (Ctrl+T)",
-            )
+                 - and = change octave ({}+T)",
+                crate::keymap::COMMAND_KEY
+            ))
             .clicked()
         {
             actions.push(TransportAction::ToggleTypingKeyboard);

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template for GloomTunes Studio.app: build-app.sh replaces @VERSION@. -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleName</key>
+  <string>GloomTunes Studio</string>
+  <key>CFBundleDisplayName</key>
+  <string>GloomTunes Studio</string>
+  <key>CFBundleIdentifier</key>
+  <string>io.github.afterdamage.gloomtunes</string>
+  <key>CFBundleExecutable</key>
+  <string>gloomtunes</string>
+  <key>CFBundleIconFile</key>
+  <string>gloomtunes</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@VERSION@</string>
+  <key>CFBundleVersion</key>
+  <string>@VERSION@</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>11.0</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.music</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSSupportsAutomaticGraphicsSwitching</key>
+  <true/>
+  <key>NSHumanReadableCopyright</key>
+  <string>© Vasil Vasilev. Free software under the GNU GPL, version 3 or later.</string>
+</dict>
+</plist>
