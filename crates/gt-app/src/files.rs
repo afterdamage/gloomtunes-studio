@@ -1,5 +1,5 @@
-//! File dialogs: open, save as, export, relink missing samples, crash recovery and "save
-//! changes?". Each is a small egui window; the native file picker (rfd) is offered through a
+//! File dialogs: open, save as, export, relink missing samples, crash recovery, "save
+//! changes?" and MIDI file import and export. Each is a small egui window; the native file picker (rfd) is offered through a
 //! Browse button next to a path field, so everything also works where no picker is available.
 //!
 //! Drawing returns a [`DialogAction`] for the app to carry out; the dialogs never touch the
@@ -109,6 +109,18 @@ pub enum Dialog {
         name: String,
         then: Then,
     },
+    ImportMidi {
+        path: String,
+        /// Take the file's tempo and time signatures.
+        timing: bool,
+        error: Option<String>,
+    },
+    ExportMidi {
+        path: String,
+        /// The whole arrangement (true) or the current pattern.
+        song: bool,
+        error: Option<String>,
+    },
 }
 
 /// What the user chose in a dialog.
@@ -135,6 +147,14 @@ pub enum DialogAction {
     Unsaved {
         save: bool,
         then: Then,
+    },
+    ImportMidi {
+        path: PathBuf,
+        timing: bool,
+    },
+    ExportMidi {
+        path: PathBuf,
+        song: bool,
     },
     Close,
 }
@@ -165,6 +185,14 @@ fn project_picker(path: &str) -> rfd::FileDialog {
     d
 }
 
+fn midi_picker(path: &str) -> rfd::FileDialog {
+    let mut d = rfd::FileDialog::new().add_filter("MIDI file", &["mid", "midi"]);
+    if let Some(dir) = start_dir(path) {
+        d = d.set_directory(dir);
+    }
+    d
+}
+
 /// Adds the project extension if the name has none.
 pub fn with_project_extension(p: PathBuf) -> PathBuf {
     if p.extension().is_none() {
@@ -185,6 +213,8 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
         Dialog::Relink { .. } => "Missing samples",
         Dialog::Recover { .. } => "Recover unsaved work",
         Dialog::Unsaved { .. } => "Unsaved changes",
+        Dialog::ImportMidi { .. } => "Import MIDI file",
+        Dialog::ExportMidi { .. } => "Export MIDI file",
     };
     let dim = |t: &str| RichText::new(t).color(theme.text_dim);
     egui::Window::new(title)
@@ -307,6 +337,59 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
                     }
                     if ui.button("Discard").clicked() {
                         action = Some(DialogAction::DiscardRecovery);
+                    }
+                });
+            }
+            Dialog::ImportMidi {
+                path,
+                timing,
+                error,
+            } => {
+                ui.label(dim("MIDI file"));
+                path_row(ui, path, |p| midi_picker(p).pick_file());
+                ui.checkbox(timing, "Use the file's tempo and time signature");
+                ui.label(dim(
+                    "Each part becomes a new Gloom Synth channel; the notes go into a new pattern.",
+                ));
+                if let Some(e) = error {
+                    ui.label(RichText::new(e.as_str()).color(theme.warn));
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Import").clicked() {
+                        action = Some(DialogAction::ImportMidi {
+                            path: PathBuf::from(path.trim()),
+                            timing: *timing,
+                        });
+                    }
+                    if ui.button("Cancel").clicked() {
+                        action = Some(DialogAction::Close);
+                    }
+                });
+            }
+            Dialog::ExportMidi { path, song, error } => {
+                ui.label(dim("Save to"));
+                path_row(ui, path, |p| midi_picker(p).save_file());
+                ui.horizontal(|ui| {
+                    ui.selectable_value(song, true, "Whole song");
+                    ui.selectable_value(song, false, "Current pattern");
+                });
+                ui.label(dim("Format 1: a tempo track, then one track per channel."));
+                if let Some(e) = error {
+                    ui.label(RichText::new(e.as_str()).color(theme.warn));
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Export").clicked() {
+                        let mut p = PathBuf::from(path.trim());
+                        if p.extension().is_none() {
+                            p.set_extension("mid");
+                        }
+                        action = Some(DialogAction::ExportMidi {
+                            path: p,
+                            song: *song,
+                        });
+                    }
+                    if ui.button("Cancel").clicked() {
+                        action = Some(DialogAction::Close);
                     }
                 });
             }

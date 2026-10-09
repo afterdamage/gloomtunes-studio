@@ -352,6 +352,16 @@ struct ProjectDto {
     mixer: Vec<StripDto>,
     playlist: PlaylistDto,
     modulators: Vec<ModulatorDto>,
+    /// MIDI learn bindings (added in Step 10; absent in older files).
+    midi_map: Vec<MidiBindingDto>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MidiBindingDto {
+    /// MIDI channel, 1 to 16 as musicians count them.
+    channel: u8,
+    cc: u8,
+    param: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -821,6 +831,15 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
         mixer,
         playlist,
         modulators,
+        midi_map: p
+            .midi_map
+            .iter()
+            .map(|b| MidiBindingDto {
+                channel: b.channel + 1,
+                cc: b.cc,
+                param: b.param.key(),
+            })
+            .collect(),
     }
 }
 
@@ -1145,6 +1164,19 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
             enabled: m.enabled,
         });
     }
+    for b in d.midi_map {
+        match ParamId::parse(&b.param) {
+            Some(param) if (1..=16).contains(&b.channel) => p.midi_map.push(gt_core::MidiBinding {
+                channel: b.channel - 1,
+                cc: b.cc,
+                param,
+            }),
+            _ => warnings.push(format!(
+                "MIDI binding of controller {} to \"{}\" removed",
+                b.cc, b.param
+            )),
+        }
+    }
     p.set_id_counter(d.next_id);
     p.sanitize();
     Ok(Parsed {
@@ -1283,6 +1315,12 @@ mod tests {
             }
         }
         p.playlist.clips = c;
+        let pan = ParamId::Channel {
+            channel: p.channels[1].id,
+            param: gt_core::ChannelParam::Pan,
+        };
+        assert!(p.learn_midi(9, 74, pan));
+        assert!(p.learn_midi(0, 1, gt_core::MASTER_VOLUME));
         // Start = end is not a valid sampler range; loading repairs it, so compare with the
         // repaired project.
         p.sanitize();
@@ -1293,6 +1331,7 @@ mod tests {
         assert_eq!(q.mixer, p.mixer);
         assert_eq!(q.playlist, p.playlist);
         assert_eq!(q.modulators, p.modulators);
+        assert_eq!(q.midi_map, p.midi_map);
         assert_eq!(q, &p);
     }
 

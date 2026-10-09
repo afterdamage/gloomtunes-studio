@@ -2,10 +2,10 @@
 //!
 //! Views call [`param_menu`] with the response of a knob or fader. It marks the control when
 //! automation or a modulator drives it, and its context menu offers "Create automation clip",
-//! "Add LFO" and "Add envelope follower". A choice is left in egui's memory for the app to
+//! "Add LFO", "Add envelope follower" and "MIDI learn". A choice is left in egui's memory for the app to
 //! pick up with [`take_request`] once per frame, so views need no extra plumbing to report it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use egui::{Context, Id, Response, Stroke};
@@ -24,6 +24,10 @@ pub enum ParamRequest {
     AddFollower(ParamId),
     /// Show the parameter's modulators.
     ShowModulators(ParamId),
+    /// Bind the next MIDI controller that moves.
+    MidiLearn(ParamId),
+    /// Remove the MIDI controller binding.
+    ForgetMidi(ParamId),
 }
 
 /// Which parameters automation or modulation drive, for the markers on their controls.
@@ -33,6 +37,8 @@ pub struct ParamMarks {
     pub automated: HashSet<ParamId>,
     /// Targets of enabled modulators.
     pub modulated: HashSet<ParamId>,
+    /// Parameters bound to a MIDI controller, with its description ("CC 74, ch 1").
+    pub midi: HashMap<ParamId, String>,
 }
 
 fn marks_id() -> Id {
@@ -83,6 +89,12 @@ pub fn param_menu(theme: &GloomTheme, resp: &Response, id: ParamId) {
         ];
         if modulated {
             items.push(("Show modulators", ParamRequest::ShowModulators(id)));
+        }
+        let bound = marks.as_deref().and_then(|m| m.midi.get(&id));
+        let forget = bound.map(|b| format!("Forget MIDI ({b})"));
+        items.push(("MIDI learn", ParamRequest::MidiLearn(id)));
+        if let Some(f) = &forget {
+            items.push((f.as_str(), ParamRequest::ForgetMidi(id)));
         }
         for (text, req) in items {
             if ui.button(text).clicked() {

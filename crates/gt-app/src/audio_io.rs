@@ -41,6 +41,8 @@ pub struct AudioIo {
     reopening_since: Option<Instant>,
     /// True once after a new engine was created, so the app can send it the current settings.
     fresh_engine: bool,
+    /// Engine events since the app last took them.
+    events: Vec<gt_engine::EngineEvent>,
     stream_error: Arc<Mutex<Option<String>>>,
     status: String,
 }
@@ -58,6 +60,7 @@ impl AudioIo {
             running: None,
             reopening_since: None,
             fresh_engine: false,
+            events: Vec::new(),
             stream_error: Arc::new(Mutex::new(None)),
             status: String::new(),
         };
@@ -125,6 +128,18 @@ impl AudioIo {
         std::mem::take(&mut self.fresh_engine)
     }
 
+    /// Engine events (transport changes, live notes) since the last call.
+    pub fn take_events(&mut self) -> Vec<gt_engine::EngineEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// Output buffer latency in milliseconds (the last callback's size), if a stream runs.
+    pub fn buffer_ms(&self) -> Option<f32> {
+        let e = self.engine()?;
+        let frames = e.telemetry().last_block_frames.load(Ordering::Relaxed);
+        Some(frames as f32 * 1000.0 / e.config().sample_rate.max(1) as f32)
+    }
+
     /// Returns and resets the raw peak the audio thread has seen since the last call.
     pub fn take_peak(&self) -> f32 {
         self.engine()
@@ -142,7 +157,8 @@ impl AudioIo {
             return;
         };
         r.engine.collect_garbage();
-        r.engine.poll_events(|e| log::debug!("engine event: {e:?}"));
+        let events = &mut self.events;
+        r.engine.poll_events(|e| events.push(e));
         if r.engine.telemetry().faulted.load(Ordering::Relaxed) {
             self.status = "Audio engine fault: output muted. Use Restart audio.".to_owned();
             self.running = None;

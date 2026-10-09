@@ -189,6 +189,7 @@ fn diff(a: &Project, b: &Project) -> Vec<Edit> {
         && a.swing == b.swing
         && a.mixer == b.mixer
         && a.modulators == b.modulators
+        && a.midi_map == b.midi_map
         && a.playlist == b.playlist
         && a.tempo == b.tempo
         && a.signatures == b.signatures

@@ -343,6 +343,8 @@ pub struct Project {
     pub signatures: TimeSigMap,
     /// LFOs and envelope followers on parameters, at most [`MAX_MODULATORS`].
     pub modulators: Vec<Modulator>,
+    /// MIDI controllers bound to parameters (MIDI learn).
+    pub midi_map: Vec<crate::MidiBinding>,
     next_id: u32,
 }
 
@@ -365,6 +367,7 @@ impl Project {
             tempo: TempoMap::default(),
             signatures: TimeSigMap::default(),
             modulators: Vec::new(),
+            midi_map: Vec::new(),
             next_id: 1,
         };
         let id = p.new_pattern();
@@ -735,6 +738,7 @@ impl Project {
         for m in &mut self.modulators {
             m.sanitize();
         }
+        self.sanitize_midi();
         let next = self.next_id;
         self.set_id_counter(next);
         let next = self.playlist.id_counter();

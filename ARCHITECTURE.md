@@ -55,7 +55,7 @@ gloomtunes-studio/
 │   ├── gt-dsp/                # pure DSP building blocks, instruments and effects
 │   ├── gt-engine/             # graph, transport, scheduler, mixer, voices, offline render
 │   ├── gt-project/            # edits + undo/redo, save/load, migrations, validation
-│   ├── gt-export/             # offline render to WAV (song, loop region, stems), Step 9
+│   ├── gt-export/             # offline render to WAV (Step 9), MIDI file import/export (Step 10)
 │   ├── gt-ui/                 # egui widgets, views, theme.rs
 │   ├── gt-plugin-host/        # CLAP hosting (Prompt 11; absent until then)
 │   └── gt-app/                # the binary: device I/O (cpal), MIDI I/O (midir), wiring
@@ -74,7 +74,7 @@ gt-project |  gt-engine ──┘
        \   |   /    \
         gt-core     gt-dsp
 
-gt-export -> gt-engine, gt-project, gt-dsp, gt-core   (used by gt-app; Step 9)
+gt-export -> gt-engine, gt-project, gt-dsp, gt-core   (used by gt-app; Step 9; MIDI files since Step 10)
 ```
 
 - `gt-dsp` depends on **nothing** in the workspace. It knows samples and parameters, not
@@ -282,6 +282,9 @@ designed but not implemented (§10 covers licensing).
 - `files` (Step 9): the File menu's dialogs (Open, Save as, Export audio, Missing samples,
   Recover, Unsaved changes), with native pickers from `rfd`. `app.rs` owns the document path,
   the dirty counter, autosave, the session lock and the background export thread (D64, D65).
+- `live` and `app/midi.rs` (Step 10): the typing keyboard, the recorder (live notes into the
+  current pattern, one undo step per take, latency compensation), MIDI learn and the MIDI file
+  dialogs (D66-D72).
 - Logging (`log` + `env_logger`), never called from the audio thread.
 
 ---
@@ -397,6 +400,20 @@ pub struct MidiMessage { pub port: u8, pub time_us: u64, pub len: u8, pub bytes:
 SysEx is not passed to the engine. Until Prompt 10, messages are applied at the start of the next
 quantum; Prompt 10 maps `time_us` to a sample offset using the measured callback clock, which
 removes up to one buffer of jitter.
+
+> **As built (Step 10, D66-D72):** the engine receives only notes, as `gt_engine::LiveNote { key,
+> velocity }` (velocity 0 is note-off), through one more `rtrb` ring (`LiveInput`, 512 slots).
+> Its producer sits behind a `Mutex` shared by every midir callback thread and the UI's typing
+> keyboard; only producers ever lock it, and the engine owns the consumer, so the audio thread
+> stays lock-free. The engine drains at most 64 notes at the start of each 32-frame quantum and
+> plays them on the channel set by `EngineCommand::SetLiveChannel` (the rack's selected
+> channel). Timestamps are **not** mapped to sample offsets yet: a note starts at the next
+> quantum of the next callback, so the jitter is up to one device buffer (2.7 ms at 128 frames,
+> 48 kHz). While the transport plays, the engine reports each live note as
+> `EngineEvent::LiveNote { key, velocity, tick }` for the recorder. Controllers never reach the
+> engine directly: midir callbacks send CCs to the UI thread, which applies MIDI-learn bindings
+> to the document and syncs the parameters as for a knob move (D69). Pitch bend, aftertouch and
+> the sustain pedal are dropped for now.
 
 ### 4.3 Engine to UI: events, garbage, telemetry
 
@@ -1002,51 +1019,10 @@ polled), and float determinism across compilers.
 | D63 | Golden test hashes the exported WAV per OS; dither noise is TPDF from xorshift64* with a fixed seed | Bit-exact regressions are caught on each CI OS; floating-point maths differs in the last bit between math libraries, so one hash for all OSes is impossible | A cross-OS tolerance comparison (§7.5) |
 | D64 | Autosave every 60 s while there are unsaved edits, to one slot `recovery/autosave.gloom` in the data folder (samples not embedded); `session.lock` is created at start and removed on a clean exit, and both together at start mean a crash, so the app offers Recover | Simple and cheap; the lock tells a crash from a normal exit | Per-instance slots; recovering more than the last autosave |
 | D65 | "Unsaved" is an edit counter (history commits, undo, redo) compared with its value at the last save, not a snapshot comparison | No document compare per frame | Compare the history position so undoing back to the save clears `*` |
-
----
-
-## 10. Dependencies and licenses
-
-Planned dependencies, introduced only when a prompt needs them. All are compatible with
-GPL-3.0-or-later. **Flagged** entries are copyleft or have special terms.
-
-| Crate | Purpose | License | Prompt |
-|---|---|---|---|
-| cpal | audio I/O | Apache-2.0 | 1 |
-| eframe / egui | GUI | MIT OR Apache-2.0 | 1 |
-| rtrb | lock-free SPSC queues | MIT OR Apache-2.0 | 2 |
-| assert_no_alloc | RT-safety checks (dev/debug) | BSD-2-Clause | 2 |
-| log, env_logger | logging | MIT OR Apache-2.0 | 1 |
-| symphonia 0.6 (`mp3` feature on) | decoding wav/flac/mp3/ogg | **MPL-2.0 (flag: file-level copyleft; compatible with GPL-3.0)**; added in Step 3 | 3 |
-| rubato 5 (+ audioadapter crates) | resampling | MIT OR Apache-2.0; added in Step 3 | 3 |
-| hound | WAV writing (Step 3: test-only; Step 9: export in `gt-export`) | Apache-2.0 | 3/9 |
-| serde, serde_json | serialization; added in Step 5 for presets | MIT OR Apache-2.0 | 5/9 |
-| zip 7 (`deflate-flate2-zlib-rs` only) | project container; added in Step 9 | MIT (zlib-rs: Zlib) | 9 |
-| rfd 0.17 | native open/save/folder dialogs (xdg portal on Linux, no GTK); added in Step 9 | MIT | 9 |
-| midir | MIDI I/O | MIT | 10 |
-| midly | SMF import/export | Unlicense | 10 |
-| criterion 0.8 (`cargo_bench_support` only, no plotters) | benchmarks (dev); added in Step 5 | MIT OR Apache-2.0 | 5 |
-| insta | snapshot tests (dev); added in Step 5 | Apache-2.0 | 5 |
-| puffin | profiling | MIT OR Apache-2.0 | 4/12 |
-| audio_thread_priority | RT priority on Linux | **MPL-2.0 (flag)** | 12 |
-| clack-host | CLAP hosting | MIT OR Apache-2.0 (verify at Prompt 11) | 11 |
-| ASIO SDK (Windows, optional feature) | ASIO backend | **Steinberg terms (flag): not redistributed; user supplies it** | 12 |
-| VST3 SDK (design only) | VST3 hosting | **Verify at Prompt 11: Steinberg has offered it under GPLv3 and proprietary terms, and more recent releases are reported under MIT** | — |
-
-Licenses are re-checked whenever a dependency is added; `cargo deny` (Prompt 12) enforces an
-allow-list in CI.
-
----
-
-## 11. Testing strategy
-
-| Layer | What | Tool |
-|---|---|---|
-| gt-dsp | Frequency/impulse responses of filters and EQ, oscillator aliasing bounds, envelope timing, smoother convergence, silence-in/silence-out, no NaN at extreme parameters | `cargo test`, criterion |
-| Scheduler | Event frame positions at 44.1/48/96 kHz, tempo changes, loop wrap, odd buffer sizes, long-run drift | `cargo test` |
-| Engine | `process` under `assert_no_alloc`; graph patches keep node state; garbage is returned | `cargo test` |
-| Render | Short reference renders as `insta` snapshots (downsampled or hashed) | insta |
-| Project | Round-trip save/load; every fixture version migrates; cycle rejection | `cargo test` |
-| Export | Golden project renders to a stored per-platform hash; cross-platform tolerance check | `cargo test` |
-| UI | Piano roll at 10k notes stays under 16 ms per frame | puffin + manual benchmark |
-| CI | build, test, clippy `-D warnings`, rustfmt check on windows-latest and ubuntu-22.04 | GitHub Actions |
+| D66 | Live notes reach the engine through one SPSC ring whose producer is shared behind a `Mutex` by the MIDI threads and the UI (an exception to D3's one queue per producer) | Ports come and go at run time; a queue per port would need engine-side registration. Only non-RT threads ever take the lock | Per-port queues with timestamps when jitter matters (D67) |
+| D67 | Live notes play the rack's selected channel (`SetLiveChannel`), omni, and start at the next quantum with no timestamp mapping | Simple and predictable; at 128 frames the jitter (under 3 ms) is below what players notice | Map `time_us` to a sample offset from the callback clock; per-port or per-MIDI-channel routing |
+| D68 | Count-in runs in the engine: `CountIn { bars }` clicks each beat sample-accurately (downbeat higher), then starts play at a quantum boundary; Play, Pause and Stop cancel it | The UI frame clock is too coarse for clicks; the engine already owns the metronome | — |
+| D69 | MIDI CCs are handled on the UI thread: a binding moves the document's parameter (along its taper) and the normal sync sends it on | One path for knobs, automation and controllers; undo and saving come for free | Engine-side CC mapping if UI frame rate makes controller sweeps steppy |
+| D70 | MIDI-learn bindings (`MidiBinding { channel, cc, param }`, CC 0 to 119, at most 256) live in the project and are saved in `project.json` as `midi_map` by parameter key, without a schema bump | A project should keep its controller map; an optional list needs no migration | Global (per-user) bindings next to per-project ones |
+| D71 | Hot-plug by polling the port list once a second on a background thread (10 s retries when MIDI itself is unavailable); ports are keyed by name, duplicates get " #2" | Neither Windows MME nor ALSA sequencer notifications are exposed by midir; polling is portable and cheap | A native notification API if midir gains one |
+| D72 | SMF import/export lives in `gt-export` (midly) and works from the compiled song events, so export matches what the engine plays; import builds one Gloom Synth channel per MIDI channel in a new pattern; recorded notes reach the engine with `UpdateSong`, which swaps the song without releasing voices | One source of truth for timing; recording must not cut the notes being played | General MIDI drum mapping to the sampler on import |

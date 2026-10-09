@@ -61,6 +61,10 @@ pub enum EngineCommand {
     /// Replace what plays (a pattern, or the arrangement). Held notes are released and
     /// automation values are dropped (the new song's lanes set them again while playing).
     SetSong(Box<SongSnapshot>),
+    /// Replace the song without releasing playing notes or resetting automation, for edits
+    /// that only add notes (live recording). Notes the old song started still end, because
+    /// the new song has the same note-offs.
+    UpdateSong(Box<SongSnapshot>),
     /// Replace the modulators. Running LFOs and followers keep their state (by modulator id).
     SetModulation(Box<ModPlan>),
     /// Replace a channel's settings. Gain and pan glide; the rest applies to new notes.
@@ -121,6 +125,15 @@ pub enum EngineCommand {
         /// New value.
         value: f32,
     },
+    /// The channel slot that live notes ([`crate::LiveNote`]) play, or none to mute them.
+    /// Notes already held finish on the slot they started on.
+    SetLiveChannel(Option<u16>),
+    /// Count `bars` bars of metronome clicks at the playhead's tempo and time signature, then
+    /// start playing. Play, Pause and Stop cancel a count-in. Ignored while playing.
+    CountIn {
+        /// Bars to count; 0 plays at once.
+        bars: u8,
+    },
 }
 
 impl EngineCommand {
@@ -132,6 +145,7 @@ impl EngineCommand {
             Self::SetTempoMap(_)
                 | Self::SetSignatures(_)
                 | Self::SetSong(_)
+                | Self::UpdateSong(_)
                 | Self::SetModulation(_)
                 | Self::SetChannelParams { .. }
                 | Self::SetChannelSample { .. }
@@ -178,6 +192,15 @@ pub enum EngineEvent {
         state: TransportState,
         /// Position in ticks at the change.
         position: Tick,
+    },
+    /// A live note (key down or up) arrived while the transport was playing, for recording.
+    LiveNote {
+        /// MIDI key.
+        key: u8,
+        /// Velocity from 0 to 1; 0 for a key going up.
+        velocity: f32,
+        /// Song position where the engine played it (the start of its quantum), in ticks.
+        tick: f64,
     },
 }
 

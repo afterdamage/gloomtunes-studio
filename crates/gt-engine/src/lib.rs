@@ -6,8 +6,8 @@
 //!   export thread) and only ever does real-time-safe work in [`AudioProcessor::process`].
 //! - [`EngineHandle`] stays on the UI thread. It never waits for the audio thread.
 //!
-//! They talk through three wait-free `rtrb` queues (commands in; events and garbage out) and a
-//! block of atomics ([`Telemetry`]). See ARCHITECTURE.md §4.
+//! They talk through four wait-free `rtrb` queues (commands and live notes in; events and
+//! garbage out) and a block of atomics ([`Telemetry`]). See ARCHITECTURE.md §4.
 //!
 //! This crate deliberately does not depend on any audio device library: the device layer in
 //! `gt-app` calls `process`, and so can tests and offline export.
@@ -19,6 +19,7 @@ mod atomic;
 mod channel;
 mod command;
 pub mod control;
+mod live;
 mod mixer;
 mod processor;
 pub mod song;
@@ -29,6 +30,7 @@ pub use channel::VOICES_PER_CHANNEL;
 pub use command::{EngineCommand, EngineEvent, Garbage, LoopRegion, TransportState};
 pub use control::{ModPlan, ParamDest};
 pub use gt_core::MAX_CHANNELS;
+pub use live::{LiveInput, LiveNote, LIVE_CAPACITY};
 pub use mixer::{create_effect, EffectBox, MixerParams, StripParams, MAX_PDC_FRAMES};
 pub use processor::{AudioProcessor, PREVIEW_GAIN, TEST_TONE_DBFS, TEST_TONE_HZ};
 pub use song::{
@@ -96,6 +98,8 @@ pub struct Telemetry {
     pub fx_meters: [[AtomicF32; FX_SLOTS]; STRIPS],
     /// Delay from a channel to the device caused by effect latency, in frames.
     pub latency_frames: AtomicU32,
+    /// Count-in beats still to come, including the one sounding (0 when not counting in).
+    pub count_in_beats: AtomicU32,
 }
 
 /// One strip's meter. The engine raises `peak` with `fetch_max` (the UI swaps it back to 0
@@ -130,6 +134,7 @@ impl Default for Telemetry {
             meters: std::array::from_fn(|_| MeterCell::default()),
             fx_meters: std::array::from_fn(|_| std::array::from_fn(|_| AtomicF32::default())),
             latency_frames: AtomicU32::default(),
+            count_in_beats: AtomicU32::default(),
         }
     }
 }
@@ -164,6 +169,7 @@ pub struct EngineHandle {
     commands: Producer<EngineCommand>,
     events: Consumer<EngineEvent>,
     garbage: Consumer<Garbage>,
+    live: Option<Producer<LiveNote>>,
     telemetry: Arc<Telemetry>,
     config: EngineConfig,
 }
@@ -194,6 +200,12 @@ impl EngineHandle {
         n
     }
 
+    /// The sending end of this engine's live-note queue, for [`LiveInput::connect`]. Returns
+    /// it once.
+    pub fn take_live_producer(&mut self) -> Option<Producer<LiveNote>> {
+        self.live.take()
+    }
+
     /// Read-only access to the published telemetry.
     pub fn telemetry(&self) -> &Telemetry {
         &self.telemetry
@@ -211,11 +223,20 @@ pub fn create(config: EngineConfig) -> (EngineHandle, AudioProcessor) {
     let (cmd_tx, cmd_rx) = RingBuffer::new(COMMAND_CAPACITY);
     let (evt_tx, evt_rx) = RingBuffer::new(EVENT_CAPACITY);
     let (gc_tx, gc_rx) = RingBuffer::new(GARBAGE_CAPACITY);
-    let processor = AudioProcessor::new(config, Arc::clone(&telemetry), cmd_rx, evt_tx, gc_tx);
+    let (live_tx, live_rx) = RingBuffer::new(LIVE_CAPACITY);
+    let processor = AudioProcessor::new(
+        config,
+        Arc::clone(&telemetry),
+        cmd_rx,
+        evt_tx,
+        gc_tx,
+        live_rx,
+    );
     let handle = EngineHandle {
         commands: cmd_tx,
         events: evt_rx,
         garbage: gc_rx,
+        live: Some(live_tx),
         telemetry,
         config,
     };

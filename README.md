@@ -4,9 +4,11 @@ An original, open-source, pattern-based digital audio workstation written in Rus
 Windows 10/11 and Ubuntu 22.04+ from a single codebase. Channel rack, piano roll, mixer and
 playlist, with built-in instruments and effects, wrapped in a dark, moody "Gloom" interface.
 
-> **Status:** v0.1 alpha, Step 9 of the [roadmap](ROADMAP.md): projects save to `.gloom` files
-> (optionally with their samples inside), autosave guards against crashes, and songs, loop
-> regions or per-track stems export to WAV. Every knob and fader can
+> **Status:** v0.1 alpha, Step 10 of the [roadmap](ROADMAP.md): a MIDI keyboard (plugged in any
+> time) or the computer keyboard plays the selected channel, takes record into the piano roll
+> with a count-in, any control can be MIDI-learned, and MIDI files import and export. Projects
+> save to `.gloom` files (optionally with their samples inside), autosave guards against
+> crashes, and songs, loop regions or per-track stems export to WAV. Every knob and fader can
 > be automated with curved automation clips or modulated by LFOs and envelope followers, in a
 > playlist that arranges pattern, audio and automation clips on unlimited tracks, with tempo and
 > time-signature changes, markers and a loop region, on top of a mixer with 64 inserts, 4 send buses and eight built-in
@@ -146,6 +148,24 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
     or the loop region, the reverb and delay tail until it fades (up to 10 s), and
     optionally one file per track ("stems", named `<file> - 01 <track>.wav`). It runs in the
     background with a progress bar and Cancel.
+  - **Import MIDI file…** reads a `.mid` (format 0 or 1) into a new pattern, with one Gloom
+    Synth channel per MIDI channel; tick **Use the file's tempo** to take its tempo and time
+    signatures too. **Export MIDI file…** writes format 1 (one track per channel) from the
+    current pattern or the whole song.
+- **MIDI and live playing:**
+  - Every MIDI input is connected automatically, including ones plugged in while the app runs.
+    Notes play the channel selected in the rack; the dot in the transport bar blinks on MIDI
+    input. The **Audio** button (top right) opens settings, which list the inputs (untick one
+    to ignore it).
+  - **Keys** (Ctrl+T) turns the computer keyboard into a piano: Z S X D C V G B H N J M , is
+    the bottom octave, Q 2 W 3 E R 5 T 6 Y 7 U I the one above; Minus and Equals change the
+    octave. Ctrl shortcuts keep working.
+  - **Record** (Ctrl+R) records into the current pattern on the selected channel. From stop it
+    counts in first (Off, 1 or 2 bars, in settings) and turns the click on while recording; each
+    take is one undo step. **Latency** in settings moves recorded notes earlier by the output
+    buffer plus an extra amount if your notes land late.
+  - Right-click a knob, fader or control and pick **MIDI learn**, then move a controller (Esc
+    cancels). **Forget MIDI** removes the binding. Bindings are saved with the project.
 - **Undo** and **Redo** (top right, Ctrl+Z and Ctrl+Shift+Z or Ctrl+Y) cover notes, steps,
   channels, patterns, the mixer, the playlist, modulators, tempo and time signatures and settings.
 

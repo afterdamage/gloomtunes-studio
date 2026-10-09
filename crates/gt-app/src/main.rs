@@ -8,6 +8,8 @@ mod app;
 mod audio_io;
 mod files;
 mod library;
+mod live;
+mod midi_io;
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();

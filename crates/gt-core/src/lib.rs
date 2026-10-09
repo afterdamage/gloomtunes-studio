@@ -3,11 +3,13 @@
 //! Step 2 defined musical time (ticks, tempo map, time signature). Step 3 adds the first part
 //! of the project document (channels, patterns, notes) and in-memory sample data. Step 5 adds
 //! Gloom Synth patches; Step 6 the mixer and its effects; Step 7 the playlist; Step 8 the
-//! parameter registry ([`ParamId`]), automation curves and modulators.
+//! parameter registry ([`ParamId`]), automation curves and modulators; Step 10 MIDI learn
+//! bindings ([`MidiBinding`]).
 
 #![forbid(unsafe_code)]
 
 pub mod effects;
+pub mod midi;
 pub mod mixer;
 pub mod modulation;
 pub mod param;
@@ -20,6 +22,7 @@ pub mod synth;
 pub mod time;
 
 pub use effects::{EffectKind, EffectSlot};
+pub use midi::{MidiBinding, MAX_LEARN_CC, MAX_MIDI_BINDINGS};
 pub use mixer::{Mixer, MixerStrip, StripKind, FX_SLOTS, INSERTS, MASTER, SENDS, STRIPS};
 pub use modulation::{LfoRate, LfoShape, ModSourceKind, Modulator, ModulatorId, MAX_MODULATORS};
 pub use param::{ParamCurve, ParamInfo, ParamUnit};

@@ -151,6 +151,40 @@ impl SongSnapshot {
         }
     }
 
+    /// One pass of pattern `id` from tick 0, not repeating: notes keep their full length
+    /// (for MIDI file export).
+    pub fn compile_pattern_once(project: &Project, id: gt_core::PatternId) -> Self {
+        let Some(pattern) = project.pattern(id) else {
+            return Self::default();
+        };
+        let length = pattern.length_ticks();
+        let swing = swing_ticks(project);
+        let mut events = Vec::new();
+        for (slot, ch) in project.channels.iter().enumerate() {
+            for n in pattern.channel_notes(ch.id) {
+                if n.start < 0 || n.start >= length {
+                    continue;
+                }
+                let on = n.start + swing_of(n.start, swing);
+                push_note(
+                    &mut events,
+                    slot,
+                    n.key,
+                    n.velocity,
+                    on,
+                    on + n.length.max(1),
+                );
+            }
+        }
+        events.sort_by_key(SongEvent::order);
+        Self {
+            length,
+            repeat: false,
+            events,
+            ..Self::default()
+        }
+    }
+
     /// Compiles the playlist (song mode). Pattern clips repeat their pattern for the clip's
     /// length and cut notes at the clip's end; muted clips and clips on silent tracks are left
     /// out. Audio clips whose sample `samples` cannot supply yet are skipped. Automation clips

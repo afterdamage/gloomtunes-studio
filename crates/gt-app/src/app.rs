@@ -19,13 +19,15 @@ use gt_ui::param_ui::{self, ParamMarks, ParamRequest};
 use gt_ui::views::{
     add_automation, audio_panel, browser, channel_rack, mixer_view, modulators_panel, piano_roll,
     playlist, sampler_panel, synth_panel, transport_bar, AudioAction, AudioPanelModel,
-    BrowserAction, BrowserModel, MixerState, MixerView, ModulatorsState, PianoRollAction,
-    PianoRollState, PianoRollView, PlayState, PlaylistAction, PlaylistState, PlaylistView,
-    RackAction, RackState, RackView, SamplerPanelView, StripMeter, SynthPanelAction,
+    BrowserAction, BrowserModel, MidiPanelModel, MixerState, MixerView, ModulatorsState,
+    PianoRollAction, PianoRollState, PianoRollView, PlayState, PlaylistAction, PlaylistState,
+    PlaylistView, RackAction, RackState, RackView, SamplerPanelView, StripMeter, SynthPanelAction,
     SynthPanelView, TransportAction, TransportModel,
 };
 use gt_ui::widgets::MeterBallistics;
 use gt_ui::GloomTheme;
+
+mod midi;
 
 use crate::audio_io::AudioIo;
 use crate::files::{self, Dialog, DialogAction, ExportForm, Then};
@@ -123,6 +125,22 @@ pub struct GloomApp {
     /// The user confirmed quitting (or there was nothing to save).
     quit_confirmed: bool,
     window_title: String,
+
+    /// Live notes from MIDI devices and the typing keyboard, to the engine.
+    live: gt_engine::LiveInput,
+    midi: crate::midi_io::MidiIo,
+    keyboard: crate::live::TypingKeyboard,
+    recorder: crate::live::Recorder,
+    /// The take's channel and the pattern length when it started.
+    take: Option<(gt_core::ChannelId, i64)>,
+    /// MIDI and recording settings (shown in the Audio and MIDI window).
+    midi_model: MidiPanelModel,
+    /// Live channel slot last sent to the engine (outer none: send it).
+    sent_live_slot: Option<Option<u16>>,
+    /// Parameter waiting for a MIDI controller to move (MIDI learn).
+    learning: Option<ParamId>,
+    /// MIDI activity count last seen.
+    midi_seen: u32,
 }
 
 /// How often unsaved work is written to the recovery file.
@@ -153,6 +171,7 @@ impl GloomApp {
         theme.apply(ctx);
         let project = Project::demo();
         let history = History::new(&project);
+        let live = gt_engine::LiveInput::default();
         let mut app = Self {
             theme,
             audio: AudioIo::new(),
@@ -205,6 +224,15 @@ impl GloomApp {
             toast: None,
             quit_confirmed: false,
             window_title: String::new(),
+            live: live.clone(),
+            midi: crate::midi_io::MidiIo::start(live, ctx.clone()),
+            keyboard: crate::live::TypingKeyboard::default(),
+            recorder: crate::live::Recorder::default(),
+            take: None,
+            midi_model: MidiPanelModel::default(),
+            sent_live_slot: None,
+            learning: None,
+            midi_seen: 0,
         };
         app.refresh_presets();
         app.open_folder(default_folder());
@@ -560,7 +588,9 @@ impl GloomApp {
         let Some(label) = self.pending_edit else {
             return;
         };
+        // A recording take is one undo step, committed when it ends.
         let busy = ctx.input(|i| i.pointer.any_down())
+            || self.recorder.armed
             || ctx.text_edit_focused()
             || self.roll.is_dragging()
             || self.playlist.is_dragging();
@@ -745,6 +775,11 @@ impl GloomApp {
         for m in self.project.modulators.iter().filter(|m| m.enabled) {
             marks.modulated.insert(m.target);
         }
+        for b in &self.project.midi_map {
+            marks
+                .midi
+                .insert(b.param, format!("CC {}, ch {}", b.cc, b.channel + 1));
+        }
         marks
     }
 
@@ -778,6 +813,12 @@ impl GloomApp {
                 }
                 self.show_modulators = true;
                 self.modulators.focus = Some(target);
+            }
+            ParamRequest::MidiLearn(target) => self.start_learning(target),
+            ParamRequest::ForgetMidi(target) => {
+                if self.project.forget_midi(target) {
+                    self.pending_edit = Some("Forget MIDI controller");
+                }
             }
             ParamRequest::ShowModulators(target) => {
                 self.show_modulators = true;
@@ -827,6 +868,10 @@ impl GloomApp {
         self.send(EngineCommand::Locate(self.transport.position));
         self.send(EngineCommand::SetTestTone(self.test_tone));
         self.slots_in_use = 0; // a new engine starts with empty slots
+        if let Some(p) = self.audio.engine_mut().and_then(|e| e.take_live_producer()) {
+            self.live.connect(p);
+        }
+        self.sent_live_slot = None;
         self.push_channels();
         self.send(EngineCommand::SetScopeChannel(self.scope_slot));
         // A new engine has an empty mixer.
@@ -899,7 +944,11 @@ impl GloomApp {
     /// Where the current pattern is playing, in pattern ticks: the transport position in
     /// pattern mode; in song mode, inside a clip of the current pattern under the playhead.
     fn pattern_position(&self) -> Option<i64> {
-        let pos = self.transport.position.0;
+        self.pattern_tick_at(self.transport.position.0)
+    }
+
+    /// [`Self::pattern_position`] for song position `pos`.
+    fn pattern_tick_at(&self, pos: i64) -> Option<i64> {
         let len = self.project.current_pattern().length_ticks().max(1);
         if !self.transport.song_mode {
             return Some(pos.rem_euclid(len));
@@ -978,7 +1027,12 @@ impl GloomApp {
                 };
                 self.send(cmd);
             }
-            TransportAction::Stop => self.send(EngineCommand::Stop),
+            TransportAction::Stop => {
+                self.send(EngineCommand::Stop);
+                self.end_take();
+            }
+            TransportAction::ToggleRecord => self.toggle_record(),
+            TransportAction::ToggleTypingKeyboard => self.keyboard.on = !self.keyboard.on,
             TransportAction::SetBpm(bpm) => self.set_bpm_at_playhead(bpm),
             TransportAction::SetTimeSig(sig) => self.set_sig_at_playhead(sig),
             TransportAction::SetSongMode(_) => self.push_song(),
@@ -1031,6 +1085,9 @@ impl GloomApp {
     fn replace_project(&mut self, project: gt_core::Project, path: Option<PathBuf>) {
         self.send(EngineCommand::Stop);
         self.send(EngineCommand::Locate(Tick(0)));
+        self.recorder = crate::live::Recorder::default();
+        self.take = None;
+        self.learning = None;
         self.cancel_roll_gesture();
         self.playlist.cancel();
         self.pending_edit = None;
@@ -1265,6 +1322,8 @@ impl GloomApp {
                 self.save_to(path, embed, then);
             }
             DialogAction::Export { path } => self.start_export(path),
+            DialogAction::ImportMidi { path, timing } => self.import_midi(&path, timing),
+            DialogAction::ExportMidi { path, song } => self.export_midi(&path, song),
             DialogAction::CancelExport => {
                 if let Some(Dialog::Export(form)) = &self.dialog {
                     if let Some(p) = &form.running {
@@ -1471,6 +1530,13 @@ impl GloomApp {
             {
                 pick = Some(FileCmd::Export);
             }
+            ui.separator();
+            if ui.button("Import MIDI file…").clicked() {
+                pick = Some(FileCmd::ImportMidi);
+            }
+            if ui.button("Export MIDI file…").clicked() {
+                pick = Some(FileCmd::ExportMidi);
+            }
         });
         if let Some(cmd) = pick {
             self.file_cmd(cmd);
@@ -1487,6 +1553,8 @@ impl GloomApp {
             FileCmd::Save => self.save(Then::Stay),
             FileCmd::SaveAs => self.save_as(Then::Stay),
             FileCmd::Export => self.show_export(),
+            FileCmd::ImportMidi => self.show_import_midi(),
+            FileCmd::ExportMidi => self.show_export_midi(),
         }
     }
 
@@ -1592,6 +1660,8 @@ enum FileCmd {
     Save,
     SaveAs,
     Export,
+    ImportMidi,
+    ExportMidi,
 }
 
 impl eframe::App for GloomApp {
@@ -1635,6 +1705,8 @@ impl eframe::App for GloomApp {
         self.transport.bpm = self.project.tempo.bpm_at(self.transport.position);
         self.transport.time_sig = self.project.signatures.sig_at(self.transport.position);
         param_ui::set_marks(&ctx, std::sync::Arc::new(self.param_marks()));
+        // Before any shortcut: in piano mode the typing keyboard takes its keys first.
+        self.live_frame(&ctx, dt);
 
         // Space toggles play. Consumed before any widget runs, so a focused button does not
         // also react to it; left alone while a text field (e.g. typing a BPM) has focus.
@@ -1694,7 +1766,7 @@ impl eframe::App for GloomApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add(egui::Button::selectable(self.show_audio, "Audio"))
-                            .on_hover_text("Audio device settings")
+                            .on_hover_text("Audio device, MIDI inputs and recording settings")
                             .clicked()
                         {
                             self.show_audio = !self.show_audio;
@@ -1741,11 +1813,16 @@ impl eframe::App for GloomApp {
                 ..self.audio.panel_model(self.test_tone)
             };
             let mut open = true;
-            let action = egui::Window::new("Audio settings")
+            let action = egui::Window::new("Audio and MIDI settings")
                 .open(&mut open)
                 .resizable(false)
                 .collapsible(false)
-                .show(&ctx, |ui| audio_panel(ui, &theme, &model))
+                .show(&ctx, |ui| {
+                    let a = audio_panel(ui, &theme, &model);
+                    ui.separator();
+                    self.midi_settings(ui, &theme);
+                    a
+                })
                 .and_then(|r| r.inner.flatten());
             self.show_audio = open;
             if let Some(a) = action {
