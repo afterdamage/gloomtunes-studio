@@ -27,6 +27,7 @@ eframe.workspace = true
 egui.workspace = true
 log.workspace = true
 rfd.workspace = true
+midir.workspace = true
 env_logger.workspace = true
 
 [features]

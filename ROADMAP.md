@@ -20,9 +20,9 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 6 | Mixer and effects | Done (2026-10-08) |
 | 7 | Playlist / arrangement | Done (2026-10-08) |
 | 8 | Automation and parameter system | Done (2026-10-08) |
-| 9 | Save/load, export, recovery | **In review** |
-| 10 | MIDI input and recording | Next |
-| 11 | CLAP plugin hosting | Planned (can move after v1.0) |
+| 9 | Save/load, export, recovery | Done (2026-10-08) |
+| 10 | MIDI input and recording | **In review** |
+| 11 | CLAP plugin hosting | Next (can move after v1.0) |
 | 12 | Performance, polish, packaging | Planned |
 
 ## Phases at a glance
@@ -248,6 +248,30 @@ for schedule; Phase E is the riskiest technically.
   computer-keyboard piano, SMF type 1 import/export.
 - **You should hear** a hardware keyboard play Gloom Synth with no audible lag at 128 frames.
 - Cut if late: SMF export.
+- Delivered (2026-10-09): everything above, nothing cut. Every MIDI input is connected
+  automatically; a scanning thread checks the port list once a second, so a keyboard plugged in
+  or pulled out while the app runs is picked up or dropped on Windows and Linux alike (D71).
+  Ports can be switched off in **Audio and MIDI settings**. Notes from any port and any MIDI
+  channel play the selected rack channel (D66, D67); the small dot in the transport bar blinks
+  on MIDI activity. Right-click any knob, fader or automatable control and pick **MIDI learn**,
+  then move a controller; **Forget MIDI** removes it. Bindings follow the parameter's taper,
+  are undoable and are saved in the project (D69, D70). **Record** (Ctrl+R) arms recording into
+  the current pattern for the selected channel; from stop it counts in 1 or 2 bars (or none)
+  with clicks on each beat, played sample-accurately by the engine (D68). Recorded notes appear
+  while you play and the whole take is one undo step; the metronome can be forced on while
+  recording. Latency compensation moves recorded notes earlier by the output buffer plus an
+  adjustable extra amount. **Keys** (Ctrl+T) turns the computer keyboard into a piano: Z to /
+  is the bottom octave, Q to P the one above, number keys are black keys, Minus and Equals
+  change the octave. **File > Import MIDI file…** reads SMF format 0 and 1 into a new pattern
+  with one Gloom Synth channel per MIDI channel, optionally taking the file's tempo and time
+  signatures; **Export MIDI file…** writes format 1 at 960 PPQ from the current pattern or the
+  whole song (D72). Known limits: live notes start at the next audio callback, so timing jitter
+  is up to one buffer (about 3 ms at 128 frames, 48 kHz) and MIDI timestamps are not used;
+  pitch bend, sustain pedal and aftertouch are ignored; input is omni (all ports and channels
+  play one channel); port choices and recording settings are not saved yet; a note held across
+  the pattern loop point is cut there; notes played during the count-in are not recorded; in
+  song mode notes are recorded only while a clip of the current pattern is under the playhead;
+  imported parts all become Gloom Synth channels, drums included; SMPTE-timed files are refused.
 
 ---
 

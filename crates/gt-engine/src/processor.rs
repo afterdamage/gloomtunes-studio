@@ -10,6 +10,7 @@ use rtrb::{Consumer, Producer};
 use crate::channel::ChannelSlot;
 use crate::command::{EngineCommand, EngineEvent, Garbage, TransportState};
 use crate::control::{beats_of, ModClock, ModPlan, ParamDest};
+use crate::live::LiveNote;
 use crate::mixer::MixerEngine;
 use crate::song::{ChannelParams, SongSnapshot};
 use crate::transport::{EventBuf, EventKind, ScheduledEvent, Transport};
@@ -32,6 +33,24 @@ const CLIP_FADE_S: f64 = 0.002;
 
 /// Commands applied per quantum at most, so a flood of commands cannot stall a callback.
 const MAX_COMMANDS_PER_QUANTUM: usize = 64;
+/// Live notes applied per quantum at most.
+const MAX_LIVE_PER_QUANTUM: usize = 64;
+
+/// A count-in in progress: clicks on every beat from `start`, then play at `end`.
+#[derive(Debug, Clone, Copy)]
+struct CountIn {
+    /// Engine frame of the first click.
+    start: u64,
+    /// Engine frame where playback starts (a quantum boundary).
+    end: u64,
+    /// Frames per beat.
+    beat_frames: f64,
+    /// Clicks so far, and in total.
+    done: u32,
+    beats: u32,
+    /// Beats per bar (the downbeat clicks higher).
+    per_bar: u32,
+}
 
 const Q: usize = RENDER_QUANTUM;
 
@@ -42,6 +61,7 @@ pub struct AudioProcessor {
     commands: Consumer<EngineCommand>,
     events: Producer<EngineEvent>,
     garbage: Producer<Garbage>,
+    live: Consumer<LiveNote>,
     out_channels: usize,
     sample_rate: f64,
 
@@ -79,6 +99,11 @@ pub struct AudioProcessor {
     click: Click,
     click_gain: f32,
     metronome: bool,
+    count_in: Option<CountIn>,
+
+    /// Slot that live notes play, and per key the slot + 1 holding a live note (0: none).
+    live_slot: Option<u16>,
+    live_held: [u16; 128],
 
     tone: SineOsc,
     tone_ramp: LinearRamp,
@@ -106,6 +131,7 @@ impl AudioProcessor {
         commands: Consumer<EngineCommand>,
         events: Producer<EngineEvent>,
         garbage: Producer<Garbage>,
+        live: Consumer<LiveNote>,
     ) -> Self {
         let sr = config.sample_rate.max(1) as f32;
         let mut preview = ChannelSlot::new(sr);
@@ -118,6 +144,7 @@ impl AudioProcessor {
             commands,
             events,
             garbage,
+            live,
             out_channels: config.out_channels.max(1),
             sample_rate: f64::from(config.sample_rate.max(1)),
             transport: Transport::new(config.sample_rate, Box::default()),
@@ -140,6 +167,9 @@ impl AudioProcessor {
             click: Click::new(sr),
             click_gain: db_to_gain(CLICK_DBFS),
             metronome: true,
+            count_in: None,
+            live_slot: None,
+            live_held: [0; 128],
             tone: SineOsc::new(sr, TEST_TONE_HZ),
             tone_ramp: LinearRamp::new(0.0),
             tone_gain: db_to_gain(TEST_TONE_DBFS),
@@ -198,6 +228,8 @@ impl AudioProcessor {
     /// Renders the next `RENDER_QUANTUM` frames into the quantum buffers.
     fn render_quantum(&mut self) {
         self.apply_commands();
+        let count_click = self.advance_count_in();
+        self.apply_live();
 
         self.quantum_l.fill(0.0);
         self.quantum_r.fill(0.0);
@@ -226,6 +258,18 @@ impl AudioProcessor {
                 };
                 self.click.trigger(hz, self.click_gain);
             }
+        }
+        if let Some((offset, downbeat)) = count_click {
+            // While counting in the transport is stopped, so no beat events came above.
+            let at = offset.min(Q);
+            self.click.add_to(&mut self.mono[cursor..at]);
+            cursor = at;
+            let hz = if downbeat {
+                CLICK_DOWNBEAT_HZ
+            } else {
+                CLICK_HZ
+            };
+            self.click.trigger(hz, self.click_gain);
         }
         self.click.add_to(&mut self.mono[cursor..]);
 
@@ -534,6 +578,12 @@ impl AudioProcessor {
     fn apply(&mut self, cmd: EngineCommand) {
         let now = self.frame_clock;
         let before = self.transport.state();
+        if matches!(
+            cmd,
+            EngineCommand::Play | EngineCommand::Pause | EngineCommand::Stop
+        ) {
+            self.cancel_count_in();
+        }
         match cmd {
             EngineCommand::Play => self.transport.play(now),
             EngineCommand::Pause => self.transport.pause(now),
@@ -569,6 +619,12 @@ impl AudioProcessor {
                 // Parameters follow the document again until the new song's automation moves
                 // them (in this same quantum, while playing).
                 self.clear_controls();
+                if let Some(old) = self.song.replace(song) {
+                    self.retire(Garbage::Song(old));
+                }
+                self.link_lanes();
+            }
+            EngineCommand::UpdateSong(song) => {
                 if let Some(old) = self.song.replace(song) {
                     self.retire(Garbage::Song(old));
                 }
@@ -666,7 +722,17 @@ impl AudioProcessor {
                     self.preview.note_on(ROOT_KEY, 1.0, self.voice_age);
                 }
             }
+            EngineCommand::SetLiveChannel(slot) => {
+                self.live_slot = slot.filter(|&s| usize::from(s) < self.channels.len());
+            }
+            EngineCommand::CountIn { bars } => self.start_count_in(bars),
         }
+        self.after_transport_change(before);
+    }
+
+    /// Releases notes, resets effects and tells the UI when the transport changed state.
+    fn after_transport_change(&mut self, before: TransportState) {
+        let now = self.frame_clock;
         let after = self.transport.state();
         if before == TransportState::Playing && after != TransportState::Playing {
             self.release_all_channels();
@@ -681,6 +747,108 @@ impl AudioProcessor {
                 state: after,
                 position: Tick(self.transport.position_at(now).floor() as i64),
             });
+        }
+    }
+
+    /// Starts counting `bars` bars at the playhead's tempo and time signature.
+    fn start_count_in(&mut self, bars: u8) {
+        let now = self.frame_clock;
+        if self.transport.state() == TransportState::Playing {
+            return;
+        }
+        let pos = self.transport.position_at(now);
+        let sig = self.transport.signatures().sig_at(Tick(pos.floor() as i64));
+        let bpm = self.transport.bpm_at(now).max(1.0);
+        let beat_frames = 60.0 / bpm * self.sample_rate * 4.0 / f64::from(sig.den.max(1));
+        let per_bar = u32::from(sig.num.max(1));
+        let beats = u32::from(bars) * per_bar;
+        if beats == 0 {
+            self.transport.play(now);
+            return;
+        }
+        // Playback starts on the first quantum boundary at or after the last beat's end, at
+        // most half a quantum (0.33 ms at 48 kHz) late.
+        let len = (f64::from(beats) * beat_frames / Q as f64).round() as u64 * Q as u64;
+        self.count_in = Some(CountIn {
+            start: now,
+            end: now + len.max(Q as u64),
+            beat_frames,
+            done: 0,
+            beats,
+            per_bar,
+        });
+    }
+
+    fn cancel_count_in(&mut self) {
+        if self.count_in.take().is_some() {
+            self.telemetry.count_in_beats.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Moves a count-in on by one quantum: returns the click in this quantum (offset,
+    /// downbeat), or starts playback when the count is over.
+    fn advance_count_in(&mut self) -> Option<(usize, bool)> {
+        let c = self.count_in.as_mut()?;
+        let q0 = self.frame_clock;
+        if q0 >= c.end {
+            self.cancel_count_in();
+            let before = self.transport.state();
+            self.transport.play(q0);
+            self.after_transport_change(before);
+            return None;
+        }
+        if c.done >= c.beats {
+            return None;
+        }
+        let next = c.start + (f64::from(c.done) * c.beat_frames).round() as u64;
+        if next >= q0 + Q as u64 {
+            return None;
+        }
+        let click = ((next.saturating_sub(q0)) as usize, c.done % c.per_bar == 0);
+        let left = c.beats - c.done;
+        c.done += 1;
+        self.telemetry.count_in_beats.store(left, Ordering::Relaxed);
+        Some(click)
+    }
+
+    /// Plays the live notes that arrived since the last quantum, at its start, and reports
+    /// them for recording while the transport plays.
+    fn apply_live(&mut self) {
+        let playing = self.transport.state() == TransportState::Playing;
+        let tick = self.transport.position_at(self.frame_clock);
+        for _ in 0..MAX_LIVE_PER_QUANTUM {
+            let Ok(n) = self.live.pop() else {
+                break;
+            };
+            let k = usize::from(n.key.min(127));
+            if n.is_on() {
+                // A key struck again before its release ends the old note first.
+                if let Some(old) = self.live_held[k].checked_sub(1) {
+                    if let Some(ch) = self.channels.get_mut(usize::from(old)) {
+                        ch.note_off(n.key);
+                    }
+                    self.live_held[k] = 0;
+                }
+                if let Some(slot) = self.live_slot {
+                    if let Some(ch) = self.channels.get_mut(usize::from(slot)) {
+                        self.voice_age += 1;
+                        ch.note_on(n.key, n.velocity, self.voice_age);
+                        self.live_held[k] = slot + 1;
+                    }
+                }
+            } else if let Some(slot) = self.live_held[k].checked_sub(1) {
+                if let Some(ch) = self.channels.get_mut(usize::from(slot)) {
+                    ch.note_off(n.key);
+                }
+                self.live_held[k] = 0;
+            }
+            if playing {
+                self.post(EngineEvent::LiveNote {
+                    key: n.key,
+                    velocity: n.velocity,
+                    tick,
+                });
+            }
         }
     }
 
@@ -1039,5 +1207,111 @@ mod tests {
         let mut buf = vec![0.0; 64];
         p.process(&mut buf);
         assert_eq!(h.collect_garbage(), 1);
+    }
+
+    /// Frames where the output rises above a small threshold after at least 1000 quiet frames.
+    fn onsets(buf: &[f32]) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut quiet = usize::MAX / 2;
+        for (i, s) in buf.iter().enumerate() {
+            if s.abs() > 1e-3 {
+                if quiet >= 1000 {
+                    out.push(i);
+                }
+                quiet = 0;
+            } else {
+                quiet += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn count_in_clicks_each_beat_then_plays() {
+        let (mut h, mut p) = engine(48_000, 1);
+        h.send(EngineCommand::SetMetronome(false)).unwrap();
+        h.send(EngineCommand::CountIn { bars: 1 }).unwrap();
+        // 120 BPM, 4/4: a beat is 24 000 frames, the bar 96 000.
+        let mut buf = vec![0.0; 95_000];
+        p.process(&mut buf);
+        assert_eq!(onsets(&buf), vec![0, 24_000, 48_000, 72_000]);
+        let t = std::sync::Arc::clone(&p.telemetry);
+        assert_eq!(t.transport_state(), crate::TransportState::Stopped);
+        assert_eq!(t.count_in_beats.load(Ordering::Relaxed), 1);
+        let mut buf = vec![0.0; 2_000];
+        p.process(&mut buf);
+        assert_eq!(t.transport_state(), crate::TransportState::Playing);
+        assert_eq!(t.count_in_beats.load(Ordering::Relaxed), 0);
+        // Playing from bar 1 with the metronome off: no more clicks.
+        assert!(onsets(&buf).is_empty());
+        // Stop during a count-in cancels it.
+        h.send(EngineCommand::Stop).unwrap();
+        h.send(EngineCommand::CountIn { bars: 2 }).unwrap();
+        let mut buf = vec![0.0; 1_000];
+        p.process(&mut buf);
+        h.send(EngineCommand::Stop).unwrap();
+        let mut buf = vec![0.0; 200_000];
+        p.process(&mut buf);
+        assert_eq!(t.transport_state(), crate::TransportState::Stopped);
+        assert_eq!(t.count_in_beats.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn live_notes_play_the_live_channel_and_are_reported_while_playing() {
+        let (mut h, mut p) = engine(48_000, 1);
+        let live = crate::LiveInput::default();
+        assert!(!live.send(crate::LiveNote::on(60, 1.0)));
+        live.connect(h.take_live_producer().unwrap());
+        h.send(EngineCommand::SetChannelParams {
+            slot: 2,
+            params: Box::new(crate::ChannelParams {
+                kind: crate::InstrumentKind::Synth,
+                gain: 1.0,
+                ..crate::ChannelParams::default()
+            }),
+        })
+        .unwrap();
+        h.send(EngineCommand::SetMetronome(false)).unwrap();
+        // No live channel yet: silence.
+        assert!(live.send(crate::LiveNote::on(60, 1.0)));
+        let mut buf = vec![0.0; 4800];
+        p.process(&mut buf);
+        assert!(buf.iter().all(|&s| s == 0.0));
+        assert!(live.send(crate::LiveNote::off(60)));
+        h.send(EngineCommand::SetLiveChannel(Some(2))).unwrap();
+        p.process(&mut buf);
+        assert!(live.send(crate::LiveNote::on(64, 0.8)));
+        p.process(&mut buf);
+        assert!(buf.iter().any(|&s| s.abs() > 0.01));
+        // Stopped: played but not reported.
+        let mut events = Vec::new();
+        h.poll_events(|e| events.push(e));
+        assert!(events.is_empty(), "{events:?}");
+
+        h.send(EngineCommand::Play).unwrap();
+        p.process(&mut buf);
+        assert!(live.send(crate::LiveNote::off(64)));
+        p.process(&mut buf);
+        h.poll_events(|e| events.push(e));
+        let notes: Vec<_> = events
+            .iter()
+            .filter_map(|e| match *e {
+                crate::EngineEvent::LiveNote {
+                    key,
+                    velocity,
+                    tick,
+                } => Some((key, velocity, tick)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notes.len(), 1);
+        let (key, velocity, tick) = notes[0];
+        assert_eq!((key, velocity), (64, 0.0));
+        // 4800 frames at 120 BPM = 192 ticks after play started.
+        assert!((tick - 192.0).abs() < 2.0, "{tick}");
+        // The key went up: the voice releases to silence.
+        let mut tail = vec![0.0; 48_000];
+        p.process(&mut tail);
+        assert!(tail[40_000..].iter().all(|s| s.abs() < 1e-4));
     }
 }

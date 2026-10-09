@@ -11,8 +11,12 @@
 //! Options: 16-bit or 24-bit PCM (with optional TPDF dither) or 32-bit float; any sample rate;
 //! peak normalization; the release and effect tails after the end (until silence, up to a
 //! limit); the whole song or the loop region; the full mix or one stem per playlist track.
+//!
+//! [`smf`] reads and writes Standard MIDI Files.
 
 #![forbid(unsafe_code)]
+
+pub mod smf;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

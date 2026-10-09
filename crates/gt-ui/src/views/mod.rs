@@ -3,6 +3,7 @@
 mod audio_panel;
 mod browser;
 mod channel_rack;
+mod midi_panel;
 mod mixer;
 mod modulators;
 mod piano_roll;
@@ -14,6 +15,7 @@ mod transport_bar;
 pub use audio_panel::{audio_panel, AudioAction, AudioPanelModel, BUFFER_SIZES};
 pub use browser::{browser, BrowserAction, BrowserEntry, BrowserModel};
 pub use channel_rack::{channel_rack, RackAction, RackState, RackView};
+pub use midi_panel::{midi_panel, MidiAction, MidiPanelModel, MidiPortRow};
 pub use mixer::{mixer_view, MixerState, MixerView, StripMeter};
 pub use modulators::{modulators_panel, ModulatorsState};
 pub use piano_roll::{

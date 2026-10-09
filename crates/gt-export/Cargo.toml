@@ -1,6 +1,6 @@
 [package]
 name = "gt-export"
-description = "GloomTunes Studio: offline rendering of projects to WAV files."
+description = "GloomTunes Studio: offline rendering of projects to WAV files, and MIDI files."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,3 +17,4 @@ gt-dsp.workspace = true
 gt-engine.workspace = true
 gt-project.workspace = true
 hound.workspace = true
+midly.workspace = true

@@ -6,6 +6,8 @@
 //!
 //! History:
 //! - 1 (Step 9): first released layout.
+//! - 1 (Step 10): gained the optional `midi_map` list (MIDI learn). No bump: older files simply
+//!   have none, and older builds ignore it.
 
 use serde_json::Value;
 

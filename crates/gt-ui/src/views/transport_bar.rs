@@ -1,4 +1,5 @@
-//! Transport bar: play/pause, stop, tempo, time signature, position, loop and metronome.
+//! Transport bar: play/pause, stop, record, tempo, time signature, position, loop, metronome
+//! and the typing keyboard.
 
 use egui::{DragValue, RichText, Ui};
 use gt_core::{Tick, TimeSig, TimeSigMap};
@@ -40,6 +41,14 @@ pub struct TransportModel {
     pub metronome: bool,
     /// False when no audio stream is open (controls still edit settings).
     pub audio_online: bool,
+    /// Recording is armed.
+    pub recording: bool,
+    /// Count-in beats still to come (0: not counting in).
+    pub count_in: u32,
+    /// The computer keyboard plays notes.
+    pub typing_keyboard: bool,
+    /// MIDI input activity, 0 to 1 (lights a dot).
+    pub midi_light: f32,
 }
 
 impl Default for TransportModel {
@@ -56,6 +65,10 @@ impl Default for TransportModel {
             // Off by default now that the rack plays a beat; one click turns it on.
             metronome: false,
             audio_online: false,
+            recording: false,
+            count_in: 0,
+            typing_keyboard: false,
+            midi_light: 0.0,
         }
     }
 }
@@ -77,6 +90,10 @@ pub enum TransportAction {
     LoopChanged,
     /// Metronome on/off.
     SetMetronome(bool),
+    /// Arm or disarm recording (starts playback with a count-in when stopped).
+    ToggleRecord,
+    /// Computer keyboard as a piano on/off.
+    ToggleTypingKeyboard,
 }
 
 /// Draws the bar. Edits change `m` in place and are reported as actions. `sigs` places bar
@@ -104,6 +121,14 @@ pub fn transport_bar(
         {
             actions.push(TransportAction::Stop);
         }
+        if icon_button(ui, theme, Icon::Record, m.recording)
+            .on_hover_text(
+                "Record notes into the current pattern (Ctrl+R). From stop, counts in first",
+            )
+            .clicked()
+        {
+            actions.push(TransportAction::ToggleRecord);
+        }
 
         for (song, label, tip) in [
             (false, "Pat", "Pattern mode: loop the current pattern (L)"),
@@ -127,8 +152,13 @@ pub fn transport_bar(
         } else {
             theme.text_dim
         };
+        let text = if m.count_in > 0 {
+            format!("Count-in {:>3}", m.count_in)
+        } else {
+            pos.to_string()
+        };
         ui.label(
-            RichText::new(pos.to_string())
+            RichText::new(text)
                 .monospace()
                 .size(theme.font_size + 6.0)
                 .color(colour),
@@ -202,6 +232,26 @@ pub fn transport_bar(
             m.metronome = !m.metronome;
             actions.push(TransportAction::SetMetronome(m.metronome));
         }
+        if ui
+            .add(egui::Button::selectable(m.typing_keyboard, "Keys"))
+            .on_hover_text(
+                "Typing keyboard: play the selected channel with Z S X D C … and Q 2 W 3 E …, \
+                 - and = change octave (Ctrl+T)",
+            )
+            .clicked()
+        {
+            actions.push(TransportAction::ToggleTypingKeyboard);
+        }
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+        let lit = m.midi_light.clamp(0.0, 1.0);
+        ui.painter().circle_filled(
+            rect.center(),
+            3.0,
+            theme
+                .text_dim
+                .gamma_multiply(0.4)
+                .lerp_to_gamma(theme.accent, lit),
+        );
     });
     actions
 }
@@ -212,6 +262,7 @@ enum Icon {
     Play,
     Pause,
     Stop,
+    Record,
 }
 
 fn icon_button(ui: &mut Ui, theme: &GloomTheme, icon: Icon, active: bool) -> egui::Response {
@@ -234,6 +285,10 @@ fn icon_button(ui: &mut Ui, theme: &GloomTheme, icon: Icon, active: bool) -> egu
                     egui::Rect::from_center_size(c + egui::vec2(dx, 0.0), egui::vec2(3.0, 12.0));
                 p.rect_filled(r, 0.0, colour);
             }
+        }
+        Icon::Record => {
+            let c_on = if active { theme.warn } else { theme.text };
+            p.circle_filled(c, 5.5, c_on);
         }
         Icon::Stop => {
             p.rect_filled(
