@@ -26,6 +26,30 @@ playlist, with built-in instruments and effects, wrapped in a dark, moody "Gloom
 - Built-in instruments (sampler, Gloom Synth) and effects, plus CLAP plugins.
 - All code, UI, sounds and presets original or CC0.
 
+## Installing
+
+Releases on GitHub carry three packages, each with a build-provenance attestation:
+
+- **Windows 10/11:** `GloomTunes-Studio-<version>-x64-setup.exe`. Installs for your user
+  without administrator rights (the first page offers all users), adds a Start menu entry and
+  can open `.gloom` projects. Until the project has a code-signing certificate, Windows
+  SmartScreen warns about an unknown publisher: **More info > Run anyway**.
+- **Ubuntu 22.04+ (.deb):** `sudo apt install ./gloomtunes-studio_<version>-1_amd64.deb`, then
+  start **GloomTunes Studio** from the app menu or run `gloomtunes`.
+- **Any recent Linux (AppImage):** `chmod +x GloomTunes-Studio-<version>-x86_64.AppImage` and
+  run it. It uses the system's ALSA and graphics libraries.
+
+To check that a file was built by this repository's release workflow:
+`gh attestation verify <file> --repo afterdamage/gloomtunes-studio`. When the release also
+has `SHA256SUMS.asc`, `gpg --verify SHA256SUMS.asc SHA256SUMS` and `sha256sum -c SHA256SUMS`
+check the GPG signature and the checksums.
+
+**Linux audio priority:** the app asks for real-time scheduling for its audio thread. If
+Settings > Performance says it was refused, add yourself to the `audio` group
+(`sudo usermod -aG audio $USER`, then log out and in) on a system whose
+`/etc/security/limits.d` grants that group `rtprio`, or install `rtkit`. Audio plays either
+way; real-time priority only makes dropouts under load less likely.
+
 ## Building and running
 
 You need a stable Rust toolchain from [rustup.rs](https://rustup.rs) (the repository pins
@@ -98,7 +122,33 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
   factory sounds and your own; **Save preset** writes the sound under the name beside it to
   `%APPDATA%\GloomTunes Studio\Presets\Gloom Synth` on Windows or
   `~/.local/share/gloomtunes-studio/presets/gloom-synth` on Linux, as a `.gloomsynth` JSON file.
-- **Audio** (top right) opens the device settings.
+- **First start:** a short wizard picks the audio output and buffer size (with a test tone),
+  an accent colour and text size, and asks whether to save crash reports (off unless you turn
+  it on). **Skip** keeps the defaults. Everything it sets is in Settings afterwards.
+- **Settings** (top right, **File > Settings…** or Ctrl+,), saved in `settings.json` next to
+  the presets:
+  - *Audio and MIDI*: output device, buffer size, sample rate (the device's default or any
+    standard rate it supports), MIDI inputs and recording options. On Windows an *Exclusive
+    mode* row explains that it is not available yet (use an ASIO build for the lowest latency).
+  - *Shortcuts*: every global command with its keys. **Set** waits for a key (Esc cancels);
+    a key already used elsewhere moves to the new command and a message says which.
+    **Clear**, **Default** and **Reset all** undo changes. Keys inside the piano roll,
+    playlist and rack and the typing keyboard's notes are fixed.
+  - *Theme*: accent presets, every colour of the Gloom theme, text size and corner radius;
+    **Reset to Gloom** restores the original.
+  - *Performance*: audio CPU load and peak, late callbacks and device underruns (**Reset**
+    zeroes them), buffer length, UI frame time, memory (Linux), startup time, renderer and
+    whether the audio thread got real-time priority.
+  - *Privacy*: the crash-report switch (below).
+- **CPU meter** (top right, next to the level meter): how much of each audio buffer's time the
+  engine needs, with a tick for the recent peak. It turns red for a few seconds after a
+  dropout (a callback that came too late, or an underrun reported by the device); if that
+  happens often, raise the buffer size. Click it for the Performance page.
+- **Crash reports (opt-in):** when switched on and the app crashes, a text report is saved in
+  `crashes/` in the data folder. At the next start the app shows it with **Report on
+  GitHub…**, which opens a new issue in your browser with the report filled in, for you to
+  read, edit and submit. Nothing is sent automatically, and nothing at all is saved while the
+  switch is off.
 - **Piano roll** (tab, **F7**, or right-click a channel name) edits the selected channel's notes
   in the current pattern; **F6** goes back to the channel rack.
   - Click to draw a note, drag it to move, drag its right edge to resize, right-click to delete.
@@ -157,8 +207,8 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
 - **MIDI and live playing:**
   - Every MIDI input is connected automatically, including ones plugged in while the app runs.
     Notes play the channel selected in the rack; the dot in the transport bar blinks on MIDI
-    input. The **Audio** button (top right) opens settings, which list the inputs (untick one
-    to ignore it).
+    input. **Settings > Audio and MIDI** lists the inputs (untick one to ignore it; the choice
+    is remembered).
   - **Keys** (Ctrl+T) turns the computer keyboard into a piano: Z S X D C V G B H N J M , is
     the bottom octave, Q 2 W 3 E R 5 T 6 Y 7 U I the one above; Minus and Equals change the
     octave. Ctrl shortcuts keep working.
@@ -195,6 +245,8 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+# Licenses, banned crates and sources against deny.toml (cargo install cargo-deny):
+cargo deny check
 # Golden export test on its own (exports a stored reference project and checks its hash):
 cargo test -p gt-export --test golden
 # Plugin host tests with the in-tree test plugins (gt-test-plugin):
@@ -213,6 +265,42 @@ cargo bench -p gt-dsp --bench fx
 # (cargo install cargo-insta) or accept it directly:
 cargo insta review          # or: INSTA_UPDATE=always cargo test -p gt-dsp --test synth_snapshot
 ```
+
+### Packaging and releases
+
+Shipped builds use the `dist` profile (thin LTO, no line tables; about 29 MB):
+
+```sh
+cargo build --profile dist --locked -p gt-app
+
+# Ubuntu .deb (cargo install cargo-deb) into dist/:
+cargo deb -p gt-app --profile dist --no-build --no-strip --output dist/
+# AppImage into dist/ (needs desktop-file-utils; downloads a pinned appimagetool once):
+packaging/linux/build-appimage.sh
+```
+
+```powershell
+# Windows installer into dist\ (Inno Setup 6: choco install innosetup)
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.0.0 packaging\windows\gloomtunes.iss
+```
+
+**Making a release:** set the version in the workspace `Cargo.toml` (`[workspace.package]
+version`), update `Cargo.lock` (`cargo build`), merge, then push a matching tag:
+
+```sh
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+`.github/workflows/release.yml` builds the three packages, writes `SHA256SUMS`, attests every
+file with Sigstore build provenance and opens a **draft** release with generated notes; check it
+and press **Publish**. **Actions > Release > Run workflow** builds the same files as artifacts
+without a release, and pull requests that change `packaging/` build them too. Optional
+repository secrets add signatures:
+
+| Secret | Adds |
+|---|---|
+| `WINDOWS_CERT_PFX` (base64 of a .pfx), `WINDOWS_CERT_PASSWORD` | Authenticode signatures on `gloomtunes.exe` and the installer |
+| `GPG_PRIVATE_KEY` (armored), `GPG_PASSPHRASE` | `SHA256SUMS.asc` |
 
 ### Environment variables
 

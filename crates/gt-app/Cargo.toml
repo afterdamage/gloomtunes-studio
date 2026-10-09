@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish = false
 
 [lints]
 workspace = true
@@ -30,9 +31,33 @@ log.workspace = true
 rfd.workspace = true
 midir.workspace = true
 env_logger.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [features]
 # Optional audio backends. Each needs extra system libraries; see README.md.
 asio = ["cpal/asio"]          # Windows: needs the Steinberg ASIO SDK (not shipped)
 jack = ["cpal/jack"]          # Linux: needs libjack-jackd2-dev
 pipewire = ["cpal/pipewire"]  # Linux: needs libpipewire-0.3-dev
+
+# Ubuntu/Debian package: `cargo deb -p gt-app` (see README, "Packaging").
+[package.metadata.deb]
+name = "gloomtunes-studio"
+maintainer = "Vasil Vasilev"
+copyright = "2026, Vasil Vasilev"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+A pattern-based digital audio workstation: channel rack with sampler and synth, piano roll, \
+playlist, mixer with effects, automation, MIDI input, audio export and CLAP plugins."""
+section = "sound"
+priority = "optional"
+depends = "$auto, xdg-utils"
+assets = [
+    ["target/release/gloomtunes", "usr/bin/", "755"],
+    ["../../packaging/linux/gloomtunes.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/gloomtunes.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["../../packaging/gloomtunes.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+    ["../../packaging/linux/gloomtunes.metainfo.xml", "usr/share/metainfo/io.github.afterdamage.gloomtunes.metainfo.xml", "644"],
+    ["../../packaging/linux/gloomtunes-mime.xml", "usr/share/mime/packages/gloomtunes.xml", "644"],
+    ["../../README.md", "usr/share/doc/gloomtunes-studio/", "644"],
+]

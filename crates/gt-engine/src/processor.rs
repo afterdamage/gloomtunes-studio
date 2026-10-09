@@ -10,6 +10,7 @@ use rtrb::{Consumer, Producer};
 use crate::channel::ChannelSlot;
 use crate::command::{EngineCommand, EngineEvent, Garbage, TransportState};
 use crate::control::{beats_of, ModClock, ModPlan, ParamDest};
+use crate::denormal::DenormalGuard;
 use crate::live::LiveNote;
 use crate::mixer::MixerEngine;
 use crate::plugin::{PluginContext, PluginTable};
@@ -202,6 +203,8 @@ impl AudioProcessor {
     /// get silence); a mono device gets their average. A trailing partial frame (which a correct
     /// device never delivers) is zeroed.
     pub fn process(&mut self, out: &mut [f32]) {
+        // Subnormals flush to zero while rendering, on the device thread and in export alike.
+        let _ftz = DenormalGuard::new();
         let ch = self.out_channels;
         let frames = out.len() / ch;
         let mut peak = 0.0_f32;

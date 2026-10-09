@@ -74,15 +74,6 @@ impl GloomApp {
         }
 
         let allowed = !ctx.text_edit_focused() && self.dialog.is_none();
-        if allowed {
-            use egui::{Key, Modifiers};
-            if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::T)) {
-                self.keyboard.on = !self.keyboard.on;
-            }
-            if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::R)) {
-                self.toggle_record();
-            }
-        }
         self.keyboard.octave = self.midi_model.octave;
         for n in self.keyboard.handle(ctx, allowed) {
             self.live.send(n);

@@ -1,0 +1,156 @@
+name: Release
+
+# Builds the Windows installer, the .deb and the AppImage, signs them and drafts a GitHub
+# release. Runs when a version tag (v1.0.0) is pushed; "Run workflow" builds the same files as
+# downloadable artifacts without a release, and pull requests that touch packaging build them
+# too (unsigned, not attested) so a broken installer shows up before a release.
+#
+# Signing:
+# - Always: a Sigstore build-provenance attestation for every file (keyless, tied to this
+#   workflow run). Verify with `gh attestation verify <file> --repo <owner>/<repo>`.
+# - Optional Authenticode for the .exe and installer: repository secrets WINDOWS_CERT_PFX
+#   (base64 of a .pfx) and WINDOWS_CERT_PASSWORD.
+# - Optional GPG signature of SHA256SUMS: secrets GPG_PRIVATE_KEY (armored) and GPG_PASSPHRASE.
+# Without those secrets the files are still attested, just not Authenticode/GPG signed.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/release.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Ubuntu packages
+    runs-on: ubuntu-22.04 # oldest supported Ubuntu, so the glibc requirement stays low
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system libraries and packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev \
+            desktop-file-utils
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check the tag matches the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="gt-app"))')
+          test "v$version" = "$GITHUB_REF_NAME" || {
+            echo "::error::tag $GITHUB_REF_NAME does not match version $version in Cargo.toml"
+            exit 1
+          }
+      - name: Build
+        run: cargo build --profile dist --locked -p gt-app
+      - name: .deb
+        run: |
+          cargo install cargo-deb --locked --version 3.8.0
+          # --no-strip keeps the symbol table, so crash reports name functions.
+          cargo deb -p gt-app --profile dist --no-build --no-strip --output dist/
+      - name: AppImage
+        run: packaging/linux/build-appimage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows installer
+    runs-on: windows-latest
+    env:
+      WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --profile dist --locked -p gt-app
+      - name: Prepare signing
+        if: env.WINDOWS_CERT_PFX != ''
+        shell: pwsh
+        run: |
+          $tool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName | Select-Object -Last 1
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+          "SIGNTOOL=$($tool.FullName)" | Out-File -Append $env:GITHUB_ENV
+      - name: Sign the program
+        if: env.WINDOWS_CERT_PFX != ''
+        shell: pwsh
+        run: |
+          & $env:SIGNTOOL sign /f "$env:RUNNER_TEMP\cert.pfx" /p $env:WINDOWS_CERT_PASSWORD `
+            /fd sha256 /tr http://timestamp.digicert.com /td sha256 target\dist\gloomtunes.exe
+      - name: Installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+            Where-Object name -eq 'gt-app' | Select-Object -ExpandProperty version
+          & $iscc "/DAppVersion=$version" packaging\windows\gloomtunes.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Sign the installer
+        if: env.WINDOWS_CERT_PFX != ''
+        shell: pwsh
+        run: |
+          & $env:SIGNTOOL sign /f "$env:RUNNER_TEMP\cert.pfx" /p $env:WINDOWS_CERT_PASSWORD `
+            /fd sha256 /tr http://timestamp.digicert.com /td sha256 (Get-ChildItem dist\*.exe).FullName
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Attest and draft the release
+    needs: [linux, windows]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write # create the release
+      id-token: write # Sigstore signing for the attestation
+      attestations: write
+    env:
+      GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+      GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: GPG signature
+        if: env.GPG_PRIVATE_KEY != ''
+        working-directory: dist
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          gpg --batch --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
+            --armor --detach-sign SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        if: github.event_name != 'pull_request'
+        with:
+          subject-path: dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: dist/*
+      - name: Draft the GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --draft --verify-tag --title "GloomTunes Studio ${GITHUB_REF_NAME#v}" --generate-notes

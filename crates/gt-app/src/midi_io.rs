@@ -141,6 +141,13 @@ impl MidiIo {
         }
     }
 
+    /// The ports the user switched off, by name (sorted, for the settings file).
+    pub fn disabled_ports(&self) -> Vec<String> {
+        let mut v: Vec<String> = lock(&self.shared.disabled).iter().cloned().collect();
+        v.sort();
+        v
+    }
+
     /// Controller messages received since the last call.
     pub fn take_cc(&self) -> Vec<MidiCc> {
         self.cc.try_iter().collect()

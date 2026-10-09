@@ -27,6 +27,20 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  deny:
+    name: licenses and advisories
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        # New advisories appear without any change here: report them, do not fail the build.
+        continue-on-error: true
+        with:
+          command: check advisories
+
   build:
     name: build + test (${{ matrix.os }})
     strategy:

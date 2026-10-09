@@ -22,8 +22,8 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 8 | Automation and parameter system | Done (2026-10-08) |
 | 9 | Save/load, export, recovery | Done (2026-10-08) |
 | 10 | MIDI input and recording | Done (2026-10-09) |
-| 11 | CLAP plugin hosting | **In review** |
-| 12 | Performance, polish, packaging | Next |
+| 11 | CLAP plugin hosting | Done (2026-10-09) |
+| 12 | Performance, polish, packaging | **In review** (v1.0) |
 
 ## Phases at a glance
 
@@ -319,6 +319,51 @@ for schedule; Phase E is the riskiest technically.
 - Windows installer, Ubuntu .deb and AppImage, signed release workflow, opt-in crash reporter,
   `cargo deny` license allow-list in CI.
 - **Milestone: v1.0.**
+- Delivered (2026-10-09), version 1.0.0:
+  - **Profiling.** The engine example `render_cost` now times every 256-frame callback of the
+    demo song. The slow callbacks came from subnormal floats in decaying filter and reverb
+    state; the audio thread now sets flush-to-zero (FTZ/DAZ) around every render (D82), which
+    cut the 99th-percentile callback from about 10 % to about 4.5 % of the buffer time and the
+    average from about 3.5 % to 2.6 % of real time, with output unchanged (the export golden
+    test still passes). The release app reaches its first frame in about 80 ms and uses about
+    40 MB of its own memory (the rest of the ~130 MB resident here is the software OpenGL
+    driver of the test machine). The piano roll with 10 000 notes draws in 6.8 ms (median), well inside 16 ms.
+    The measurements and how to repeat them are in ARCHITECTURE §7.9.
+  - **CPU and dropout meter** in the transport bar: the audio callback's load (time spent
+    rendering over the buffer's duration), a peak tick, and red for three seconds after a
+    late callback or a device underrun (D83). Click it for **Settings > Performance**: load,
+    late callbacks and underruns (with Reset), buffer, UI frame time, memory (Linux), startup
+    time, renderer, and whether the system refused real-time priority (D84).
+  - **Settings** window (the **Settings** button, **File > Settings…** or Ctrl+,) with tabs:
+    *Audio and MIDI* (device, buffer size, now also the sample rate; a Windows *exclusive mode*
+    row that explains why it is unavailable, D85), *Shortcuts* (every global command, Set /
+    Clear / Default, conflicts move the key and say so, D86), *Theme* (accent presets, every
+    colour, text size, corner radius, reset to Gloom), *Performance* and *Privacy*. Everything
+    is saved in `settings.json` in the data folder, including MIDI port choices and recording
+    options (D87).
+  - **First-run wizard**: sound (device, buffer, test tone), look (accent, text size), privacy
+    (crash reports, off by default), ready (plugins found; open the demo or start empty).
+  - **Opt-in crash reporter** (D88): when switched on, a panic writes a text report to
+    `<data>/crashes/`; at the next start the app shows it and offers **Report on GitHub…**,
+    which opens a pre-filled issue in the browser for the user to read and submit. Nothing is
+    sent automatically.
+  - **Packages** (D89, D90): a `dist` build profile (thin LTO, no line tables, 29 MB binary);
+    an Inno Setup installer for Windows (per-user by default, Start menu, optional desktop
+    icon, `.gloom` association); a `.deb` from `cargo deb` with the desktop entry, icons, MIME
+    type and AppStream metadata; an AppImage (`packaging/linux/build-appimage.sh`).
+    `.github/workflows/release.yml` builds all three on a `v*` tag, attests every file with
+    Sigstore build provenance, optionally Authenticode-signs the Windows files and GPG-signs
+    the checksums when those secrets exist, and drafts the GitHub release. Pull requests that
+    touch packaging build the packages too. `cargo deny` checks licenses, bans and sources in
+    CI (advisories are reported without failing).
+  - Known limits: WASAPI exclusive mode is not available (the audio library only opens shared
+    streams; ASIO builds are the low-latency route on Windows, D85); keys inside the piano
+    roll, playlist and rack and the typing keyboard's notes cannot be remapped; memory is shown
+    on Linux only; the Windows `.exe` itself has no embedded icon (the installer, shortcuts
+    and file association do); the installer and the Authenticode/GPG steps could not be run
+    here (no Windows machine, no certificate), only the `.deb` and AppImage were built and
+    started; the CPU meter measures the engine's render time, not time lost to the operating
+    system between callbacks, which only the underrun count shows.
 
 ---
 

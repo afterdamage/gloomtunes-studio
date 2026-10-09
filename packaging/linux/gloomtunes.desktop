@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=GloomTunes Studio
+GenericName=Digital Audio Workstation
+Comment=Pattern-based music production
+Exec=gloomtunes %f
+Icon=gloomtunes
+Terminal=false
+Categories=AudioVideo;Audio;Midi;Music;
+Keywords=DAW;music;sequencer;synthesizer;sampler;
+MimeType=application/x-gloomtunes-project;
+StartupWMClass=gloomtunes

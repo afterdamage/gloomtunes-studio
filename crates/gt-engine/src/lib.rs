@@ -12,14 +12,16 @@
 //! This crate deliberately does not depend on any audio device library: the device layer in
 //! `gt-app` calls `process`, and so can tests and offline export.
 
-// Unsafe code will be needed later for FTZ/DAZ flags (ARCHITECTURE.md §7.6); until then, none.
+// The only unsafe code is setting the FTZ/DAZ flags (ARCHITECTURE.md §7.6) in `denormal`.
 #![deny(unsafe_code)]
 
 mod atomic;
 mod channel;
 mod command;
 pub mod control;
+mod denormal;
 mod live;
+mod load;
 mod mixer;
 mod plugin;
 mod processor;
@@ -30,8 +32,10 @@ pub use atomic::AtomicF32;
 pub use channel::VOICES_PER_CHANNEL;
 pub use command::{EngineCommand, EngineEvent, Garbage, LoopRegion, TransportState};
 pub use control::{ModPlan, ParamDest};
+pub use denormal::DenormalGuard;
 pub use gt_core::MAX_CHANNELS;
 pub use live::{LiveInput, LiveNote, LIVE_CAPACITY};
+pub use load::LoadMeter;
 pub use mixer::{create_effect, EffectBox, MixerParams, StripParams, MAX_PDC_FRAMES};
 pub use plugin::{PluginBox, PluginContext, PluginProcessor, MAX_PLUGINS};
 pub use processor::{AudioProcessor, PREVIEW_GAIN, TEST_TONE_DBFS, TEST_TONE_HZ};
@@ -104,6 +108,15 @@ pub struct Telemetry {
     pub count_in_beats: AtomicU32,
     /// Per plugin table entry: the plugin failed (an error or invalid audio) and is bypassed.
     pub plugin_failed: [AtomicBool; MAX_PLUGINS],
+    /// Smoothed CPU load of the audio callback (1.0: the whole buffer time), written by the
+    /// device layer through [`LoadMeter`].
+    pub cpu_load: AtomicF32,
+    /// Highest single-callback load since the UI last reset it.
+    pub cpu_peak: AtomicF32,
+    /// Callbacks that took longer than the audio they rendered.
+    pub overloads: AtomicU32,
+    /// Buffer underruns the audio backend reported (xruns).
+    pub xruns: AtomicU32,
 }
 
 /// One strip's meter. The engine raises `peak` with `fetch_max` (the UI swaps it back to 0
@@ -140,6 +153,10 @@ impl Default for Telemetry {
             latency_frames: AtomicU32::default(),
             count_in_beats: AtomicU32::default(),
             plugin_failed: std::array::from_fn(|_| AtomicBool::default()),
+            cpu_load: AtomicF32::default(),
+            cpu_peak: AtomicF32::default(),
+            overloads: AtomicU32::default(),
+            xruns: AtomicU32::default(),
         }
     }
 }
@@ -214,6 +231,12 @@ impl EngineHandle {
     /// Read-only access to the published telemetry.
     pub fn telemetry(&self) -> &Telemetry {
         &self.telemetry
+    }
+
+    /// A shared reference to the telemetry, for device-layer callbacks that report into it
+    /// (the backend's xrun notifications).
+    pub fn shared_telemetry(&self) -> Arc<Telemetry> {
+        Arc::clone(&self.telemetry)
     }
 
     /// The configuration this engine was created with.

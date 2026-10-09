@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
@@ -19,7 +19,7 @@ gt-plugin-host = { path = "crates/gt-plugin-host" }
 gt-project = { path = "crates/gt-project" }
 gt-ui = { path = "crates/gt-ui" }
 
-cpal = "0.18"
+cpal = { version = "0.18", features = ["realtime"] }
 eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "glow", "wayland", "x11"] }
 egui = "0.36"
 log = "0.4"
@@ -53,3 +53,12 @@ opt-level = 2
 
 [profile.release]
 debug = 1
+
+[profile.dist]
+# Shipped builds (installers, .deb, AppImage): no line tables (crash reports still name the
+# functions), thin LTO and one codegen unit for a smaller, slightly faster binary.
+inherits = "release"
+debug = false
+strip = "debuginfo"
+lto = "thin"
+codegen-units = 1
