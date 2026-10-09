@@ -37,6 +37,8 @@ pub enum RackAction {
     NoteOff(usize),
     /// Open a channel in the piano roll.
     OpenPianoRoll(usize),
+    /// Open the plugin browser to add an instrument plugin.
+    AddPlugin,
 }
 
 /// Read-only playback information for the rack.
@@ -115,6 +117,13 @@ pub fn channel_rack(
                     .clicked()
                 {
                     add = Some(true);
+                }
+                if ui
+                    .button("+ Plugin")
+                    .on_hover_text("Add a channel playing a CLAP instrument plugin")
+                    .clicked()
+                {
+                    actions.push(RackAction::AddPlugin);
                 }
             });
         });

@@ -1,6 +1,6 @@
 # GloomTunes Studio: Architecture
 
-Status: **design baseline (Prompt 0); Steps 1 to 9 implemented** (see ROADMAP.md for what each delivered). This document is the contract that
+Status: **design baseline (Prompt 0); Steps 1 to 11 implemented** (see ROADMAP.md for what each delivered). This document is the contract that
 Prompts 1 to 12 implement; when an implementation step has to deviate, the step updates this file
 and adds an entry to the [decision log](#9-decision-log).
 
@@ -57,7 +57,8 @@ gloomtunes-studio/
 │   ├── gt-project/            # edits + undo/redo, save/load, migrations, validation
 │   ├── gt-export/             # offline render to WAV (Step 9), MIDI file import/export (Step 10)
 │   ├── gt-ui/                 # egui widgets, views, theme.rs
-│   ├── gt-plugin-host/        # CLAP hosting (Prompt 11; absent until then)
+│   ├── gt-plugin-host/        # CLAP hosting: scan, load, run, editors, crash guard (Step 11)
+│   ├── gt-test-plugin/        # two tiny CLAP plugins for tests and smoke tests (never shipped)
 │   └── gt-app/                # the binary: device I/O (cpal), MIDI I/O (midir), wiring
 ├── crates/gt-export/tests/fixtures/  # golden reference project (hash lives in tests/golden.rs)
 └── .github/workflows/         # CI: build, test, clippy, fmt on windows-latest + ubuntu-22.04
@@ -68,7 +69,7 @@ gloomtunes-studio/
 ```
              gt-app
            /   |    \  \
-       gt-ui   |     \  gt-plugin-host (later)
+       gt-ui   |     \  gt-plugin-host ── clack-host (CLAP)
        /  |    |      \   |
 gt-project |  gt-engine ──┘
        \   |   /    \
@@ -87,6 +88,9 @@ gt-export -> gt-engine, gt-project, gt-dsp, gt-core   (used by gt-app; Step 9; M
   `gt-app` so the golden test and the app share one export path (D62).
 - `gt-ui` depends on `gt-core`, `gt-project` and `gt-engine` (for the `EngineHandle` telemetry
   types). It contains no cpal or midir code.
+- `gt-plugin-host` (Step 11) depends on `gt-core` and `gt-engine`: it implements the engine's
+  `PluginProcessor` trait for CLAP, so the engine itself knows no plugin API (D73).
+  `gt-test-plugin` is only a dev-dependency of it.
 - `gt-app` is the only crate that touches audio/MIDI devices, the window, the filesystem
   locations of settings, and logging setup.
 
@@ -94,6 +98,10 @@ Workspace-wide lints: `clippy::all` denied in CI, `unsafe_code = "forbid"` in `g
 `gt-dsp`, `gt-project` and `gt-ui`. `unsafe` is permitted only in `gt-engine` (FTZ/DAZ flags,
 see §7.6), `gt-app` (platform thread priority) and `gt-plugin-host` (FFI), and every block needs
 a `// SAFETY:` comment.
+
+> **As built (Step 11):** `gt-app` stays `forbid(unsafe_code)`. `gt-plugin-host` is
+> `deny(unsafe_code)` with two allowed places: loading a plugin file (`PluginEntry::load`) and
+> the Win32 editor window. The CLAP calls themselves go through clack-host's safe wrappers.
 
 ### 2.1 gt-core
 
@@ -262,11 +270,114 @@ Theme: near-black backgrounds (several close greys for depth), muted desaturated
 colours, **one** strong accent, high-contrast text, compact spacing. Channel/track colours are
 user data but drawn desaturated through the theme so the accent stays dominant.
 
-### 2.6 gt-plugin-host (Prompt 11)
+### 2.6 gt-plugin-host (Step 11)
 
-CLAP hosting via `clack-host`. A `PluginNode` implements the engine's `Processor` trait. Scanning,
-instantiation and GUI windows run on the main thread; `process` runs on the audio thread. VST3 is
-designed but not implemented (§10 covers licensing).
+CLAP hosting via `clack-host` (D73). The engine sees plugins only through
+`gt_engine::PluginProcessor`; this crate implements it for CLAP and does everything else on the
+main (UI) thread.
+
+```rust
+pub struct PluginHost { .. }                 // owned by gt-app, driven once per UI frame
+impl PluginHost {
+    pub fn new(dir: &Path, exe: PathBuf, waker: Waker) -> (Self, CrashReport);
+    // finding plugins
+    pub fn start_scan(&mut self);            // background thread; one child process per file
+    pub fn catalog(&self) -> &Catalog;       // cached in plugins/catalog.json
+    pub fn set_folders(&mut self, extra: Vec<PathBuf>);
+    pub fn quarantine(&self) -> Vec<(PathBuf, String)>;  pub fn release(&mut self, file: &Path);
+    // instances
+    pub fn instantiate(&mut self, info: &PluginInfo) -> Result<PluginRef, String>;
+    pub fn sync(&mut self, project: &mut Project, engine: Option<&mut EngineHandle>,
+                fresh_engine: bool) -> SyncOutcome;
+    pub fn status(&self, id: PluginInstanceId) -> PluginStatus;  // Running/Waiting/Failed/Unavailable
+    pub fn retry(&mut self, id, engine);     pub fn hold(&mut self, project, reason);
+    // editors, saving, export
+    pub fn open_editor(&mut self, id, title) -> Result<(), String>;  pub fn close_editor(..);
+    pub fn store_states(&mut self, project: &mut Project);
+    pub fn export_processors(&mut self, project, rate) -> Vec<Box<PluginBox>>;
+    pub fn shutdown(&mut self);
+}
+```
+
+Modules:
+
+- `catalog`: plugin folders (`CLAP_PATH`, then `~/.clap`, `/usr/lib/clap` and `/usr/local/lib/clap` on Linux,
+  `%COMMONPROGRAMFILES%\CLAP` and `%LOCALAPPDATA%\Programs\Common\CLAP` on Windows, then the
+  user's own), a recursive `.clap` search and the scan. Each file is opened by a child process
+  (`gloomtunes --scan-clap <file>`) that prints the plugin descriptors as JSON; a crash or a
+  20 s hang only loses that file. Unchanged files (same size and modification time) are not
+  scanned again.
+- `guard`: the in-process safety net (D74). A marker names the plugin file during every risky
+  main-thread call (loading the file, creating, activating, restoring state, opening the
+  editor); if the app dies inside one, the next start quarantines that file. `session.json`
+  lists the plugin files in use while the app runs; after an unclean exit the recovery dialog
+  names them and offers **Recover without plugins**.
+- `host`: our side of the CLAP host API: log, params, state, latency, gui, timer, audio and
+  note ports, and posix-fd on Linux. Callbacks only set flags and wake the UI; the next
+  `sync` acts on them on the main thread.
+- `instance`: one plugin instance: parameters, state, render mode, port layout, activation.
+- `processor`: `ClapProcessor`, the audio-thread half (D76).
+- `manager`: `PluginHost` itself: keeps the running instances in step with the document,
+  feeds the engine, mirrors the plugins' own parameter changes back, runs timers and file
+  descriptors, restarts plugins that ask for it, and retires removed instances once the engine
+  has handed their processor back.
+- `window`: native top-level editor windows (X11 via `x11rb`, Win32 via `windows-sys`) that
+  plugin editors embed into (D79).
+
+Documents hold plugins as `gt_core::PluginRef` (format, id, name, vendor, kind, file hint,
+opaque state, parameter descriptions and normalized values, and a session-only instance id).
+A channel's instrument can be `Instrument::Plugin`; an effect slot can hold
+`EffectKind::Plugin` with its `PluginRef`. Parameters are addressed as
+`ParamId::Plugin { owner, plugin, id }`, so automation, modulators and MIDI learn work on
+them like on built-in parameters (D75).
+
+#### 2.6.1 VST3: design and licensing (not implemented)
+
+**Licensing.** The VST 3 SDK used to be dual-licensed: Steinberg's proprietary VST 3 license
+agreement, or GPLv3. GloomTunes is GPL-3.0-or-later, so either route was open, but the GPLv3
+route required the whole host to stay GPLv3-compatible (it is) and the proprietary route required
+signing Steinberg's agreement. Since SDK 3.8 (October 2025) Steinberg publishes the VST 3 SDK
+under the **MIT license**, which is compatible with our license with no agreement to sign.
+Separately from the code license, "VST" and the VST logo are Steinberg trademarks: showing the
+logo or calling the app "VST compatible" in marketing follows Steinberg's trademark guidelines,
+which are not part of the MIT grant. Plugins themselves are the user's own and are never
+shipped. *Before implementing, re-check the `LICENSE.txt` of the SDK version actually used and
+the current trademark guidelines; this write-up reflects what was published as of this step.*
+
+Rust options, both usable under our license:
+
+| Crate | What | License | Note |
+|---|---|---|---|
+| `vst3` (coupler-rs) | bindings generated from the SDK headers, plus COM helpers | MIT OR Apache-2.0 | Preferred: maintained, generated from the MIT SDK |
+| `vst3-sys` (RustAudio) | hand-written COM bindings | GPL-3.0 | Works for us, but older and less maintained |
+
+**Design.** VST3 slots into the same host without touching the engine or the document:
+
+1. `gt_core::PluginFormat::Vst3` (file key `vst3`); the project schema already stores `format`.
+2. A `vst3` module in `gt-plugin-host`, behind a cargo feature at first. Scanning finds `.vst3`
+   bundles (Windows: `%COMMONPROGRAMFILES%\VST3`; Linux: `~/.vst3`, `/usr/lib/vst3`,
+   `/usr/local/lib/vst3`), reads `Contents/Resources/moduleinfo.json` when present (no code
+   runs), and otherwise lists the factory's classes in the same child process as CLAP.
+3. An instance is the component (`IComponent` + `IAudioProcessor`) and its edit controller
+   (`IEditController`, separate or the same object), connected through `IConnectionPoint`.
+   Our host side implements `IHostApplication`, `IComponentHandler` (parameter edits from the
+   editor become the same mirrored "plugin changed it" events as CLAP's output events) and,
+   on Linux, `IRunLoop` (its timers and file descriptors map onto the existing UI-frame loop).
+4. A `Vst3Processor` implements `PluginProcessor`: `process` with 32-frame blocks,
+   `IParameterChanges` carrying our parameter events with sample offsets, `IEventList` for
+   notes, `ProcessContext` from `PluginContext`. Same bypass rules (error or non-finite output).
+5. Parameters are natively normalized in VST3, so the mirror maps one to one; stepped
+   parameters use `stepCount`. State is two streams (component and controller), stored in our
+   one opaque blob with a small header. Latency comes from `getLatencySamples` and changes with
+   `restartComponent(kLatencyChanged)`, handled like CLAP's restart.
+6. Editors are `IPlugView` attached to our existing native window (`HWND` or X11 window id),
+   with `IPlugFrame::resizeView` mapped to our window resize.
+7. The guard, quarantine, child-process scan, retry and "Recover without plugins" all apply
+   unchanged.
+
+Main risks: COM reference counting and threading rules (controller calls on the UI thread
+only) are easy to get wrong in `unsafe` code; Linux editors depend on a correct `IRunLoop`;
+many plugins only test against a few hosts. Estimated effort: 3 to 5 weeks, after v1.0.
 
 ### 2.7 gt-app
 
@@ -285,6 +396,9 @@ designed but not implemented (§10 covers licensing).
 - `live` and `app/midi.rs` (Step 10): the typing keyboard, the recorder (live notes into the
   current pattern, one undo step per take, latency compensation), MIDI learn and the MIDI file
   dialogs (D66-D72).
+- `app/plugins.rs` (Step 11): owns the `PluginHost`, syncs it every frame after the views, runs
+  the plugin browser and the plugin panels' requests; `main.rs` answers `--scan-clap <file>`
+  before any window opens (D74).
 - Logging (`log` + `env_logger`), never called from the audio thread.
 
 ---
@@ -297,7 +411,8 @@ designed but not implemented (§10 covers licensing).
 | Audio | cpal callback | `AudioProcessor::process` | allocate, free, lock, syscall, log, panic, wait |
 | MIDI in | midir callback | timestamp + push raw messages into its own queue | anything slow; it is effectively RT |
 | Workers (small pool) | gt-app | sample decode + resample, waveform peaks, large compiles, export, autosave serialization | touch the engine directly |
-| Plugin main (later) | gt-plugin-host | CLAP main-thread calls, GUIs | run on the audio thread |
+| Plugin main (Step 11) | gt-app UI thread via gt-plugin-host | CLAP main-thread calls, editors, timers, fds | run on the audio thread |
+| Plugin scan (Step 11) | a background thread in gt-plugin-host, one child process per file | open each plugin file and list its plugins as JSON | load plugin files into the app's own process |
 
 **Allowed on the audio thread:** arithmetic on preallocated buffers, reading/writing atomics,
 `rtrb` push/pop (wait-free), swapping `Box`/pointer ownership, `Arc` clone (an atomic increment).
@@ -390,6 +505,12 @@ pub enum EngineCommand {
 - If the command queue is full the UI keeps the latest value per `ParamSlot` in a small map and
   retries next frame. Parameter changes coalesce, so nothing important is lost; structural
   commands are never coalesced and simply retry.
+
+> **Step 11:** `SetPlugin { index, plugin: Option<Box<PluginBox>> }` installs or removes a
+> running plugin in the engine's table (the old one comes back as garbage, so its instance can
+> be deactivated on the main thread), `SetPluginParam { index, param, value }` sends one
+> normalized value, and `RetryPlugin(index)` clears a bypass. `Telemetry::plugin_failed` has a
+> flag per table entry.
 
 ### 4.2 MIDI thread to engine: `MidiMessage`
 
@@ -743,6 +864,14 @@ samples/<hash>.flac # optional embedded samples (lossless)
 > `path` (relative to the project file, '/'-separated), `absolute` and, when embedded,
 > `embedded`. There is no content hash in the document; relinking matches by file name.
 > Saves write `<name>.gloom.tmp` and rename it over the target.
+>
+> **Step 11 (D77):** `schema_version` 2 adds plugins. A plugin channel's instrument and a
+> plugin effect slot are saved as `{ format, id, name, vendor, kind, path, state, params }`,
+> where `params` lists each parameter (`id`, `name`, `default`, `steps`, `automatable`,
+> `hidden`, normalized `value`) and `state` names a zip entry `plugins/<fnv-64 hex>.bin` holding
+> the plugin's own saved state (identical states are stored once). The v1 to v2 migration has
+> nothing to do (v1 files cannot hold plugins); the golden export fixture deliberately stays a
+> v1 file so every CI run also loads and migrates an old version.
 
 JSON (not RON) was chosen because migrations operate on a `serde_json::Value` tree before typed
 deserialization, and every tool can read it. Each schema change bumps `schema_version` and adds a
@@ -914,6 +1043,11 @@ nodes from Prompt 6 even if all latencies are zero.
 > **As built (Step 6, D42):** the strips are a fixed mixer rather than a general node graph, and
 > compensation runs in `gt-engine/src/mixer.rs`: per strip a delay line on the channel input, the
 > output edge and each send edge, recomputed whenever the mixer settings or an effect change.
+>
+> **Step 11:** a CLAP effect's latency (the `latency` extension, read at activation) joins its
+> slot's latency in the same computation. A plugin that reports a new latency is restarted on
+> the main thread (deactivate, activate, hand the new processor over), which also recomputes
+> the compensation. An instrument plugin's latency is not compensated yet.
 
 ### 7.8 Platform specifics
 
@@ -938,7 +1072,7 @@ nodes from Prompt 6 even if all latencies are zero.
 | 3 | **egui performance** for piano roll and playlist (immediate mode redraws everything) | Laggy editing with large projects, high CPU while the audio runs | Custom painting with viewport culling, cached layout/meshes keyed by document generation, repaint only on change or playback, `puffin` profiling, 10k-note benchmark from Prompt 4 |
 | 4 | **Offline/real-time mismatch** | Exports that sound different from what the user heard | Single render path, anchored quantum grid, seeded randomness, no wall-clock; golden render tests per platform; cross-platform tolerance tests |
 | 5 | **Timing errors**: rounding at 44.1 kHz, tempo changes, loop wraps, swing, long sessions | Flams, drift, doubled or dropped notes at loop points | Integer ticks; absolute tick-to-sample conversion from anchors; half-open intervals everywhere; exhaustive scheduler tests at 44.1/48/96 kHz with odd buffer sizes (Prompt 2) |
-| 6 | **Third-party plugin instability** (Prompt 11) | A crashing plugin takes the whole DAW and the unsaved project with it | CLAP first; autosave before plugin load; bypass and quarantine on failure; out-of-process hosting evaluated as a follow-up; keep v1 usable with built-ins only |
+| 6 | **Third-party plugin instability** (Prompt 11) | A crashing plugin takes the whole DAW and the unsaved project with it | CLAP first; scanning in a child process; in-flight marker and quarantine for main-thread calls; bypass on error or NaN; crash recovery can open the project with its plugins off; out-of-process audio evaluated and deferred (D74); keep v1 usable with built-ins only |
 | 7 | **Denormals, NaN and Inf** in feedback DSP | CPU spikes on silence, permanently broken channels, speaker-damaging output | FTZ/DAZ; per-insert NaN guard; limiter on master by default in new projects; silence-input CPU tests; filter stability tests at extreme settings |
 | 8 | **Document/engine consistency** with undo, rapid edits and in-flight commands | Stale parameter writes, engine state that disagrees with the UI | One source of truth (the document); engine state derived only through compile; generation counters on graph and song; UI coalesces parameter writes |
 | 9 | **Project format evolution** | Old projects stop loading; silent data loss | Versioned schema with explicit migrations; on-disk fixtures for every version tested in CI; never remove a field without a migration; backup copy before overwriting an older-version file |
@@ -1026,3 +1160,65 @@ polled), and float determinism across compilers.
 | D70 | MIDI-learn bindings (`MidiBinding { channel, cc, param }`, CC 0 to 119, at most 256) live in the project and are saved in `project.json` as `midi_map` by parameter key, without a schema bump | A project should keep its controller map; an optional list needs no migration | Global (per-user) bindings next to per-project ones |
 | D71 | Hot-plug by polling the port list once a second on a background thread (10 s retries when MIDI itself is unavailable); ports are keyed by name, duplicates get " #2" | Neither Windows MME nor ALSA sequencer notifications are exposed by midir; polling is portable and cheap | A native notification API if midir gains one |
 | D72 | SMF import/export lives in `gt-export` (midly) and works from the compiled song events, so export matches what the engine plays; import builds one Gloom Synth channel per MIDI channel in a new pattern; recorded notes reach the engine with `UpdateSong`, which swaps the song without releasing voices | One source of truth for timing; recording must not cut the notes being played | General MIDI drum mapping to the sampler on import |
+| D73 | CLAP hosting through `clack-host` 0.2 in a new `gt-plugin-host` crate; the engine only knows a `PluginProcessor` trait and a table of up to 128 running plugins keyed by the document's `PluginInstanceId` (`SetPlugin`, `SetPluginParam`, `RetryPlugin`); channels and effect slots name the instance they use | Safe Rust wrappers over the CLAP ABI, permissive license; the engine stays format-agnostic (VST3 would add a second implementation, §2.6.1); moving a channel or effect never restarts its plugin | — |
+| D74 | Plugins run **in process**. Out-of-process audio was evaluated and deferred. What protects the app instead: scanning in a child process (`--scan-clap`, 20 s timeout); an in-flight marker around every risky main-thread call so a crash quarantines that file at the next start; `catch_unwind` around `process` plus bypass on an error or a non-finite sample; plugin log calls dropped on the audio thread; a session file so crash recovery names the plugins and can open the project with them switched off | A bridge process per plugin needs shared-memory audio and a cross-process wake-up every 32-frame block (or one block of extra latency), plus editors embedded across processes; that is weeks of platform code for a v1.1 feature. Most crashes happen at load or in the editor, which the marker covers | Users report crashes inside `process`, or a sandbox is needed for untrusted plugins: add a `gt-plugin-bridge` child per plugin behind the same `PluginProcessor` trait |
+| D75 | The document mirrors each plugin's parameters, normalized 0..1 (`PluginRef { params, values }`), and they are addressed as `ParamId::Plugin { owner, plugin: fnv32(id), id }`. Automation, modulators, MIDI learn and undo use the mirror; the host converts to plain values. Changes the plugin makes itself (its editor) come back as output events into the mirror without an undo step. When a plugin is loaded its saved state wins and the mirror is refreshed from it | One parameter path for built-in and hosted devices; the id hash stops automation from driving a different plugin that replaced it | Use the plugin's own value-to-text for display (sliders show percent of range today) |
+| D76 | `ClapProcessor` runs the plugin in the engine's 32-frame quantum with a transport event per block, notes as CLAP note events (or MIDI for MIDI-only ports) and parameter changes as sorted events, at most 512 per block (pushes never grow the buffers); output parameter events go to a 1024-entry ring the host drains | Same sample-accurate grid as built-in devices; no allocation on the audio thread | Larger blocks if per-call overhead shows in profiles (Step 12) |
+| D77 | Project schema 2: plugins are saved in `project.json` (format, id, name, vendor, kind, file hint, parameter list with values) with their state blobs as zip entries `plugins/<fnv-64>.bin`. The v1 to v2 migration is a no-op; the golden fixture stays a v1 file on purpose so CI always loads an old version | Opaque state stays binary and deduplicated; the parameter list keeps automation and the UI meaningful even when the plugin is missing | — |
+| D78 | Plugins are found by id, the saved file path is only a hint; a plugin that cannot be loaded keeps its state and values in the project (and in saves) and shows "Not loaded" with a Retry button | Projects move between machines and folders; nothing is lost when a plugin is missing | — |
+| D79 | Editors embed into a native top-level window of ours (X11 through `x11rb`, Win32 through `windows-sys`), falling back to the plugin's own floating window; the UI frame loop polls those windows and runs the plugins' timers (10 ms to 1 s) and file descriptors, asking for frames as needed. On Wayland, editors need XWayland | No dependency on a windowing toolkit beyond what egui uses; CLAP's X11 and Win32 APIs are what plugins support | Wayland-native editors when CLAP plugins support them |
+| D80 | Offline export uses fresh plugin instances created from the live state, switched to offline rendering, handed to `gt-export` and reused for every stem pass (reset in between); they are released when the export finishes | Export never disturbs what is playing; the same render path as real time | — |
+| D81 | An in-tree `gt-test-plugin` crate (built with `clack-plugin`) provides two small CLAP plugins, a gain effect with a "misbehave" switch and a sine/square instrument with an X11 editor, for tests and smoke tests; never shipped | Real third-party plugins cannot be downloaded in CI; misbehaviour must be testable on demand | — |
+
+---
+
+## 10. Dependencies and licenses
+
+Dependencies are introduced only when a step needs them. All are compatible with
+GPL-3.0-or-later. **Flagged** entries are copyleft or have special terms.
+
+| Crate | Purpose | License | Step |
+|---|---|---|---|
+| cpal | audio I/O | Apache-2.0 | 1 |
+| eframe / egui | GUI | MIT OR Apache-2.0 | 1 |
+| rtrb | lock-free SPSC queues | MIT OR Apache-2.0 | 2 |
+| assert_no_alloc | RT-safety checks (dev/debug) | BSD-2-Clause | 2 |
+| log, env_logger | logging | MIT OR Apache-2.0 | 1 |
+| symphonia 0.6 (`mp3` feature on) | decoding wav/flac/mp3/ogg | **MPL-2.0 (flag: file-level copyleft; compatible with GPL-3.0)**; added in Step 3 | 3 |
+| rubato 5 (+ audioadapter crates) | resampling | MIT OR Apache-2.0; added in Step 3 | 3 |
+| hound | WAV writing (Step 3: test-only; Step 9: export in `gt-export`) | Apache-2.0 | 3/9 |
+| serde, serde_json | serialization; added in Step 5 for presets | MIT OR Apache-2.0 | 5/9 |
+| zip 7 (`deflate-flate2-zlib-rs` only) | project container; added in Step 9 | MIT (zlib-rs: Zlib) | 9 |
+| rfd 0.17 | native open/save/folder dialogs (xdg portal on Linux, no GTK); added in Step 9 | MIT | 9 |
+| midir | MIDI I/O | MIT | 10 |
+| midly | SMF import/export | Unlicense | 10 |
+| clack-host, clack-extensions 0.2 (+ clack-common, clap-sys 0.5, libloading) | CLAP hosting; added in Step 11 | MIT OR Apache-2.0 (libloading: ISC) | 11 |
+| clack-plugin 0.2 | the in-tree test plugins (dev only) | MIT OR Apache-2.0 | 11 |
+| x11rb 0.13 (Linux) | plugin editor windows | MIT OR Apache-2.0 | 11 |
+| windows-sys 0.61 (Windows) | plugin editor windows | MIT OR Apache-2.0 | 11 |
+| libc (Unix) | `poll` for plugins' file descriptors | MIT OR Apache-2.0 | 11 |
+| criterion 0.8 (`cargo_bench_support` only, no plotters) | benchmarks (dev); added in Step 5 | MIT OR Apache-2.0 | 5 |
+| insta | snapshot tests (dev); added in Step 5 | Apache-2.0 | 5 |
+| puffin | profiling | MIT OR Apache-2.0 | 4/12 |
+| audio_thread_priority | RT priority on Linux | **MPL-2.0 (flag)** | 12 |
+| ASIO SDK (Windows, optional feature) | ASIO backend | **Steinberg terms (flag): not redistributed; user supplies it** | 12 |
+| VST3 SDK (design only, §2.6.1) | VST3 hosting | MIT since SDK 3.8 (earlier: GPLv3 or Steinberg's proprietary agreement); **flag: "VST" is a Steinberg trademark with its own usage guidelines** | — |
+
+Licenses are re-checked whenever a dependency is added; `cargo deny` (Step 12) enforces an
+allow-list in CI.
+
+---
+
+## 11. Testing strategy
+
+| Layer | What | Tool |
+|---|---|---|
+| gt-dsp | Frequency/impulse responses of filters and EQ, oscillator aliasing bounds, envelope timing, smoother convergence, silence-in/silence-out, no NaN at extreme parameters | `cargo test`, criterion |
+| Scheduler | Event frame positions at 44.1/48/96 kHz, tempo changes, loop wrap, odd buffer sizes, long-run drift | `cargo test` |
+| Engine | `process` under `assert_no_alloc`; graph patches keep node state; garbage is returned; plugins bypassed on error or NaN | `cargo test` |
+| Render | Short reference renders as `insta` snapshots (downsampled or hashed) | insta |
+| Project | Round-trip save/load (plugins with state since schema 2); every fixture version migrates; cycle rejection | `cargo test` |
+| Export | Golden project renders to a stored per-platform hash; cross-platform tolerance check; plugins render in every stem pass | `cargo test` |
+| Plugin host | The in-tree test plugins: listing, parameters both ways, notes, state round trip, bypass and retry, the host inside a real engine, quarantine after a crash marker | `cargo test` |
+| UI | Piano roll at 10k notes stays under 16 ms per frame | puffin + manual benchmark |
+| CI | build, test, clippy `-D warnings`, rustfmt check on windows-latest and ubuntu-22.04 | GitHub Actions |

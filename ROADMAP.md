@@ -21,9 +21,9 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 7 | Playlist / arrangement | Done (2026-10-08) |
 | 8 | Automation and parameter system | Done (2026-10-08) |
 | 9 | Save/load, export, recovery | Done (2026-10-08) |
-| 10 | MIDI input and recording | **In review** |
-| 11 | CLAP plugin hosting | Next (can move after v1.0) |
-| 12 | Performance, polish, packaging | Planned |
+| 10 | MIDI input and recording | Done (2026-10-09) |
+| 11 | CLAP plugin hosting | **In review** |
+| 12 | Performance, polish, packaging | Next |
 
 ## Phases at a glance
 
@@ -283,6 +283,30 @@ for schedule; Phase E is the riskiest technically.
 - VST3 design and licensing write-up only.
 - Recommendation: if the schedule slips, ship v1.0 with built-in instruments and effects (after
   Step 12) and deliver this step as v1.1. The architecture does not depend on it.
+- Delivered (2026-10-09): CLAP instruments and effects on Windows and Linux. The app scans the
+  standard CLAP folders (plus `CLAP_PATH` and folders you add) in the background at start,
+  opening each plugin file in a separate process so a broken file cannot take the app down.
+  **+ Plugin** in the channel rack adds an instrument as a new channel; **Plugin…** at the end
+  of a mixer slot's list adds an effect there. Each plugin gets a panel with its status, an
+  **Open editor** button (the plugin's own GUI in a native window) and a slider per parameter;
+  every slider can be automated, modulated and MIDI-learned from its right-click menu, and edits
+  made in the plugin's editor come back to the sliders (D75). Plugin state and parameters are
+  saved in the project (schema 2) and restored on load (D77); a missing plugin keeps its
+  settings and shows "Not loaded" (D78). Exports use fresh plugin instances in offline mode
+  (D80). Crash protection (D74): a plugin that reports an error or outputs NaN or infinity is
+  bypassed and can be retried; a crash while loading a plugin or opening its editor quarantines
+  that file at the next start (allow it again in the plugin browser); after any crash the
+  recovery dialog names the plugins that were loaded and can recover without them. VST3 is
+  designed with its licensing in ARCHITECTURE.md §2.6.1, not built. An in-tree test plugin
+  crate exercises all of this in CI (D81). Known limits: plugins run in the app's own process,
+  so a crash inside a plugin's audio processing still closes the app (out-of-process hosting
+  was evaluated and deferred, D74); plugins are loaded on the UI thread, so a slow plugin
+  pauses the interface while it loads; instrument plugin latency is not compensated (effect
+  latency is); parameter sliders show percent of range rather than the plugin's own units;
+  a plugin parameter is not reset to its slider value when automation of it stops; export
+  matches playback only as far as the plugin is deterministic; editors need X11 or XWayland on
+  Linux; no hardware or third-party plugin was available to test with here, only the test
+  plugins.
 
 ---
 
@@ -301,7 +325,7 @@ for schedule; Phase E is the riskiest technically.
 ## v1.0 scope
 
 In: everything in Steps 1 to 10 and 12 at their non-cut level.
-Optional for v1.0: Step 11 (CLAP).
+Optional for v1.0: Step 11 (CLAP), delivered.
 Out (post-v1 backlog):
 
 - **Audio recording from an input device.** Not in the current plan; most users will expect it.
@@ -309,7 +333,7 @@ Out (post-v1 backlog):
 - VST3 hosting.
 - Time-stretching and pitch-shifting of audio clips.
 - Tempo ramps (the tempo map currently has step changes only).
-- Out-of-process plugin sandbox (if not done in Step 11).
+- Out-of-process plugin sandbox (evaluated and deferred in Step 11, D74).
 - Additional built-in instruments (FM, wavetable, drum synth).
 - macOS (not a target; the architecture does not prevent it).
 

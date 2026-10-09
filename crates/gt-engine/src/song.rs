@@ -428,6 +428,8 @@ pub enum InstrumentKind {
     Sampler,
     /// Gloom Synth (uses `synth`).
     Synth,
+    /// A hosted instrument plugin (uses `plugin`).
+    Plugin,
 }
 
 /// Per-channel settings as the engine uses them. Sent boxed, see `EngineCommand`.
@@ -455,6 +457,8 @@ pub struct ChannelParams {
     pub adsr: Adsr,
     /// Mixer strip the channel plays into.
     pub route: u8,
+    /// The plugin instance it plays (when `kind` is `Plugin`).
+    pub plugin: Option<gt_core::PluginInstanceId>,
 }
 
 impl Default for ChannelParams {
@@ -471,6 +475,7 @@ impl Default for ChannelParams {
             looped: false,
             adsr: Adsr::default(),
             route: 0,
+            plugin: None,
         }
     }
 }
@@ -500,6 +505,10 @@ impl ChannelParams {
                     values: patch.values,
                     mods: patch.mods,
                 };
+            }
+            Instrument::Plugin(plugin) => {
+                p.kind = InstrumentKind::Plugin;
+                p.plugin = Some(plugin.instance);
             }
         }
         p

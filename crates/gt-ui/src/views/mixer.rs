@@ -5,12 +5,13 @@ use egui::{pos2, vec2, Color32, RichText, Sense, Shape, Stroke, Ui};
 use gt_core::effects::EQ_BANDS;
 use gt_core::mixer::FIRST_SEND;
 use gt_core::{
-    EffectKind, EffectSlot, Mixer, MixerStrip, ParamId, StripKind, StripParam, FX_SLOTS, MASTER,
-    SENDS, STRIPS,
+    EffectKind, EffectSlot, Mixer, MixerStrip, ParamId, PluginOwner, StripKind, StripParam,
+    FX_SLOTS, MASTER, SENDS, STRIPS,
 };
 use gt_dsp::fx::{eq_band_response, BandType};
 
 use crate::param_ui::param_menu;
+use crate::views::plugins::{plugin_controls, PluginAction, PluginPanelView, PluginState};
 use crate::widgets::{fader, format_gain, format_pan, knob, param_knob, stereo_meter};
 use crate::GloomTheme;
 
@@ -26,6 +27,10 @@ pub struct MixerState {
     pub slot: Option<usize>,
     /// EQ band shown in the EQ editor.
     pub eq_band: usize,
+    /// The user chose "Plugin…" for this (strip, slot): the app opens the plugin browser.
+    pub plugin_request: Option<(usize, usize)>,
+    /// What the user asked of the open slot's plugin this frame.
+    pub plugin_actions: Vec<PluginAction>,
 }
 
 impl Default for MixerState {
@@ -34,6 +39,8 @@ impl Default for MixerState {
             selected: MASTER,
             slot: None,
             eq_band: 2,
+            plugin_request: None,
+            plugin_actions: Vec::new(),
         }
     }
 }
@@ -67,6 +74,8 @@ pub struct MixerView<'a> {
     pub sample_rate: f32,
     /// Total effect latency to the output, in milliseconds.
     pub latency_ms: f32,
+    /// Status of the plugin in the open slot of the selected strip, if it holds one.
+    pub plugin: Option<&'a PluginPanelView>,
 }
 
 /// Strips in display order: master first, then inserts, then sends.
@@ -402,13 +411,25 @@ fn detail(
                 }
                 let current = slot.as_ref().map(|s| s.kind);
                 let mut pick = current;
+                let shown = slot.as_ref().map_or("—", |s| {
+                    s.plugin.as_ref().map_or(s.kind.name(), |p| p.name.as_str())
+                });
                 egui::ComboBox::from_id_salt(("mixer_fx", i, k))
                     .width(130.0)
-                    .selected_text(RichText::new(current.map_or("—", |k| k.name())).small())
+                    .height(320.0)
+                    .selected_text(RichText::new(shown).small())
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut pick, None, "Empty");
                         for kind in EffectKind::ALL {
                             ui.selectable_value(&mut pick, Some(kind), kind.name());
+                        }
+                        ui.separator();
+                        if ui
+                            .selectable_label(false, "Plugin…")
+                            .on_hover_text("Choose a CLAP effect plugin")
+                            .clicked()
+                        {
+                            state.plugin_request = Some((i, k));
                         }
                     });
                 if pick != current {
@@ -447,12 +468,27 @@ fn detail(
         if let Some(slot) = mixer.strips[i].slots[k].as_mut() {
             ui.add_space(4.0);
             ui.separator();
+            let title = slot
+                .plugin
+                .as_ref()
+                .map_or(slot.kind.name(), |p| p.name.as_str());
             ui.label(
-                RichText::new(format!("{} · slot {}", slot.kind.name(), k + 1))
+                RichText::new(format!("{title} · slot {}", k + 1))
                     .strong()
                     .color(theme.accent),
             );
-            changed |= if slot.kind == EffectKind::Eq {
+            changed |= if let Some(p) = slot.plugin.as_deref_mut() {
+                let owner = PluginOwner::Effect { strip: i, slot: k };
+                let missing = PluginPanelView {
+                    state: PluginState::Waiting,
+                    has_editor: false,
+                    editor_open: false,
+                };
+                let pv = view.plugin.unwrap_or(&missing);
+                plugin_controls(ui, theme, owner, p, pv, &mut state.plugin_actions)
+            } else if slot.kind == EffectKind::Plugin {
+                false
+            } else if slot.kind == EffectKind::Eq {
                 eq_editor(
                     ui,
                     theme,

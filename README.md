@@ -4,7 +4,9 @@ An original, open-source, pattern-based digital audio workstation written in Rus
 Windows 10/11 and Ubuntu 22.04+ from a single codebase. Channel rack, piano roll, mixer and
 playlist, with built-in instruments and effects, wrapped in a dark, moody "Gloom" interface.
 
-> **Status:** v0.1 alpha, Step 10 of the [roadmap](ROADMAP.md): a MIDI keyboard (plugged in any
+> **Status:** v0.1 alpha, Step 11 of the [roadmap](ROADMAP.md): CLAP instrument and effect
+> plugins load into the channel rack and the mixer, with their own editors, automatable
+> parameters, saved state and crash protection. A MIDI keyboard (plugged in any
 > time) or the computer keyboard plays the selected channel, takes record into the piano roll
 > with a count-in, any control can be MIDI-learned, and MIDI files import and export. Projects
 > save to `.gloom` files (optionally with their samples inside), autosave guards against
@@ -21,7 +23,7 @@ playlist, with built-in instruments and effects, wrapped in a dark, moody "Gloom
 - Pattern-based workflow: step sequencer, piano roll, mixer, playlist.
 - Rock-solid real-time audio: no allocation, locks or I/O on the audio thread.
 - Sample-accurate timing, and offline export that matches what you hear.
-- Built-in instruments (sampler, Gloom Synth) and effects; CLAP plugin hosting later.
+- Built-in instruments (sampler, Gloom Synth) and effects, plus CLAP plugins.
 - All code, UI, sounds and presets original or CC0.
 
 ## Building and running
@@ -166,6 +168,24 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
     buffer plus an extra amount if your notes land late.
   - Right-click a knob, fader or control and pick **MIDI learn**, then move a controller (Esc
     cancels). **Forget MIDI** removes the binding. Bindings are saved with the project.
+- **CLAP plugins:**
+  - At start the app looks for `.clap` files in `CLAP_PATH`, the standard folders
+    (`~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap` on Linux; `Common Files\CLAP` and
+    `%LOCALAPPDATA%\Programs\Common\CLAP` on Windows) and any folder added under **Folders**
+    in the plugin browser. Each file is opened by a separate process, so a broken one cannot
+    crash the app; **Rescan** looks again.
+  - **+ Plugin** in the channel rack opens the browser on instruments: **Add** makes a new
+    channel. In the mixer, **Plugin…** at the bottom of a slot's effect list opens it on effects
+    and adds to that slot.
+  - The plugin's panel (below the rack, or under the slot in the mixer) shows its status,
+    **Open editor** for its own window, and a slider per parameter (right-click to automate,
+    add an LFO or MIDI learn, like any knob). Changes made in the editor move the sliders.
+  - A plugin that fails (an error, or NaN in its output) is bypassed and shows **Retry**. If
+    the app closes while loading a plugin or opening its editor, that file is switched off at
+    the next start until you choose **Allow again** under **Problems** in the browser. After a
+    crash, **Recover without plugins** opens the autosave with its plugins off; retry each one.
+  - Plugin settings are saved inside the project; a plugin missing on another computer keeps
+    its settings and shows "Not loaded".
 - **Undo** and **Redo** (top right, Ctrl+Z and Ctrl+Shift+Z or Ctrl+Y) cover notes, steps,
   channels, patterns, the mixer, the playlist, modulators, tempo and time signatures and settings.
 
@@ -177,6 +197,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 # Golden export test on its own (exports a stored reference project and checks its hash):
 cargo test -p gt-export --test golden
+# Plugin host tests with the in-tree test plugins (gt-test-plugin):
+cargo test -p gt-plugin-host
+# Try the test plugins in the app: build them and install as a .clap file
+cargo build -p gt-test-plugin
+cp target/debug/libgt_test_plugin.so ~/.clap/gt_test_plugin.clap   # Windows: gt_test_plugin.dll to %LOCALAPPDATA%\Programs\Common\CLAP\gt_test_plugin.clap
 # Piano roll frame time with 10,000 notes (prints the median):
 cargo test --release -p gt-ui -- --ignored --nocapture
 # Engine cost of the demo song, as a share of real time:
@@ -196,6 +221,7 @@ cargo insta review          # or: INSTA_UPDATE=always cargo test -p gt-dsp --tes
 | `GT_RENDERER=glow` | Use OpenGL instead of wgpu (wgpu falls back to OpenGL automatically if it cannot start). |
 | `GT_AUDIO_HOST=<name>` | Pick a compiled-in audio host, e.g. `jack`, `pipewire`, `asio`. |
 | `RUST_LOG=debug` | More log output on the console. |
+| `CLAP_PATH` | Extra folders searched for CLAP plugins (separated like `PATH`). |
 
 ## License
 

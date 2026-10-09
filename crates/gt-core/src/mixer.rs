@@ -279,8 +279,17 @@ impl Mixer {
             {
                 s.sidechain = None;
             }
-            for slot in s.slots.iter_mut().flatten() {
-                slot.sanitize();
+            for slot in s.slots.iter_mut() {
+                if let Some(fx) = slot {
+                    fx.sanitize();
+                }
+                // A plugin slot whose plugin is gone is an empty slot.
+                if slot
+                    .as_ref()
+                    .is_some_and(|fx| fx.kind == crate::EffectKind::Plugin && fx.plugin.is_none())
+                {
+                    *slot = None;
+                }
             }
         }
         for i in 1..STRIPS {

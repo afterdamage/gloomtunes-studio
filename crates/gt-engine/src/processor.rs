@@ -12,6 +12,7 @@ use crate::command::{EngineCommand, EngineEvent, Garbage, TransportState};
 use crate::control::{beats_of, ModClock, ModPlan, ParamDest};
 use crate::live::LiveNote;
 use crate::mixer::MixerEngine;
+use crate::plugin::{PluginContext, PluginTable};
 use crate::song::{ChannelParams, SongSnapshot};
 use crate::transport::{EventBuf, EventKind, ScheduledEvent, Transport};
 use crate::{EngineConfig, Telemetry, FADE_SECONDS, RENDER_QUANTUM, SCOPE_LEN};
@@ -95,6 +96,8 @@ pub struct AudioProcessor {
     scope_slot: Option<usize>,
     /// Mixer strips, effects and routing.
     mixer: Box<MixerEngine>,
+    /// Hosted plugins (instruments and effects).
+    plugins: Box<PluginTable>,
 
     click: Click,
     click_gain: f32,
@@ -164,6 +167,7 @@ impl AudioProcessor {
             voice_age: 0,
             scope_slot: None,
             mixer: Box::new(MixerEngine::new(sr)),
+            plugins: Box::new(PluginTable::new()),
             click: Click::new(sr),
             click_gain: db_to_gain(CLICK_DBFS),
             metronome: true,
@@ -177,6 +181,15 @@ impl AudioProcessor {
             master: LinearRamp::new(1.0),
             fade_frames: (sr * FADE_SECONDS).round() as u32,
         }
+    }
+
+    /// Takes every plugin out of the engine, stopped (not real-time safe: for offline renders,
+    /// which reuse the plugins for the next pass).
+    pub fn take_plugins(&mut self) -> Vec<Box<crate::PluginBox>> {
+        let telemetry = Arc::clone(&self.telemetry);
+        (0..crate::MAX_PLUGINS)
+            .filter_map(|i| self.plugins.set(i, None, &telemetry))
+            .collect()
     }
 
     /// The telemetry this processor publishes (also visible through the `EngineHandle`).
@@ -274,8 +287,9 @@ impl AudioProcessor {
         self.click.add_to(&mut self.mono[cursor..]);
 
         self.apply_controls();
+        let pctx = self.plugin_context();
         for slot in 0..self.channels.len() {
-            self.render_channel(slot);
+            self.render_channel(slot, &pctx);
         }
         self.render_audio_clips();
         let bpm = self.transport.bpm_at(self.frame_clock) as f32;
@@ -283,6 +297,8 @@ impl AudioProcessor {
             &mut self.scratch_l,
             &mut self.scratch_r,
             bpm,
+            &mut self.plugins,
+            &pctx,
             &self.telemetry,
         );
         self.quantum_l.copy_from_slice(&self.scratch_l);
@@ -313,9 +329,116 @@ impl AudioProcessor {
         self.publish();
     }
 
+    /// Musical context of the quantum about to render, for plugins.
+    fn plugin_context(&self) -> PluginContext {
+        let now = self.frame_clock;
+        let pos = self.transport.position_at(now).max(0.0);
+        let sigs = self.transport.signatures();
+        let tick = pos.floor() as i64;
+        let bar = sigs.bar_of(tick);
+        let sig = sigs.sig_at(Tick(tick));
+        let ppq = gt_core::PPQ as f64;
+        PluginContext {
+            bpm: self.transport.bpm_at(now),
+            playing: self.transport.state() == TransportState::Playing,
+            beats: pos / ppq,
+            bar_start_beats: sigs.bar_start(bar) as f64 / ppq,
+            bar: i32::try_from(bar).unwrap_or(0),
+            sig_num: u16::from(sig.num),
+            sig_den: u16::from(sig.den),
+            steady_frames: now,
+        }
+    }
+
+    /// Renders a plugin channel: its notes go to the plugin at their offsets, one block is
+    /// processed, then gain and pan as for any channel.
+    fn render_plugin_channel(&mut self, slot: usize, pctx: &PluginContext) {
+        let index = self.channels[slot].plugin;
+        if !self.plugins.is_live(index) {
+            if self.scope_slot == Some(slot) {
+                self.scratch_l.fill(0.0);
+                self.write_scope();
+            }
+            return;
+        }
+        for e in self.scheduled.as_slice() {
+            match e.kind {
+                EventKind::NoteOn {
+                    slot: s,
+                    key,
+                    velocity,
+                } if usize::from(s) == slot => {
+                    self.plugins.note_on(index, e.offset, key, velocity);
+                }
+                EventKind::NoteOff { slot: s, key } if usize::from(s) == slot => {
+                    self.plugins.note_off(index, e.offset, key);
+                }
+                EventKind::Wrap => self.plugins.release_all(index, e.offset),
+                _ => {}
+            }
+        }
+        self.plugins.run_instrument(
+            index,
+            &mut self.scratch_l,
+            &mut self.scratch_r,
+            pctx,
+            &self.telemetry,
+        );
+        let ch = &mut self.channels[slot];
+        let (ml, mr) = self.mixer.direct_mut(usize::from(ch.route()));
+        let peak = ch.mix_into((&self.scratch_l, &self.scratch_r), (ml, mr));
+        self.telemetry.channel_peaks[slot].fetch_max(peak, Ordering::Relaxed);
+        if self.scope_slot == Some(slot) {
+            for (l, r) in self.scratch_l.iter_mut().zip(&self.scratch_r) {
+                *l = 0.5 * (*l + r);
+            }
+            self.write_scope();
+        }
+    }
+
+    /// Starts a note on a channel slot now (UI audition, live input).
+    fn slot_note_on(&mut self, slot: usize, key: u8, velocity: f32) {
+        let Some(ch) = self.channels.get_mut(slot) else {
+            return;
+        };
+        if ch.is_plugin() {
+            self.plugins.note_on(ch.plugin, 0, key, velocity);
+        } else {
+            self.voice_age += 1;
+            ch.note_on(key, velocity, self.voice_age);
+        }
+    }
+
+    /// Releases a note on a channel slot now.
+    fn slot_note_off(&mut self, slot: usize, key: u8) {
+        let Some(ch) = self.channels.get_mut(slot) else {
+            return;
+        };
+        if ch.is_plugin() {
+            self.plugins.note_off(ch.plugin, 0, key);
+        } else {
+            ch.note_off(key);
+        }
+    }
+
+    /// Points every plugin channel and effect slot at the table entry running its plugin.
+    fn resolve_plugins(&mut self) {
+        for ch in &mut self.channels {
+            ch.plugin = ch.plugin_instance().and_then(|id| self.plugins.find(id));
+        }
+        self.mixer.resolve_plugins(&self.plugins);
+        self.telemetry
+            .latency_frames
+            .store(self.mixer.latency() as u32, Ordering::Relaxed);
+    }
+
     /// Renders one channel: its voices split at the channel's note events (sample-accurate),
     /// then gain and pan, mixed into the quantum. Idle channels cost one scan of the events.
-    fn render_channel(&mut self, slot: usize) {
+    fn render_channel(&mut self, slot: usize, pctx: &PluginContext) {
+        if self.channels[slot].is_plugin() {
+            self.render_plugin_channel(slot, pctx);
+            return;
+        }
         let touches = |e: &&ScheduledEvent| match e.kind {
             EventKind::Wrap => true,
             k => k.slot() == Some(slot as u16),
@@ -451,6 +574,7 @@ impl AudioProcessor {
                     apply_param(
                         &mut self.channels,
                         &mut self.mixer,
+                        &mut self.plugins,
                         lane.dest,
                         lane.info.from_normalized(v),
                         frames,
@@ -481,6 +605,7 @@ impl AudioProcessor {
                     apply_param(
                         &mut self.channels,
                         &mut self.mixer,
+                        &mut self.plugins,
                         target.dest,
                         target
                             .info
@@ -496,6 +621,7 @@ impl AudioProcessor {
                 apply_param(
                     &mut self.channels,
                     &mut self.mixer,
+                    &mut self.plugins,
                     target.dest,
                     target.info.from_normalized(v.clamp(0.0, 1.0)),
                     ramp,
@@ -571,7 +697,11 @@ impl AudioProcessor {
 
     fn release_all_channels(&mut self) {
         for ch in &mut self.channels {
-            ch.release_all();
+            if ch.is_plugin() {
+                self.plugins.release_all(ch.plugin, 0);
+            } else {
+                ch.release_all();
+            }
         }
     }
 
@@ -646,10 +776,16 @@ impl AudioProcessor {
             }
             EngineCommand::SetChannelParams { slot, params } => {
                 if let Some(ch) = self.channels.get_mut(usize::from(slot)) {
+                    let before = ch.plugin;
                     if ch.is_active() {
                         ch.set_params(*params);
                     } else {
                         ch.set_params_now(*params);
+                    }
+                    ch.plugin = ch.plugin_instance().and_then(|id| self.plugins.find(id));
+                    if before.is_some() && before != ch.plugin {
+                        // The channel stopped playing that plugin: let its notes end.
+                        self.plugins.release_all(before, 0);
                     }
                 }
                 self.retire(Garbage::Params(params));
@@ -668,23 +804,32 @@ impl AudioProcessor {
                 slot,
                 key,
                 velocity,
-            } => {
-                self.voice_age += 1;
-                if let Some(ch) = self.channels.get_mut(usize::from(slot)) {
-                    ch.note_on(key, velocity, self.voice_age);
-                }
-            }
-            EngineCommand::NoteOff { slot, key } => {
-                if let Some(ch) = self.channels.get_mut(usize::from(slot)) {
-                    ch.note_off(key);
-                }
-            }
+            } => self.slot_note_on(usize::from(slot), key, velocity),
+            EngineCommand::NoteOff { slot, key } => self.slot_note_off(usize::from(slot), key),
             EngineCommand::SetMixer(params) => {
                 self.mixer.set_params(&params);
+                self.mixer.resolve_plugins(&self.plugins);
                 self.telemetry
                     .latency_frames
                     .store(self.mixer.latency() as u32, Ordering::Relaxed);
                 self.retire(Garbage::Mixer(params));
+            }
+            EngineCommand::SetPlugin { index, plugin } => {
+                let old = self
+                    .plugins
+                    .set(usize::from(index), plugin, &self.telemetry);
+                self.resolve_plugins();
+                if let Some(old) = old {
+                    self.retire(Garbage::Plugin(old));
+                }
+            }
+            EngineCommand::SetPluginParam {
+                index,
+                param,
+                value,
+            } => self.plugins.set_param_at(index, param, value),
+            EngineCommand::RetryPlugin(index) => {
+                self.plugins.retry(usize::from(index), &self.telemetry);
             }
             EngineCommand::SetEffect {
                 strip,
@@ -741,6 +886,7 @@ impl AudioProcessor {
             // Effects start from silence at play, so a capture from a stopped transport matches
             // an offline export of the same range (ARCHITECTURE.md §7.5).
             self.mixer.reset_effects();
+            self.plugins.reset_all();
         }
         if before != after {
             self.post(EngineEvent::TransportChanged {
@@ -824,22 +970,17 @@ impl AudioProcessor {
             if n.is_on() {
                 // A key struck again before its release ends the old note first.
                 if let Some(old) = self.live_held[k].checked_sub(1) {
-                    if let Some(ch) = self.channels.get_mut(usize::from(old)) {
-                        ch.note_off(n.key);
-                    }
+                    self.slot_note_off(usize::from(old), n.key);
                     self.live_held[k] = 0;
                 }
                 if let Some(slot) = self.live_slot {
-                    if let Some(ch) = self.channels.get_mut(usize::from(slot)) {
-                        self.voice_age += 1;
-                        ch.note_on(n.key, n.velocity, self.voice_age);
+                    if usize::from(slot) < self.channels.len() {
+                        self.slot_note_on(usize::from(slot), n.key, n.velocity);
                         self.live_held[k] = slot + 1;
                     }
                 }
             } else if let Some(slot) = self.live_held[k].checked_sub(1) {
-                if let Some(ch) = self.channels.get_mut(usize::from(slot)) {
-                    ch.note_off(n.key);
-                }
+                self.slot_note_off(usize::from(slot), n.key);
                 self.live_held[k] = 0;
             }
             if playing {
@@ -892,6 +1033,7 @@ impl AudioProcessor {
 fn apply_param(
     channels: &mut [ChannelSlot],
     mixer: &mut MixerEngine,
+    plugins: &mut PluginTable,
     dest: ParamDest,
     value: f32,
     ramp: u32,
@@ -927,6 +1069,7 @@ fn apply_param(
             usize::from(index),
             value,
         ),
+        ParamDest::Plugin { instance, index } => plugins.set_param(instance, index, value),
     }
 }
 
@@ -1313,5 +1456,105 @@ mod tests {
         let mut tail = vec![0.0; 48_000];
         p.process(&mut tail);
         assert!(tail[40_000..].iter().all(|s| s.abs() < 1e-4));
+    }
+
+    #[test]
+    fn plugins_play_as_instruments_and_effects_and_are_bypassed_when_they_fail() {
+        use crate::plugin::tests::fake;
+        use gt_core::{PluginInstanceId, MASTER};
+        let (mut h, mut p) = engine(48_000, 2);
+        let synth = PluginInstanceId(9001);
+        let fx = PluginInstanceId(9002);
+        h.send(EngineCommand::SetMetronome(false)).unwrap();
+        // The channel names its plugin before the plugin arrives: silent until it does.
+        h.send(EngineCommand::SetChannelParams {
+            slot: 0,
+            params: Box::new(crate::ChannelParams {
+                kind: crate::InstrumentKind::Plugin,
+                plugin: Some(synth),
+                gain: 1.0,
+                pan: 0.0,
+                route: MASTER as u8,
+                ..crate::ChannelParams::default()
+            }),
+        })
+        .unwrap();
+        h.send(EngineCommand::NoteOn {
+            slot: 0,
+            key: 60,
+            velocity: 1.0,
+        })
+        .unwrap();
+        let mut buf = vec![0.0; 2 * 256];
+        p.process(&mut buf);
+        assert!(buf.iter().all(|&s| s == 0.0));
+        h.send(EngineCommand::SetPlugin {
+            index: 5,
+            plugin: Some(fake(synth, 1.0)),
+        })
+        .unwrap();
+        h.send(EngineCommand::NoteOn {
+            slot: 0,
+            key: 60,
+            velocity: 1.0,
+        })
+        .unwrap();
+        p.process(&mut buf);
+        let level = buf[buf.len() - 2];
+        // The fake instrument outputs 0.5 while a note is held; centre pan is -3 dB.
+        assert!(
+            (level - 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-3,
+            "{level}"
+        );
+
+        // An effect plugin on the master halves the signal; its parameter sets the gain.
+        let mut mixer = crate::MixerParams::default();
+        mixer.strips[MASTER].fx_plugin[0] = Some(fx);
+        mixer.strips[MASTER].enabled[0] = true;
+        h.send(EngineCommand::SetMixer(Box::new(mixer))).unwrap();
+        h.send(EngineCommand::SetPlugin {
+            index: 6,
+            plugin: Some(fake(fx, 0.5)),
+        })
+        .unwrap();
+        p.process(&mut buf);
+        let half = buf[buf.len() - 2];
+        assert!((half - level * 0.5).abs() < 1e-3, "{half}");
+        h.send(EngineCommand::SetPluginParam {
+            index: 6,
+            param: 0,
+            value: 0.25,
+        })
+        .unwrap();
+        p.process(&mut buf);
+        assert!((buf[buf.len() - 2] - level * 0.25).abs() < 1e-3);
+
+        // The effect starts producing NaN: it is bypassed and flagged, the mix stays finite.
+        h.send(EngineCommand::SetPluginParam {
+            index: 6,
+            param: 1,
+            value: 1.0,
+        })
+        .unwrap();
+        p.process(&mut buf);
+        assert!(buf.iter().all(|s| s.is_finite()));
+        assert!((buf[buf.len() - 2] - level).abs() < 1e-3, "passes through");
+        assert!(h.telemetry().plugin_failed[6].load(Ordering::Relaxed));
+        assert!(!h.telemetry().plugin_failed[5].load(Ordering::Relaxed));
+
+        // Taking a plugin out hands it back as garbage; its channel goes quiet.
+        h.send(EngineCommand::SetPlugin {
+            index: 5,
+            plugin: None,
+        })
+        .unwrap();
+        p.process(&mut buf);
+        assert_eq!(
+            h.collect_garbage(),
+            3,
+            "the mixer box, the params box and the plugin"
+        );
+        p.process(&mut buf);
+        assert!(buf.iter().all(|&s| s == 0.0));
     }
 }

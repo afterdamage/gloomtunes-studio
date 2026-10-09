@@ -12,6 +12,16 @@ mod live;
 mod midi_io;
 
 fn main() -> eframe::Result {
+    // Started by the plugin scanner to look inside one plugin file, out of harm's way.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(std::ffi::OsStr::new(gt_plugin_host::SCAN_SWITCH)) {
+        let file = args
+            .next()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        std::process::exit(gt_plugin_host::catalog::scan_child_main(&file));
+    }
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     // wgpu (Vulkan/DX12) is the default renderer. If it cannot start, e.g. no Vulkan driver,

@@ -104,6 +104,8 @@ pub enum Dialog {
     Recover {
         /// When the autosave was written, for display.
         when: String,
+        /// Plugin files loaded when the last session ended.
+        plugins: Vec<String>,
     },
     Unsaved {
         name: String,
@@ -141,7 +143,8 @@ pub enum DialogAction {
         from: PathBuf,
         to: PathBuf,
     },
-    Recover,
+    /// Recover; `true` keeps the project's plugins from loading until retried.
+    Recover(bool),
     DiscardRecovery,
     /// "Save changes?" answered: save first (`true`) or discard.
     Unsaved {
@@ -326,14 +329,33 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
                     action = Some(DialogAction::Close);
                 }
             }
-            Dialog::Recover { when } => {
+            Dialog::Recover { when, plugins } => {
                 ui.label(format!(
                     "GloomTunes Studio did not close normally last time. An autosave from \
                      {when} is available."
                 ));
+                if !plugins.is_empty() {
+                    ui.label(
+                        RichText::new(format!(
+                            "These plugins were loaded at the time and may have caused it: {}",
+                            plugins.join(", ")
+                        ))
+                        .small(),
+                    );
+                }
                 ui.horizontal(|ui| {
                     if ui.button("Recover").clicked() {
-                        action = Some(DialogAction::Recover);
+                        action = Some(DialogAction::Recover(false));
+                    }
+                    if !plugins.is_empty()
+                        && ui
+                            .button("Recover without plugins")
+                            .on_hover_text(
+                                "Open it with its plugins switched off; retry each one from its panel",
+                            )
+                            .clicked()
+                    {
+                        action = Some(DialogAction::Recover(true));
                     }
                     if ui.button("Discard").clicked() {
                         action = Some(DialogAction::DiscardRecovery);

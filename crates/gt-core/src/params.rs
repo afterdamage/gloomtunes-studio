@@ -15,6 +15,7 @@ use crate::mixer::{MixerStrip, StripKind, FX_SLOTS, MASTER, SENDS, STRIPS};
 use crate::param::ParamCurve::{Linear, Power};
 use crate::param::ParamUnit::{Gain, Pan, Percent, Semitones, SignedPercent};
 use crate::param::{ParamCurve, ParamInfo, ParamUnit};
+use crate::plugin::{PluginOwner, PluginRef};
 use crate::project::{Channel, ChannelId, Instrument, Project};
 use crate::synth::{SynthParam, MOD_SLOTS};
 
@@ -151,6 +152,9 @@ static STRIP_VOLUME: ParamInfo = info(
 static STRIP_PAN: ParamInfo = info("pan", "Pan", (-1.0, 1.0, 0.0), Linear, Pan);
 static STRIP_SEND: ParamInfo = info("send", "Send", (0.0, 1.0, 0.0), Linear, Gain);
 static MOD_AMOUNT: ParamInfo = info("amount", "Amount", (-1.0, 1.0, 0.0), Linear, SignedPercent);
+/// Plugin parameters are handled normalized (0..1 of the plugin's own range); the plugin host
+/// converts, and the plugin formats the value for display.
+static PLUGIN_PARAM: ParamInfo = info("value", "Value", (0.0, 1.0, 0.0), Linear, Percent);
 
 /// Stable address of one automatable parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -194,6 +198,16 @@ pub enum ParamId {
         /// Index in [`EffectKind::params`].
         index: usize,
     },
+    /// A parameter of a plugin (a channel's instrument or an effect slot). Valid only while
+    /// the owner holds the plugin it was made for.
+    Plugin {
+        /// Where the plugin sits.
+        owner: PluginOwner,
+        /// [`PluginRef::id_hash`] of the plugin.
+        plugin: u32,
+        /// The plugin's id for the parameter.
+        id: u32,
+    },
 }
 
 impl ParamId {
@@ -225,6 +239,16 @@ impl ParamId {
                 StripParam::Send(_) => &STRIP_SEND,
             },
             Self::Effect { kind, index, .. } => kind.params().get(index).unwrap_or(&MOD_AMOUNT),
+            Self::Plugin { .. } => &PLUGIN_PARAM,
+        }
+    }
+
+    /// The parameter `id` of `plugin`, sitting at `owner`.
+    pub fn plugin_param(owner: PluginOwner, plugin: &PluginRef, id: u32) -> Self {
+        Self::Plugin {
+            owner,
+            plugin: plugin.id_hash(),
+            id,
         }
     }
 
@@ -254,6 +278,12 @@ impl ParamId {
                 kind.key(),
                 kind.params().get(index).map_or("?", |p| p.key)
             ),
+            Self::Plugin { owner, plugin, id } => match owner {
+                PluginOwner::Channel(c) => format!("channel/{}/plugin/{plugin:08x}/{id}", c.0),
+                PluginOwner::Effect { strip, slot } => {
+                    format!("mixer/{strip}/fx/{slot}/plugin/{plugin:08x}/{id}")
+                }
+            },
         }
     }
 
@@ -266,6 +296,11 @@ impl ParamId {
             ["channel", id, rest @ ..] => {
                 let channel = ChannelId(id.parse().ok()?);
                 match rest {
+                    ["plugin", h, k] => Some(Self::Plugin {
+                        owner: PluginOwner::Channel(channel),
+                        plugin: u32::from_str_radix(h, 16).ok()?,
+                        id: k.parse().ok()?,
+                    }),
                     ["synth", k] => Some(Self::Synth {
                         channel,
                         param: SynthParam::from_key(k)?,
@@ -287,6 +322,16 @@ impl ParamId {
                     ["volume"] => StripParam::Volume,
                     ["pan"] => StripParam::Pan,
                     ["send", k] => StripParam::Send(num(k).filter(|&k| k < SENDS)?),
+                    ["fx", slot, "plugin", h, k] => {
+                        return Some(Self::Plugin {
+                            owner: PluginOwner::Effect {
+                                strip,
+                                slot: num(slot).filter(|&s| s < FX_SLOTS)?,
+                            },
+                            plugin: u32::from_str_radix(h, 16).ok()?,
+                            id: k.parse().ok()?,
+                        });
+                    }
                     ["fx", slot, kind, k] => {
                         let kind = EffectKind::from_key(kind)?;
                         return Some(Self::Effect {
@@ -309,9 +354,21 @@ impl ParamId {
         match *self {
             Self::Channel { channel, .. }
             | Self::Synth { channel, .. }
-            | Self::SynthMod { channel, .. } => Some(channel),
+            | Self::SynthMod { channel, .. }
+            | Self::Plugin {
+                owner: PluginOwner::Channel(channel),
+                ..
+            } => Some(channel),
             _ => None,
         }
+    }
+
+    /// The plugin this parameter belongs to, if it exists and is still the one it was made for.
+    pub fn plugin_ref<'p>(&self, project: &'p Project) -> Option<&'p PluginRef> {
+        let Self::Plugin { owner, plugin, .. } = *self else {
+            return None;
+        };
+        project.plugin(owner).filter(|p| p.id_hash() == plugin)
     }
 
     /// The control's own label, e.g. "Volume", "Filter Cutoff", "Mod 3 amount", "B1 Freq".
@@ -335,6 +392,7 @@ impl ParamId {
                     None => p.name.to_owned(),
                 }
             }
+            Self::Plugin { id, .. } => format!("Parameter {id}"),
         }
     }
 
@@ -359,6 +417,24 @@ impl ParamId {
             Self::Strip { strip: s, .. } => format!("{} · {}", strip(s), self.label()),
             Self::Effect { strip: s, kind, .. } => {
                 format!("{} · {} · {}", strip(s), kind.name(), self.label())
+            }
+            Self::Plugin { owner, id, .. } => {
+                let place = match owner {
+                    PluginOwner::Channel(c) => project.channel_index(c).map_or_else(
+                        || "(deleted)".to_owned(),
+                        |i| project.channels[i].name.clone(),
+                    ),
+                    PluginOwner::Effect { strip: s, .. } => strip(s),
+                };
+                match self.plugin_ref(project) {
+                    Some(p) => {
+                        let param = p
+                            .param_index(id)
+                            .map_or_else(|| self.label(), |i| p.params[i].name.clone());
+                        format!("{place} · {} · {param}", p.name)
+                    }
+                    None => format!("{place} · (plugin gone) · {}", self.label()),
+                }
             }
         }
     }
@@ -419,6 +495,7 @@ impl ParamId {
                 }
                 slot.params.get(index).copied()
             }
+            Self::Plugin { id, .. } => self.plugin_ref(project)?.value(id),
         }
     }
 
@@ -509,6 +586,10 @@ impl ParamId {
                 slot.params[index] = v;
                 true
             }
+            Self::Plugin { owner, plugin, id } => project
+                .plugin_mut(owner)
+                .filter(|p| p.id_hash() == plugin)
+                .is_some_and(|p| p.set_value(id, v)),
         }
     }
 
@@ -553,7 +634,19 @@ impl ParamId {
             );
             out.extend((0..MOD_SLOTS).map(|slot| Self::SynthMod { channel, slot }));
         }
+        if let Some(p) = ch.plugin() {
+            out.extend(Self::of_plugin(PluginOwner::Channel(channel), p));
+        }
         out
+    }
+
+    /// The automatable parameters of a plugin that the plugin does not hide.
+    pub fn of_plugin(owner: PluginOwner, plugin: &PluginRef) -> impl Iterator<Item = ParamId> + '_ {
+        plugin
+            .params
+            .iter()
+            .filter(|p| p.automatable && !p.hidden)
+            .map(move |p| Self::plugin_param(owner, plugin, p.id))
     }
 
     /// The parameters of one mixer strip, its sends and the effects in its slots.
@@ -567,6 +660,9 @@ impl ParamId {
         }
         if let Some(s) = project.mixer.strips.get(strip) {
             for (slot, fx) in s.slots.iter().enumerate() {
+                if let Some(p) = fx.as_ref().and_then(|f| f.plugin.as_deref()) {
+                    out.extend(Self::of_plugin(PluginOwner::Effect { strip, slot }, p));
+                }
                 if let Some(fx) = fx {
                     out.extend((0..fx.kind.params().len()).map(|index| Self::Effect {
                         strip,
@@ -618,7 +714,16 @@ mod tests {
     fn every_parameter_round_trips_its_key_and_value() {
         let mut p = Project::demo();
         p.mixer.strips[3].slots[4] = Some(EffectSlot::new(EffectKind::Eq));
+        p.mixer.strips[3].slots[5] = Some(EffectSlot::plugin(test_plugin("fx", 2)));
+        p.add_plugin_channel("Lead", test_plugin("synth", 3));
         let all = ParamId::all(&p);
+        assert_eq!(
+            all.iter()
+                .filter(|id| matches!(id, ParamId::Plugin { .. }))
+                .count(),
+            5,
+            "hidden and non-automatable parameters are left out"
+        );
         assert!(all.len() > 200, "{}", all.len());
         let mut keys = std::collections::HashSet::new();
         for id in &all {
@@ -633,6 +738,60 @@ mod tests {
             assert!((id.get(&p).unwrap() - v).abs() < 1e-4, "{key}");
             assert!(!id.name(&p).is_empty());
         }
+    }
+
+    fn test_plugin(id: &str, n: u32) -> PluginRef {
+        use crate::plugin::{PluginKind, PluginParamInfo};
+        let mut p = PluginRef::new(id, id, "Test", PluginKind::Effect, Default::default());
+        let mut params: Vec<PluginParamInfo> = (0..n)
+            .map(|i| PluginParamInfo {
+                id: 100 + i,
+                name: format!("Knob {i}"),
+                default: 0.5,
+                steps: 0,
+                automatable: true,
+                hidden: false,
+            })
+            .collect();
+        params.push(PluginParamInfo {
+            id: 999,
+            name: "Hidden".into(),
+            default: 0.0,
+            steps: 0,
+            automatable: true,
+            hidden: true,
+        });
+        p.values = vec![0.5; params.len()];
+        p.params = std::sync::Arc::from(params);
+        p
+    }
+
+    #[test]
+    fn plugin_parameters_follow_their_plugin() {
+        let mut p = Project::demo();
+        let ch = p
+            .add_plugin_channel("Lead", test_plugin("a.synth", 2))
+            .unwrap();
+        let owner = PluginOwner::Channel(ch);
+        let id = ParamId::plugin_param(owner, p.plugin(owner).unwrap(), 101);
+        assert!(id.key().starts_with(&format!("channel/{}/plugin/", ch.0)));
+        assert!(id.set(&mut p, 0.75));
+        assert_eq!(id.get(&p), Some(0.75));
+        assert_eq!(id.name(&p), "Lead · a.synth · Knob 1");
+        assert_eq!(id.channel(), Some(ch));
+        // Another plugin in the same place does not inherit the address.
+        let i = p.channel_index(ch).unwrap();
+        p.channels[i].instrument = Instrument::Plugin(Box::new(test_plugin("b.synth", 2)));
+        assert!(!id.is_valid(&p));
+        assert!(id.name(&p).contains("plugin gone"));
+        let fx = ParamId::Plugin {
+            owner: PluginOwner::Effect { strip: 2, slot: 9 },
+            plugin: 0xdead_beef,
+            id: 7,
+        };
+        assert_eq!(fx.key(), "mixer/2/fx/9/plugin/deadbeef/7");
+        assert_eq!(ParamId::parse(&fx.key()), Some(fx));
+        assert_eq!(ParamId::parse("mixer/2/fx/9/plugin/xyz/7"), None);
     }
 
     #[test]

@@ -21,6 +21,7 @@ mod command;
 pub mod control;
 mod live;
 mod mixer;
+mod plugin;
 mod processor;
 pub mod song;
 pub mod transport;
@@ -32,6 +33,7 @@ pub use control::{ModPlan, ParamDest};
 pub use gt_core::MAX_CHANNELS;
 pub use live::{LiveInput, LiveNote, LIVE_CAPACITY};
 pub use mixer::{create_effect, EffectBox, MixerParams, StripParams, MAX_PDC_FRAMES};
+pub use plugin::{PluginBox, PluginContext, PluginProcessor, MAX_PLUGINS};
 pub use processor::{AudioProcessor, PREVIEW_GAIN, TEST_TONE_DBFS, TEST_TONE_HZ};
 pub use song::{
     synth_settings, AudioPlay, AutoLane, ChannelParams, InstrumentKind, NoteKind, PatchValues,
@@ -100,6 +102,8 @@ pub struct Telemetry {
     pub latency_frames: AtomicU32,
     /// Count-in beats still to come, including the one sounding (0 when not counting in).
     pub count_in_beats: AtomicU32,
+    /// Per plugin table entry: the plugin failed (an error or invalid audio) and is bypassed.
+    pub plugin_failed: [AtomicBool; MAX_PLUGINS],
 }
 
 /// One strip's meter. The engine raises `peak` with `fetch_max` (the UI swaps it back to 0
@@ -135,6 +139,7 @@ impl Default for Telemetry {
             fx_meters: std::array::from_fn(|_| std::array::from_fn(|_| AtomicF32::default())),
             latency_frames: AtomicU32::default(),
             count_in_beats: AtomicU32::default(),
+            plugin_failed: std::array::from_fn(|_| AtomicBool::default()),
         }
     }
 }

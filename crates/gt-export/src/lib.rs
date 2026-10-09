@@ -12,6 +12,10 @@
 //! peak normalization; the release and effect tails after the end (until silence, up to a
 //! limit); the whole song or the loop region; the full mix or one stem per playlist track.
 //!
+//! Third-party plugins come in as processors made by the plugin host for the export (fresh
+//! instances in offline mode, in their current state); each pass of a stem export gets them
+//! back from the engine and resets them.
+//!
 //! [`smf`] reads and writes Standard MIDI Files.
 
 #![forbid(unsafe_code)]
@@ -26,7 +30,7 @@ use std::sync::Arc;
 use gt_core::{BuiltInSample, ClipKind, Project, SampleData, SampleSource, Tick, FX_SLOTS};
 use gt_engine::{
     create, create_effect, AudioProcessor, ChannelParams, EngineCommand, EngineConfig,
-    EngineHandle, LoopRegion, MixerParams, ModPlan, SongSnapshot,
+    EngineHandle, LoopRegion, MixerParams, ModPlan, PluginBox, SongSnapshot,
 };
 
 /// Sample rates offered for export.
@@ -235,12 +239,14 @@ pub fn range_ticks(project: &Project, range: Range) -> Option<(i64, i64)> {
 }
 
 /// Renders the mix, or one stem per playlist track with sound clips, as interleaved stereo.
-/// `samples` holds every sound at `settings.sample_rate` (see [`load_samples`]).
+/// `samples` holds every sound at `settings.sample_rate` (see [`load_samples`]); `plugins`
+/// the project's plugins, ready for offline rendering at that rate (they are handed back).
 pub fn render(
     project: &Project,
     samples: &HashMap<SampleSource, Arc<SampleData>>,
     settings: &ExportSettings,
     progress: &Progress,
+    plugins: &mut Vec<Box<PluginBox>>,
 ) -> Result<Vec<Rendered>, ExportError> {
     let (start, end) = range_ticks(project, settings.range).ok_or(ExportError::Empty)?;
     let base = trimmed(project, end);
@@ -255,7 +261,16 @@ pub fn render(
     let n = jobs.len() as u32;
     let mut out = Vec::new();
     for (k, (name, p)) in jobs.into_iter().enumerate() {
-        let audio = render_one(&p, samples, settings, start, end, progress, k as u32, n)?;
+        let audio = render_one(
+            &p,
+            samples,
+            settings,
+            start,
+            end,
+            progress,
+            (k as u32, n),
+            plugins,
+        )?;
         out.push(Rendered { name, audio });
     }
     if let Some(db) = settings.normalize_db {
@@ -284,9 +299,10 @@ pub fn export(
     settings: &ExportSettings,
     path: &Path,
     progress: &Progress,
+    plugins: &mut Vec<Box<PluginBox>>,
 ) -> Result<Vec<PathBuf>, ExportError> {
     let (samples, _) = load_samples(project, settings.sample_rate);
-    let rendered = render(project, &samples, settings, progress)?;
+    let rendered = render(project, &samples, settings, progress, plugins)?;
     let mut written = Vec::new();
     for (k, r) in rendered.iter().enumerate() {
         let file = if settings.stems {
@@ -443,14 +459,28 @@ fn send(h: &mut EngineHandle, p: &mut AudioProcessor, mut cmd: EngineCommand) {
 }
 
 /// Loads the whole project into a fresh engine, like the app does when it syncs.
+// The engine takes plugins boxed (they travel through its command queue as boxes).
+#[allow(clippy::vec_box)]
 fn load_engine(
     h: &mut EngineHandle,
     p: &mut AudioProcessor,
     project: &Project,
     samples: &HashMap<SampleSource, Arc<SampleData>>,
     rate: u32,
+    plugins: &mut Vec<Box<PluginBox>>,
 ) {
     send(h, p, EngineCommand::SetMetronome(false));
+    for (i, mut plugin) in plugins.drain(..).enumerate() {
+        plugin.processor.reset();
+        send(
+            h,
+            p,
+            EngineCommand::SetPlugin {
+                index: i as u8,
+                plugin: Some(plugin),
+            },
+        );
+    }
     send(
         h,
         p,
@@ -520,6 +550,7 @@ fn load_engine(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::vec_box)]
 fn render_one(
     project: &Project,
     samples: &HashMap<SampleSource, Arc<SampleData>>,
@@ -527,23 +558,50 @@ fn render_one(
     start: i64,
     end: i64,
     progress: &Progress,
-    job: u32,
-    jobs: u32,
+    (job, jobs): (u32, u32),
+    plugins: &mut Vec<Box<PluginBox>>,
 ) -> Result<Vec<f32>, ExportError> {
     let rate = settings.sample_rate;
     let (mut h, mut p) = create(EngineConfig {
         sample_rate: rate,
         out_channels: 2,
     });
-    load_engine(&mut h, &mut p, project, samples, rate);
+    load_engine(&mut h, &mut p, project, samples, rate, plugins);
+    // The plugins come back for the next pass however this one ends.
+    let audio = render_pass(
+        &mut h,
+        &mut p,
+        project,
+        settings,
+        start,
+        end,
+        progress,
+        (job, jobs),
+    );
+    plugins.extend(p.take_plugins());
+    audio
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_pass(
+    h: &mut EngineHandle,
+    p: &mut AudioProcessor,
+    project: &Project,
+    settings: &ExportSettings,
+    start: i64,
+    end: i64,
+    progress: &Progress,
+    (job, jobs): (u32, u32),
+) -> Result<Vec<f32>, ExportError> {
+    let rate = settings.sample_rate;
     // Let every queued command land while stopped, then start exactly on a quantum.
     let mut scratch = vec![0.0_f32; 2 * 256];
     for _ in 0..8 {
         p.process(&mut scratch);
         h.collect_garbage();
     }
-    send(&mut h, &mut p, EngineCommand::Locate(Tick(start)));
-    send(&mut h, &mut p, EngineCommand::Play);
+    send(h, p, EngineCommand::Locate(Tick(start)));
+    send(h, p, EngineCommand::Play);
 
     let tempo = &project.tempo;
     let seconds = tempo.tick_to_seconds(end as f64) - tempo.tick_to_seconds(start as f64);
@@ -689,7 +747,14 @@ mod tests {
         };
         let (samples, missing) = load_samples(&project, settings.sample_rate);
         assert!(missing.is_empty());
-        let offline = render(&project, &samples, &settings, &Progress::default()).unwrap();
+        let offline = render(
+            &project,
+            &samples,
+            &settings,
+            &Progress::default(),
+            &mut Vec::new(),
+        )
+        .unwrap();
         let offline = &offline[0].audio;
         assert_eq!(offline.len(), 2 * 96_000);
         assert!(offline.iter().any(|x| x.abs() > 0.1));
@@ -699,7 +764,7 @@ mod tests {
             out_channels: 2,
         });
         let base = trimmed(&project, 3840);
-        load_engine(&mut h, &mut p, &base, &samples, 48_000);
+        load_engine(&mut h, &mut p, &base, &samples, 48_000, &mut Vec::new());
         let mut scratch = vec![0.0_f32; 2 * 441];
         for _ in 0..20 {
             p.process(&mut scratch);
@@ -736,7 +801,14 @@ mod tests {
         };
         let (samples, _) = load_samples(&project, 48_000);
         let render_len = |s: ExportSettings| {
-            render(&project, &samples, &s, &Progress::default()).unwrap()[0]
+            render(
+                &project,
+                &samples,
+                &s,
+                &Progress::default(),
+                &mut Vec::new(),
+            )
+            .unwrap()[0]
                 .audio
                 .len()
                 / 2
@@ -762,6 +834,85 @@ mod tests {
         assert_eq!(capped, cut + 4_800);
     }
 
+    /// A plugin effect that halves its input, counting resets.
+    struct Half(Arc<AtomicU32>);
+
+    impl gt_engine::PluginProcessor for Half {
+        fn process(&mut self, l: &mut [f32], r: &mut [f32], _: &gt_engine::PluginContext) -> bool {
+            l.iter_mut().chain(r.iter_mut()).for_each(|x| *x *= 0.5);
+            true
+        }
+        fn note_on(&mut self, _: u32, _: u8, _: f32) {}
+        fn note_off(&mut self, _: u32, _: u8) {}
+        fn release_all(&mut self, _: u32) {}
+        fn set_param(&mut self, _: u32, _: f32) {}
+        fn reset(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+        fn latency(&self) -> usize {
+            0
+        }
+    }
+
+    #[test]
+    fn plugins_render_and_come_back_for_every_pass() {
+        use gt_core::{PluginKind, PluginRef, MASTER};
+        let mut project = short_song();
+        let fx = PluginRef::new("x", "Half", "", PluginKind::Effect, PathBuf::new());
+        let id = fx.instance;
+        project.mixer.strips[MASTER].slots[FX_SLOTS - 1] = Some(gt_core::EffectSlot::plugin(fx));
+        let settings = ExportSettings {
+            range: Range::Ticks {
+                start: 0,
+                end: 3840,
+            },
+            tail: false,
+            ..ExportSettings::default()
+        };
+        let (samples, _) = load_samples(&project, 48_000);
+        let resets = Arc::new(AtomicU32::new(0));
+        let mut plugins = vec![Box::new(PluginBox {
+            instance: id,
+            processor: Box::new(Half(Arc::clone(&resets))),
+        })];
+        let dry = render(
+            &project,
+            &samples,
+            &settings,
+            &Progress::default(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let wet = render(
+            &project,
+            &samples,
+            &settings,
+            &Progress::default(),
+            &mut plugins,
+        )
+        .unwrap();
+        assert_eq!(plugins.len(), 1, "handed back");
+        let (d, w) = (&dry[0].audio, &wet[0].audio);
+        assert!(d.iter().zip(w).all(|(d, w)| (d * 0.5 - w).abs() < 1e-6));
+        // Stems: one pass per track, each starting from a reset plugin.
+        let before = resets.load(Ordering::Relaxed);
+        let stems = ExportSettings {
+            stems: true,
+            ..settings
+        };
+        let n = render(
+            &project,
+            &samples,
+            &stems,
+            &Progress::default(),
+            &mut plugins,
+        )
+        .unwrap()
+        .len();
+        assert!(resets.load(Ordering::Relaxed) >= before + n as u32);
+        assert_eq!(plugins.len(), 1);
+    }
+
     #[test]
     fn stems_add_up_to_the_mix_and_normalize_together() {
         let project = short_song();
@@ -774,7 +925,14 @@ mod tests {
             ..ExportSettings::default()
         };
         let (samples, _) = load_samples(&project, 48_000);
-        let mix = render(&project, &samples, &settings, &Progress::default()).unwrap();
+        let mix = render(
+            &project,
+            &samples,
+            &settings,
+            &Progress::default(),
+            &mut Vec::new(),
+        )
+        .unwrap();
         let stems = render(
             &project,
             &samples,
@@ -783,6 +941,7 @@ mod tests {
                 ..settings
             },
             &Progress::default(),
+            &mut Vec::new(),
         )
         .unwrap();
         // The intro has one sounding track.
@@ -800,6 +959,7 @@ mod tests {
                 ..settings
             },
             &Progress::default(),
+            &mut Vec::new(),
         )
         .unwrap();
         let peak = loud[0].audio.iter().fold(0.0_f32, |m, x| m.max(x.abs()));
@@ -824,7 +984,13 @@ mod tests {
         let (samples, _) = load_samples(&project, 48_000);
         let progress = Progress::default();
         progress.cancel.store(true, Ordering::Relaxed);
-        let r = render(&project, &samples, &ExportSettings::default(), &progress);
+        let r = render(
+            &project,
+            &samples,
+            &ExportSettings::default(),
+            &progress,
+            &mut Vec::new(),
+        );
         assert!(matches!(r, Err(ExportError::Cancelled)));
     }
 }

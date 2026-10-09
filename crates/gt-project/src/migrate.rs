@@ -8,20 +8,28 @@
 //! - 1 (Step 9): first released layout.
 //! - 1 (Step 10): gained the optional `midi_map` list (MIDI learn). No bump: older files simply
 //!   have none, and older builds ignore it.
+//! - 2 (Step 11): third-party plugins, as a `plugin` instrument type and a `plugin` effect kind
+//!   with its plugin, and `plugins/` state entries in the container. Older builds cannot read
+//!   a plugin instrument, so the version is bumped and they refuse the file cleanly ("made with
+//!   a newer version"). The upgrade from 1 changes nothing: version 1 files have no plugins.
 
 use serde_json::Value;
 
 use crate::file::{FileError, FORMAT};
 
 /// The schema version this build writes.
-pub const CURRENT: u32 = 1;
+pub const CURRENT: u32 = 2;
 
 /// One upgrade: rewrites a tree of version `from` into version `from + 1`.
 pub type Migration = fn(&mut Value) -> Result<(), String>;
 
-/// Upgrades by version: entry `i` turns version `i + 1` into `i + 2`. Empty while only
-/// version 1 exists.
-pub const MIGRATIONS: &[Migration] = &[];
+/// Upgrades by version: entry `i` turns version `i + 1` into `i + 2`.
+pub const MIGRATIONS: &[Migration] = &[v1_to_v2];
+
+/// Version 2 added plugins; a version 1 tree is already a valid version 2 tree.
+fn v1_to_v2(_v: &mut Value) -> Result<(), String> {
+    Ok(())
+}
 
 /// Checks the format tag and upgrades `v` to [`CURRENT`]. Returns the tree and the version the
 /// file had.

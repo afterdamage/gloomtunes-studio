@@ -52,6 +52,13 @@ pub enum ParamDest {
         /// Parameter index.
         index: u8,
     },
+    /// A plugin parameter (normalized value).
+    Plugin {
+        /// The plugin instance.
+        instance: gt_core::PluginInstanceId,
+        /// Position in the plugin's parameter list.
+        index: u32,
+    },
 }
 
 impl ParamDest {
@@ -89,6 +96,13 @@ impl ParamDest {
                 slot: u(fx)?,
                 index: u(index)?,
             },
+            ParamId::Plugin { id: param, .. } => {
+                let p = id.plugin_ref(project)?;
+                Self::Plugin {
+                    instance: p.instance,
+                    index: u32::try_from(p.param_index(param)?).ok()?,
+                }
+            }
         })
     }
 

@@ -1,0 +1,36 @@
+[package]
+name = "gt-plugin-host"
+description = "GloomTunes Studio: CLAP plugin scanning, loading and hosting."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gt-core.workspace = true
+gt-engine.workspace = true
+clack-host.workspace = true
+clack-extensions = { workspace = true, features = ["clack-host", "audio-ports", "note-ports", "params", "state", "latency", "gui", "timer", "posix-fd", "log", "render"] }
+rtrb.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+clack-host = { workspace = true, features = ["clack-plugin"] }
+gt-test-plugin = { path = "../gt-test-plugin" }
+clack-plugin.workspace = true
