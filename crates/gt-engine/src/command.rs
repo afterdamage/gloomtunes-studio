@@ -6,6 +6,7 @@ use gt_core::{SampleData, TempoMap, Tick, TimeSigMap};
 
 use crate::control::ModPlan;
 use crate::mixer::{EffectBox, MixerParams};
+use crate::plugin::PluginBox;
 use crate::song::{ChannelParams, SongSnapshot};
 
 /// Loop region in ticks. Playback wraps from `end` back to `start` while `enabled`.
@@ -128,6 +129,25 @@ pub enum EngineCommand {
     /// The channel slot that live notes ([`crate::LiveNote`]) play, or none to mute them.
     /// Notes already held finish on the slot they started on.
     SetLiveChannel(Option<u16>),
+    /// Put a plugin into the plugin table (or empty an entry). Channels and effect slots that
+    /// name its instance start using it. The previous one comes back as garbage, stopped.
+    SetPlugin {
+        /// Table entry, below [`crate::MAX_PLUGINS`].
+        index: u8,
+        /// The plugin.
+        plugin: Option<Box<PluginBox>>,
+    },
+    /// Change one plugin parameter (normalized; the plugin gets it at the next block).
+    SetPluginParam {
+        /// Table entry.
+        index: u8,
+        /// Position in the plugin's parameter list.
+        param: u32,
+        /// Normalized value.
+        value: f32,
+    },
+    /// Run a plugin that was bypassed after a failure again (it is reset first).
+    RetryPlugin(u8),
     /// Count `bars` bars of metronome clicks at the playhead's tempo and time signature, then
     /// start playing. Play, Pause and Stop cancel a count-in. Ignored while playing.
     CountIn {
@@ -152,6 +172,7 @@ impl EngineCommand {
                 | Self::PreviewSample(_)
                 | Self::SetMixer(_)
                 | Self::SetEffect { .. }
+                | Self::SetPlugin { .. }
         )
     }
 }
@@ -223,4 +244,6 @@ pub enum Garbage {
     Mixer(Box<MixerParams>),
     /// An effect taken out of a slot.
     Effect(EffectBox),
+    /// A plugin taken out of the plugin table (already stopped).
+    Plugin(Box<PluginBox>),
 }

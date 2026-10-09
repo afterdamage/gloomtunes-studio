@@ -2,8 +2,9 @@
 //! audio files the project uses.
 //!
 //! ```text
-//! project.json          { "format": "gloomtunes-project", "schema_version": 1, "project": {...} }
+//! project.json          { "format": "gloomtunes-project", "schema_version": 2, "project": {...} }
 //! samples/<hash>-<name> embedded copies of the audio files, byte for byte (optional)
+//! plugins/<hash>.bin    the saved state of each third-party plugin, as the plugin wrote it
 //! ```
 //!
 //! Parameters, effects, LFO shapes and automation targets are stored by their stable text keys,
@@ -16,6 +17,11 @@
 //! moved or copied to another machine), with the absolute path kept as a fallback. When loading,
 //! a sample is looked for at the relative path, then the absolute path, then in the embedded
 //! copies; anything still missing is listed in [`Loaded::missing`] for the relink dialog.
+//!
+//! Third-party plugins (Step 11) are stored by format, id and a path hint, with their parameter
+//! descriptions and values (the document's mirror) in the JSON and their opaque state blob as a
+//! zip entry named by its content hash. A plugin that cannot be found when the project is
+//! opened keeps all of this, so saving again loses nothing.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
@@ -27,8 +33,9 @@ use gt_core::synth::{ModDest, ModSlot, ModSource, SynthParam, SynthPatch, MOD_SL
 use gt_core::{
     Adsr, AutoPoint, Automation, BuiltInSample, Channel, ChannelId, Clip, ClipId, ClipKind, Curve,
     EffectSlot, Instrument, LfoRate, LfoShape, LoopMode, Marker, ModSourceKind, Modulator,
-    ModulatorId, Note, ParamId, Pattern, PatternId, Project, SampleSource, SamplerSettings,
-    SigChange, TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, Track, TrackId, FX_SLOTS, SENDS,
+    ModulatorId, Note, ParamId, Pattern, PatternId, PluginFormat, PluginInstanceId, PluginKind,
+    PluginParamInfo, PluginRef, Project, SampleSource, SamplerSettings, SigChange, TempoMap,
+    TempoPoint, Tick, TimeSig, TimeSigMap, Track, TrackId, FX_SLOTS, SENDS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,6 +48,7 @@ pub const EXTENSION: &str = "gloom";
 pub const FORMAT: &str = "gloomtunes-project";
 const PROJECT_ENTRY: &str = "project.json";
 const SAMPLES_DIR: &str = "samples/";
+const PLUGINS_DIR: &str = "plugins/";
 
 /// Why a project could not be saved or opened.
 #[derive(Debug)]
@@ -173,6 +181,18 @@ pub fn save(project: &Project, path: &Path, opts: SaveOptions) -> Result<SaveRep
             zip.write_all(bytes)?;
             report.embedded += 1;
         }
+        let mut states: Vec<(String, &[u8])> = project
+            .plugins()
+            .into_iter()
+            .filter(|(_, p)| !p.state.is_empty())
+            .map(|(_, p)| (state_entry(&p.state), &p.state[..]))
+            .collect();
+        states.sort_by(|a, b| a.0.cmp(&b.0));
+        states.dedup_by(|a, b| a.0 == b.0);
+        for (entry, bytes) in states {
+            zip.start_file(entry.as_str(), deflate)?;
+            zip.write_all(bytes)?;
+        }
         zip.finish()?.flush()?;
     }
     std::fs::rename(&tmp, path).inspect_err(|_| {
@@ -230,6 +250,21 @@ pub fn load(path: &Path, extract_dir: &Path) -> Result<Loaded, FileError> {
     for (from, to) in &resolved {
         if from != to {
             relink(&mut loaded.project, from, to);
+        }
+    }
+    for (id, entry) in std::mem::take(&mut loaded.plugin_states) {
+        let mut bytes = Vec::new();
+        let read = zip
+            .by_name(&entry)
+            .map_err(|e| e.to_string())
+            .and_then(|mut f| f.read_to_end(&mut bytes).map_err(|e| e.to_string()));
+        match (read, loaded.project.plugin_by_instance_mut(id)) {
+            (Ok(_), Some(p)) => p.state = std::sync::Arc::from(bytes),
+            (Err(e), Some(p)) => loaded.warnings.push(format!(
+                "the saved state of {} could not be read: {e}",
+                p.name
+            )),
+            _ => {}
         }
     }
     loaded.missing.sort();
@@ -412,6 +447,41 @@ enum InstrumentDto {
         params: BTreeMap<String, f32>,
         mods: Vec<SynthModDto>,
     },
+    /// A third-party plugin (Step 11).
+    Plugin { plugin: PluginDto },
+}
+
+#[derive(Serialize, Deserialize)]
+struct PluginDto {
+    format: String,
+    id: String,
+    name: String,
+    #[serde(default)]
+    vendor: String,
+    kind: String,
+    /// Where the plugin file was when saved (plugins are found by id; this breaks ties).
+    #[serde(default)]
+    path: String,
+    /// Zip entry of the plugin's saved state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+    /// The parameters as the plugin described them, with their values (normalized 0..1).
+    #[serde(default)]
+    params: Vec<PluginParamDto>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PluginParamDto {
+    id: u32,
+    name: String,
+    default: f32,
+    #[serde(default)]
+    steps: u32,
+    #[serde(default)]
+    automatable: bool,
+    #[serde(default)]
+    hidden: bool,
+    value: f32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -482,6 +552,9 @@ struct EffectDto {
     kind: String,
     enabled: bool,
     params: BTreeMap<String, f32>,
+    /// The plugin of a plugin slot (Step 11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plugin: Option<PluginDto>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -637,6 +710,9 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                     sustain: s.adsr.sustain,
                     release_ms: s.adsr.release_ms,
                 },
+                Instrument::Plugin(plugin) => InstrumentDto::Plugin {
+                    plugin: plugin_dto(plugin),
+                },
                 Instrument::Synth(patch) => InstrumentDto::Synth {
                     preset_name: patch.name.clone(),
                     params: SynthParam::ALL
@@ -706,6 +782,7 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                             .zip(&e.params)
                             .map(|(info, &v)| (info.key.to_owned(), v))
                             .collect(),
+                        plugin: e.plugin.as_deref().map(plugin_dto),
                     })
                 })
                 .collect(),
@@ -857,6 +934,8 @@ pub struct Parsed {
     /// the file had no absolute path).
     pub project: Project,
     refs: Vec<(PathBuf, SampleRefs)>,
+    /// Plugins whose state is in a zip entry.
+    plugin_states: Vec<(PluginInstanceId, String)>,
     missing: Vec<PathBuf>,
     extracted: usize,
     /// Things dropped or repaired.
@@ -909,6 +988,14 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
         }
     };
 
+    let mut plugin_states = Vec::new();
+    let mut plugin = |dto: PluginDto, warnings: &mut Vec<String>| -> Option<PluginRef> {
+        let (p, state) = plugin_from_dto(dto, warnings)?;
+        if let Some(entry) = state {
+            plugin_states.push((p.instance, entry));
+        }
+        Some(p)
+    };
     let d = file.project;
     let mut p = Project::empty();
     p.patterns.clear();
@@ -989,6 +1076,10 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                 }
                 Instrument::Synth(Box::new(patch))
             }
+            InstrumentDto::Plugin { plugin: dto } => match plugin(dto, &mut warnings) {
+                Some(pl) => Instrument::Plugin(Box::new(pl)),
+                None => continue,
+            },
         };
         p.channels.push(Channel {
             id: ChannelId(c.id),
@@ -1047,6 +1138,11 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                     warnings.push(format!("unknown effect \"{}\" removed", ed.kind));
                     return None;
                 };
+                if kind == EffectKind::Plugin {
+                    let mut e = EffectSlot::plugin(plugin(ed.plugin?, &mut warnings)?);
+                    e.enabled = ed.enabled;
+                    return Some(e);
+                }
                 let mut e = EffectSlot::new(kind);
                 e.enabled = ed.enabled;
                 for (key, v) in &ed.params {
@@ -1182,11 +1278,84 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
     Ok(Parsed {
         project: p,
         refs,
+        plugin_states,
         missing: Vec::new(),
         extracted: 0,
         warnings,
         schema_version: version,
     })
+}
+
+/// Zip entry name of a plugin state (named by content, so identical states are stored once).
+fn state_entry(state: &[u8]) -> String {
+    format!("{PLUGINS_DIR}{:016x}.bin", fnv1a(state))
+}
+
+fn plugin_dto(p: &PluginRef) -> PluginDto {
+    PluginDto {
+        format: p.format.key().to_owned(),
+        id: p.id.clone(),
+        name: p.name.clone(),
+        vendor: p.vendor.clone(),
+        kind: match p.kind {
+            PluginKind::Instrument => "instrument",
+            PluginKind::Effect => "effect",
+        }
+        .to_owned(),
+        path: p.path.to_string_lossy().into_owned(),
+        state: (!p.state.is_empty()).then(|| state_entry(&p.state)),
+        params: p
+            .params
+            .iter()
+            .zip(&p.values)
+            .map(|(q, &value)| PluginParamDto {
+                id: q.id,
+                name: q.name.clone(),
+                default: q.default,
+                steps: q.steps,
+                automatable: q.automatable,
+                hidden: q.hidden,
+                value,
+            })
+            .collect(),
+    }
+}
+
+/// A plugin entry and the zip entry of its state, if it has one.
+fn plugin_from_dto(
+    d: PluginDto,
+    warnings: &mut Vec<String>,
+) -> Option<(PluginRef, Option<String>)> {
+    let Some(format) = PluginFormat::from_key(&d.format) else {
+        warnings.push(format!(
+            "plugin {} in the unsupported format \"{}\" removed",
+            d.name, d.format
+        ));
+        return None;
+    };
+    let kind = if d.kind == "instrument" {
+        PluginKind::Instrument
+    } else {
+        PluginKind::Effect
+    };
+    let mut p = PluginRef::new(&d.id, &d.name, &d.vendor, kind, PathBuf::from(&d.path));
+    p.format = format;
+    p.values = d.params.iter().map(|q| q.value).collect();
+    p.params = d
+        .params
+        .into_iter()
+        .map(|q| PluginParamInfo {
+            id: q.id,
+            name: q.name,
+            default: q.default,
+            steps: q.steps,
+            automatable: q.automatable,
+            hidden: q.hidden,
+        })
+        .collect::<Vec<_>>()
+        .into();
+    p.sanitize();
+    Some((p, d.state))
 }
 
 fn builtin_key(b: BuiltInSample) -> &'static str {
@@ -1426,6 +1595,94 @@ mod tests {
         assert_eq!(back.project.channels[0].volume, Channel::MAX_VOLUME);
         assert!(back.project.mixer.strips[0].slots[9].is_none());
         assert_eq!(back.warnings.len(), 2, "{:?}", back.warnings);
+    }
+
+    #[test]
+    fn plugins_round_trip_with_their_state_and_parameters() {
+        use gt_core::{PluginKind, PluginParamInfo, PluginRef, MASTER};
+        let dir = temp_dir("plugins");
+        let path = dir.join("p.gloom");
+        let mut p = Project::demo();
+        let mut synth = PluginRef::new(
+            "com.example.synth",
+            "Synth",
+            "Example",
+            PluginKind::Instrument,
+            PathBuf::from("/usr/lib/clap/synth.clap"),
+        );
+        synth.params = std::sync::Arc::from(vec![
+            PluginParamInfo {
+                id: 7,
+                name: "Cutoff".into(),
+                default: 0.5,
+                steps: 0,
+                automatable: true,
+                hidden: false,
+            },
+            PluginParamInfo {
+                id: 9,
+                name: "Mode".into(),
+                default: 0.0,
+                steps: 3,
+                automatable: true,
+                hidden: false,
+            },
+        ]);
+        synth.values = vec![0.25, 2.0 / 3.0];
+        synth.state = std::sync::Arc::from(vec![1u8, 2, 3, 250]);
+        let ch = p.add_plugin_channel("Synth", synth.clone()).unwrap();
+        let mut fx = PluginRef::new(
+            "com.example.fx",
+            "Fx",
+            "",
+            PluginKind::Effect,
+            PathBuf::new(),
+        );
+        fx.state = synth.state.clone(); // the same state is stored once
+        let mut slot = EffectSlot::plugin(fx);
+        slot.enabled = false;
+        p.mixer.strips[MASTER].slots[2] = Some(slot);
+
+        save(&p, &path, SaveOptions::default()).unwrap();
+        let loaded = load(&path, &dir.join("x")).unwrap();
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        let q = &loaded.project;
+        let back = q.channels[q.channel_index(ch).unwrap()].plugin().unwrap();
+        assert_eq!(back.id, synth.id);
+        assert_eq!(back.kind, PluginKind::Instrument);
+        assert_eq!(back.path, synth.path);
+        assert_eq!(back.params, synth.params);
+        assert_eq!(back.values, synth.values);
+        assert_eq!(back.state, synth.state);
+        assert_ne!(
+            back.instance, synth.instance,
+            "running instances are per session"
+        );
+        let s = q.mixer.strips[MASTER].slots[2].as_ref().unwrap();
+        assert!(!s.enabled);
+        assert_eq!(s.plugin.as_ref().unwrap().state, synth.state);
+        let zip = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        assert_eq!(
+            zip.file_names()
+                .filter(|n| n.starts_with(PLUGINS_DIR))
+                .count(),
+            1
+        );
+
+        // Everything but the per-session instance ids is unchanged.
+        let mut a = p.clone();
+        let mut b = loaded.project.clone();
+        for proj in [&mut a, &mut b] {
+            for (owner, _) in proj
+                .plugins()
+                .into_iter()
+                .map(|(o, r)| (o, r.instance))
+                .collect::<Vec<_>>()
+            {
+                proj.plugin_mut(owner).unwrap().instance = gt_core::PluginInstanceId(0);
+            }
+        }
+        assert_eq!(a, b);
     }
 
     #[test]

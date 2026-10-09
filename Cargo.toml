@@ -15,6 +15,7 @@ gt-core = { path = "crates/gt-core" }
 gt-dsp = { path = "crates/gt-dsp" }
 gt-engine = { path = "crates/gt-engine" }
 gt-export = { path = "crates/gt-export" }
+gt-plugin-host = { path = "crates/gt-plugin-host" }
 gt-project = { path = "crates/gt-project" }
 gt-ui = { path = "crates/gt-ui" }
 
@@ -36,6 +37,12 @@ midir = "0.11"
 midly = { version = "0.5", default-features = false, features = ["alloc", "std"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 insta = "1"
+clack-host = "0.2"
+clack-plugin = "0.2"
+clack-extensions = "0.2"
+x11rb = "0.13"
+windows-sys = "0.61"
+libc = "0.2"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

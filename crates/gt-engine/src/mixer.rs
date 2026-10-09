@@ -9,12 +9,14 @@
 use std::sync::atomic::Ordering;
 
 use gt_core::mixer::FIRST_SEND;
+use gt_core::PluginInstanceId;
 use gt_core::{EffectKind, EffectSlot, Mixer, FX_SLOTS, MASTER, SENDS, STRIPS};
 use gt_dsp::fx::{
     Chorus, Compressor, Delay, Distortion, Effect, FxContext, Limiter, ParamEq, Reverb, StereoWidth,
 };
 use gt_dsp::LinearRamp;
 
+use crate::plugin::{PluginContext, PluginTable};
 use crate::{Telemetry, RENDER_QUANTUM};
 
 const Q: usize = RENDER_QUANTUM;
@@ -50,12 +52,26 @@ pub fn create_effect(slot: &EffectSlot, sample_rate: f32) -> EffectBox {
         EffectKind::Distortion => Box::new(Distortion::new(sr)),
         EffectKind::Limiter => Box::new(Limiter::new(sr)),
         EffectKind::Width => Box::new(StereoWidth::new(sr)),
+        // Plugins run from the plugin table (`EngineCommand::SetPlugin`), not from a box.
+        EffectKind::Plugin => Box::new(Passthrough),
     };
     for (i, &v) in slot.params.iter().enumerate() {
         fx.set_param(i, v);
     }
     fx.reset();
     EffectBox(fx)
+}
+
+/// Stands in for an effect that runs elsewhere.
+struct Passthrough;
+
+impl Effect for Passthrough {
+    fn param_count(&self) -> usize {
+        0
+    }
+    fn set_param(&mut self, _index: usize, _value: f32) {}
+    fn reset(&mut self) {}
+    fn process(&mut self, _l: &mut [f32], _r: &mut [f32], _ctx: &FxContext) {}
 }
 
 /// Engine settings of one strip.
@@ -77,6 +93,8 @@ pub struct StripParams {
     pub sidechain: Option<u8>,
     /// Effect slots that are switched on.
     pub enabled: [bool; FX_SLOTS],
+    /// The plugin instance in each slot that holds a plugin.
+    pub fx_plugin: [Option<PluginInstanceId>; FX_SLOTS],
 }
 
 impl Default for StripParams {
@@ -90,6 +108,7 @@ impl Default for StripParams {
             sends: [0.0; SENDS],
             sidechain: None,
             enabled: [true; FX_SLOTS],
+            fx_plugin: [None; FX_SLOTS],
         }
     }
 }
@@ -130,6 +149,12 @@ impl MixerParams {
                 sends: s.sends,
                 sidechain: s.sidechain.filter(|_| order.is_some()).map(|x| x as u8),
                 enabled: std::array::from_fn(|k| s.slots[k].as_ref().is_some_and(|x| x.enabled)),
+                fx_plugin: std::array::from_fn(|k| {
+                    s.slots[k]
+                        .as_ref()
+                        .and_then(|x| x.plugin.as_ref())
+                        .map(|p| p.instance)
+                }),
             };
         }
         let mut out = [0_u8; STRIPS];
@@ -205,6 +230,9 @@ impl PdcDelay {
 
 struct FxSlot {
     effect: Option<EffectBox>,
+    /// Plugin table entry of the plugin in this slot (it takes the place of `effect`).
+    plugin: Option<u8>,
+    plugin_latency: usize,
     enabled: bool,
     /// 1 when the effect is heard, 0 when bypassed.
     wet: LinearRamp,
@@ -250,6 +278,8 @@ impl Strip {
             out_r: [0.0; Q],
             fx: std::array::from_fn(|_| FxSlot {
                 effect: None,
+                plugin: None,
+                plugin_latency: 0,
                 enabled: true,
                 wet: LinearRamp::new(1.0),
             }),
@@ -285,7 +315,10 @@ impl Strip {
     /// or delay lines still holding audio.
     fn needs_processing(&self) -> bool {
         self.has_input
-            || self.fx.iter().any(|f| f.effect.is_some())
+            || self
+                .fx
+                .iter()
+                .any(|f| f.effect.is_some() || f.plugin.is_some())
             || self.pdc_direct.delay > 0
             || self.pdc_out.delay > 0
             || self.pdc_sends.iter().any(|d| d.delay > 0)
@@ -360,7 +393,8 @@ impl MixerEngine {
             for (slot, &on) in s.fx.iter_mut().zip(&sp.enabled) {
                 if slot.enabled != on {
                     slot.enabled = on;
-                    let latent = slot.effect.as_ref().is_some_and(|e| e.0.latency() > 0);
+                    let latent = slot.effect.as_ref().is_some_and(|e| e.0.latency() > 0)
+                        || slot.plugin_latency > 0;
                     // A latent effect switches at once: crossfading would mix two time-shifted
                     // copies of the signal.
                     slot.wet
@@ -464,6 +498,22 @@ impl MixerEngine {
         }
     }
 
+    /// Points every slot at the plugin table entry running its plugin (after the mixer
+    /// settings or the table changed) and recomputes delay compensation.
+    pub(crate) fn resolve_plugins(&mut self, table: &PluginTable) {
+        for s in &mut self.strips {
+            for (k, f) in s.fx.iter_mut().enumerate() {
+                let index = s.params.fx_plugin[k].and_then(|id| table.find(id));
+                if index != f.plugin {
+                    f.plugin = index;
+                    f.wet = LinearRamp::new(if f.enabled { 1.0 } else { 0.0 });
+                }
+                f.plugin_latency = table.latency(index);
+            }
+        }
+        self.update_latency();
+    }
+
     /// Clears every effect's tail (on locate, so an echo of the old position does not linger).
     pub(crate) fn reset_effects(&mut self) {
         for s in &mut self.strips {
@@ -493,8 +543,13 @@ impl MixerEngine {
             s.fx_latency =
                 s.fx.iter()
                     .filter(|f| f.enabled)
-                    .filter_map(|f| f.effect.as_ref())
-                    .map(|e| e.0.latency())
+                    .map(|f| {
+                        if f.plugin.is_some() {
+                            f.plugin_latency
+                        } else {
+                            f.effect.as_ref().map_or(0, |e| e.0.latency())
+                        }
+                    })
                     .sum();
         }
         for &s in &self.order {
@@ -534,11 +589,13 @@ impl MixerEngine {
         out_l: &mut [f32; Q],
         out_r: &mut [f32; Q],
         bpm: f32,
+        plugins: &mut PluginTable,
+        ctx: &PluginContext,
         telemetry: &Telemetry,
     ) {
         for idx in 0..STRIPS {
             let s = usize::from(self.order[idx]).min(STRIPS - 1);
-            self.process_strip(s, bpm, telemetry);
+            self.process_strip(s, bpm, plugins, ctx, telemetry);
             let st = &mut self.strips[s];
             st.has_input = false;
             st.direct_l.fill(0.0);
@@ -585,7 +642,14 @@ impl MixerEngine {
         *out_r = m.out_r;
     }
 
-    fn process_strip(&mut self, s: usize, bpm: f32, telemetry: &Telemetry) {
+    fn process_strip(
+        &mut self,
+        s: usize,
+        bpm: f32,
+        plugins: &mut PluginTable,
+        pctx: &PluginContext,
+        telemetry: &Telemetry,
+    ) {
         if !self.strips[s].needs_processing() {
             let st = &mut self.strips[s];
             st.out_l = [0.0; Q];
@@ -617,26 +681,32 @@ impl MixerEngine {
             sidechain: has_key.then_some((&self.key_l[..], &self.key_r[..])),
         };
         for (k, slot) in st.fx.iter_mut().enumerate() {
-            let Some(fx) = &mut slot.effect else {
+            if slot.effect.is_none() && slot.plugin.is_none() {
                 continue;
-            };
+            }
             let wet_settled = slot.wet.is_settled();
             if wet_settled && slot.wet.value() == 0.0 {
                 continue;
             }
-            if wet_settled {
-                fx.0.process(&mut l, &mut r, &ctx);
-            } else {
+            if !wet_settled {
                 self.dry_l = l;
                 self.dry_r = r;
+            }
+            let mut meter = 0.0;
+            if slot.plugin.is_some() {
+                plugins.run_effect(slot.plugin, &mut l, &mut r, pctx, telemetry);
+            } else if let Some(fx) = &mut slot.effect {
                 fx.0.process(&mut l, &mut r, &ctx);
+                meter = fx.0.meter();
+            }
+            if !wet_settled {
                 for i in 0..Q {
                     let w = slot.wet.next_value();
                     l[i] = self.dry_l[i] + (l[i] - self.dry_l[i]) * w;
                     r[i] = self.dry_r[i] + (r[i] - self.dry_r[i]) * w;
                 }
             }
-            telemetry.fx_meters[s][k].store(fx.0.meter(), Ordering::Relaxed);
+            telemetry.fx_meters[s][k].store(meter, Ordering::Relaxed);
         }
         let (mut peak_l, mut peak_r, mut sq_l, mut sq_r) = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
         for i in 0..Q {

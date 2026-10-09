@@ -11,6 +11,7 @@ use crate::mixer::{Mixer, StripKind, FIRST_SEND, FX_SLOTS, INSERTS, MASTER};
 use crate::modulation::{ModSourceKind, Modulator, ModulatorId, MAX_MODULATORS};
 use crate::params::ParamId;
 use crate::playlist::{AutoPoint, Automation, ClipKind, Curve, Playlist};
+use crate::plugin::{PluginInstanceId, PluginOwner, PluginRef};
 use crate::synth::{SynthParam, SynthPatch};
 use crate::time::{TempoMap, TimeSigMap, PPQ};
 
@@ -173,6 +174,8 @@ pub enum Instrument {
     Sampler(SamplerSettings),
     /// Gloom Synth.
     Synth(Box<SynthPatch>),
+    /// A third-party instrument plugin.
+    Plugin(Box<PluginRef>),
 }
 
 impl Channel {
@@ -180,7 +183,7 @@ impl Channel {
     pub fn sampler(&self) -> Option<&SamplerSettings> {
         match &self.instrument {
             Instrument::Sampler(s) => Some(s),
-            Instrument::Synth(_) => None,
+            Instrument::Synth(_) | Instrument::Plugin(_) => None,
         }
     }
 
@@ -188,7 +191,7 @@ impl Channel {
     pub fn sampler_mut(&mut self) -> Option<&mut SamplerSettings> {
         match &mut self.instrument {
             Instrument::Sampler(s) => Some(s),
-            Instrument::Synth(_) => None,
+            Instrument::Synth(_) | Instrument::Plugin(_) => None,
         }
     }
 
@@ -196,7 +199,7 @@ impl Channel {
     pub fn synth(&self) -> Option<&SynthPatch> {
         match &self.instrument {
             Instrument::Synth(p) => Some(p),
-            Instrument::Sampler(_) => None,
+            Instrument::Sampler(_) | Instrument::Plugin(_) => None,
         }
     }
 
@@ -204,7 +207,23 @@ impl Channel {
     pub fn synth_mut(&mut self) -> Option<&mut SynthPatch> {
         match &mut self.instrument {
             Instrument::Synth(p) => Some(p),
-            Instrument::Sampler(_) => None,
+            Instrument::Sampler(_) | Instrument::Plugin(_) => None,
+        }
+    }
+
+    /// The instrument plugin, if this is a plugin channel.
+    pub fn plugin(&self) -> Option<&PluginRef> {
+        match &self.instrument {
+            Instrument::Plugin(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Mutable instrument plugin, if this is a plugin channel.
+    pub fn plugin_mut(&mut self) -> Option<&mut PluginRef> {
+        match &mut self.instrument {
+            Instrument::Plugin(p) => Some(p),
+            _ => None,
         }
     }
 
@@ -696,6 +715,7 @@ impl Project {
                     a.release_ms = fin(a.release_ms, 0.0, 20_000.0, 50.0);
                 }
                 Instrument::Synth(p) => p.sanitize(),
+                Instrument::Plugin(p) => p.sanitize(),
             }
         }
         // Patterns: unique ids, valid lengths, notes of existing channels only, sorted.
@@ -739,6 +759,7 @@ impl Project {
             m.sanitize();
         }
         self.sanitize_midi();
+        self.make_plugin_instances_unique();
         let next = self.next_id;
         self.set_id_counter(next);
         let next = self.playlist.id_counter();
@@ -759,6 +780,99 @@ impl Project {
     /// Adds a Gloom Synth channel at the bottom of the rack. `None` when the rack is full.
     pub fn add_synth_channel(&mut self, name: &str, patch: SynthPatch) -> Option<ChannelId> {
         self.add_instrument(name, Instrument::Synth(Box::new(patch)))
+    }
+
+    /// Adds a channel playing an instrument plugin at the bottom of the rack. `None` when the
+    /// rack is full.
+    pub fn add_plugin_channel(&mut self, name: &str, plugin: PluginRef) -> Option<ChannelId> {
+        self.add_instrument(name, Instrument::Plugin(Box::new(plugin)))
+    }
+
+    /// Every plugin in the project with where it sits: channels in rack order, then effect
+    /// slots by strip and slot.
+    pub fn plugins(&self) -> Vec<(PluginOwner, &PluginRef)> {
+        let mut out: Vec<(PluginOwner, &PluginRef)> = self
+            .channels
+            .iter()
+            .filter_map(|c| Some((PluginOwner::Channel(c.id), c.plugin()?)))
+            .collect();
+        for (strip, s) in self.mixer.strips.iter().enumerate() {
+            for (slot, fx) in s.slots.iter().enumerate() {
+                if let Some(p) = fx.as_ref().and_then(|f| f.plugin.as_deref()) {
+                    out.push((PluginOwner::Effect { strip, slot }, p));
+                }
+            }
+        }
+        out
+    }
+
+    /// The plugin at `owner`, if there is one.
+    pub fn plugin(&self, owner: PluginOwner) -> Option<&PluginRef> {
+        match owner {
+            PluginOwner::Channel(id) => self.channels[self.channel_index(id)?].plugin(),
+            PluginOwner::Effect { strip, slot } => self
+                .mixer
+                .strips
+                .get(strip)?
+                .slots
+                .get(slot)?
+                .as_ref()?
+                .plugin
+                .as_deref(),
+        }
+    }
+
+    /// Mutable plugin at `owner`.
+    pub fn plugin_mut(&mut self, owner: PluginOwner) -> Option<&mut PluginRef> {
+        match owner {
+            PluginOwner::Channel(id) => {
+                let i = self.channel_index(id)?;
+                self.channels[i].plugin_mut()
+            }
+            PluginOwner::Effect { strip, slot } => self
+                .mixer
+                .strips
+                .get_mut(strip)?
+                .slots
+                .get_mut(slot)?
+                .as_mut()?
+                .plugin
+                .as_deref_mut(),
+        }
+    }
+
+    /// The plugin with a given instance id and where it sits.
+    pub fn plugin_by_instance(&self, id: PluginInstanceId) -> Option<(PluginOwner, &PluginRef)> {
+        self.plugins().into_iter().find(|(_, p)| p.instance == id)
+    }
+
+    /// The plugin entry for a running instance, to update it.
+    pub fn plugin_by_instance_mut(&mut self, id: PluginInstanceId) -> Option<&mut PluginRef> {
+        let (owner, _) = self.plugin_by_instance(id)?;
+        self.plugin_mut(owner)
+    }
+
+    /// Gives every plugin its own instance id: a copied channel or slot must not share the
+    /// running plugin of the original.
+    pub fn make_plugin_instances_unique(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        let mut fix = |p: &mut PluginRef| {
+            if !seen.insert(p.instance) {
+                p.instance = PluginInstanceId::fresh();
+            }
+        };
+        for c in &mut self.channels {
+            if let Some(p) = c.plugin_mut() {
+                fix(p);
+            }
+        }
+        for s in &mut self.mixer.strips {
+            for fx in s.slots.iter_mut().flatten() {
+                if let Some(p) = fx.plugin.as_deref_mut() {
+                    fix(p);
+                }
+            }
+        }
     }
 
     fn add_instrument(&mut self, name: &str, instrument: Instrument) -> Option<ChannelId> {

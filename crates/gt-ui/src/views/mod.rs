@@ -8,6 +8,7 @@ mod mixer;
 mod modulators;
 mod piano_roll;
 mod playlist;
+mod plugins;
 mod sampler_panel;
 mod synth_panel;
 mod transport_bar;
@@ -24,6 +25,10 @@ pub use piano_roll::{
 pub use playlist::{
     add_automation, playlist, AudioLookup, PlaylistAction, PlaylistSnap, PlaylistState,
     PlaylistTool, PlaylistView,
+};
+pub use plugins::{
+    plugin_browser, plugin_controls, PluginAction, PluginBrowserAction, PluginBrowserState,
+    PluginBrowserView, PluginEntry, PluginPanelView, PluginState,
 };
 pub use sampler_panel::{sampler_panel, SamplerPanelView};
 pub use synth_panel::{scope_trigger, synth_panel, SynthPanelAction, SynthPanelView};

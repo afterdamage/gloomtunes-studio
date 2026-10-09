@@ -7,27 +7,31 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gt_core::{
-    ClipKind, EffectKind, Instrument, ModSourceKind, Modulator, ParamId, Project, SampleSource,
-    SigChange, TempoPoint, Tick, TimeSigMap, FX_SLOTS, MAX_CHANNELS, ROOT_KEY, STEP_TICKS, STRIPS,
+    ClipKind, EffectKind, Instrument, ModSourceKind, Modulator, ParamId, PluginInstanceId,
+    PluginKind, Project, SampleSource, SigChange, TempoPoint, Tick, TimeSigMap, FX_SLOTS,
+    MAX_CHANNELS, ROOT_KEY, STEP_TICKS, STRIPS,
 };
 use gt_engine::{
     create_effect, ChannelParams, EngineCommand, LoopRegion, MixerParams, ModPlan, ParamDest,
     SongSnapshot, TransportState,
 };
+use gt_plugin_host::{PluginHost, PluginStatus};
 use gt_project::{ops, presets, History};
 use gt_ui::param_ui::{self, ParamMarks, ParamRequest};
 use gt_ui::views::{
     add_automation, audio_panel, browser, channel_rack, mixer_view, modulators_panel, piano_roll,
-    playlist, sampler_panel, synth_panel, transport_bar, AudioAction, AudioPanelModel,
-    BrowserAction, BrowserModel, MidiPanelModel, MixerState, MixerView, ModulatorsState,
-    PianoRollAction, PianoRollState, PianoRollView, PlayState, PlaylistAction, PlaylistState,
-    PlaylistView, RackAction, RackState, RackView, SamplerPanelView, StripMeter, SynthPanelAction,
-    SynthPanelView, TransportAction, TransportModel,
+    playlist, plugin_controls, sampler_panel, synth_panel, transport_bar, AudioAction,
+    AudioPanelModel, BrowserAction, BrowserModel, MidiPanelModel, MixerState, MixerView,
+    ModulatorsState, PianoRollAction, PianoRollState, PianoRollView, PlayState, PlaylistAction,
+    PlaylistState, PlaylistView, PluginBrowserState, PluginPanelView, PluginState, RackAction,
+    RackState, RackView, SamplerPanelView, StripMeter, SynthPanelAction, SynthPanelView,
+    TransportAction, TransportModel,
 };
 use gt_ui::widgets::MeterBallistics;
 use gt_ui::GloomTheme;
 
 mod midi;
+mod plugins;
 
 use crate::audio_io::AudioIo;
 use crate::files::{self, Dialog, DialogAction, ExportForm, Then};
@@ -141,6 +145,32 @@ pub struct GloomApp {
     learning: Option<ParamId>,
     /// MIDI activity count last seen.
     midi_seen: u32,
+
+    /// CLAP plugins: finding, loading and running them, and their editor windows. Declared
+    /// after `audio`, so the engine (holding their processors) goes first at exit.
+    plugins: PluginHost,
+    /// Plugin files in use when the last session ended unexpectedly.
+    crashed_plugins: Vec<PathBuf>,
+    show_plugins: bool,
+    plugin_browser: PluginBrowserState,
+    /// Mixer slot the plugin browser adds effects to (chosen with the slot's "Plugin…").
+    plugin_slot: Option<(usize, usize)>,
+    /// A new engine started this frame: the plugin host starts its plugins in it.
+    fresh_engine: bool,
+}
+
+/// What the plugin panels show for plugin `id`.
+fn plugin_view(host: &PluginHost, id: PluginInstanceId) -> PluginPanelView {
+    PluginPanelView {
+        state: match host.status(id) {
+            PluginStatus::Running => PluginState::Running,
+            PluginStatus::Waiting => PluginState::Waiting,
+            PluginStatus::Failed => PluginState::Failed,
+            PluginStatus::Unavailable(why) => PluginState::Unavailable(why),
+        },
+        has_editor: host.has_editor(id),
+        editor_open: host.editor_open(id),
+    }
 }
 
 /// How often unsaved work is written to the recovery file.
@@ -172,6 +202,13 @@ impl GloomApp {
         let project = Project::demo();
         let history = History::new(&project);
         let live = gt_engine::LiveInput::default();
+        let waker_ctx = ctx.clone();
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("gloomtunes"));
+        let (plugins, crash) = PluginHost::new(
+            &data_folder().join("plugins"),
+            exe,
+            Arc::new(move || waker_ctx.request_repaint()),
+        );
         let mut app = Self {
             theme,
             audio: AudioIo::new(),
@@ -233,7 +270,21 @@ impl GloomApp {
             sent_live_slot: None,
             learning: None,
             midi_seen: 0,
+            plugins,
+            crashed_plugins: crash.in_use.clone(),
+            show_plugins: false,
+            plugin_browser: PluginBrowserState::default(),
+            plugin_slot: None,
+            fresh_engine: false,
         };
+        if let Some((path, plugin, action)) = &crash.quarantined {
+            app.toast(format!(
+                "{plugin} was switched off: GloomTunes closed while {action} it ({}). \
+                 Allow it again in Plugins.",
+                path.display()
+            ));
+        }
+        app.plugins.start_scan();
         app.refresh_presets();
         app.open_folder(default_folder());
         app.request_channel_samples();
@@ -508,6 +559,11 @@ impl GloomApp {
                 self.pending_edit = Some("Add or remove channel");
             }
             RackAction::OpenPianoRoll(_) => self.main_view = MainView::PianoRoll,
+            RackAction::AddPlugin => {
+                self.show_plugins = true;
+                self.plugin_browser.kind = Some(PluginKind::Instrument);
+                self.plugin_slot = None;
+            }
             RackAction::NoteOn(i) => self.send(EngineCommand::NoteOn {
                 slot: i as u16,
                 key: ROOT_KEY,
@@ -1156,6 +1212,7 @@ impl GloomApp {
                 self.edits += 1;
             }
         }
+        self.plugins.store_states(&mut self.project);
         match gt_project::file::save(
             &self.project,
             &path,
@@ -1277,8 +1334,12 @@ impl GloomApp {
         form.running = Some(Arc::clone(&progress));
         form.message = None;
         let project = self.project.clone();
+        // Fresh plugin instances in their current state, rendering offline.
+        let mut plugins = self
+            .plugins
+            .export_processors(&project, settings.sample_rate);
         self.export_job = Some(std::thread::spawn(move || {
-            gt_export::export(&project, &settings, &path, &progress)
+            gt_export::export(&project, &settings, &path, &progress, &mut plugins)
         }));
     }
 
@@ -1290,6 +1351,7 @@ impl GloomApp {
         let Some(job) = self.export_job.take() else {
             return;
         };
+        self.plugins.finish_export();
         let result = job
             .join()
             .unwrap_or_else(|_| Err(gt_export::ExportError::Io(std::io::Error::other("crashed"))));
@@ -1372,7 +1434,7 @@ impl GloomApp {
                     }
                 }
             }
-            DialogAction::Recover => self.recover(),
+            DialogAction::Recover(without_plugins) => self.recover(without_plugins),
             DialogAction::DiscardRecovery => {
                 self.clear_recovery();
                 self.dialog = None;
@@ -1412,14 +1474,24 @@ impl GloomApp {
                         s => format!("{} hours ago", s / 3600),
                     },
                 );
-            self.dialog = Some(Dialog::Recover { when });
+            let plugins = self
+                .crashed_plugins
+                .iter()
+                .map(|p| {
+                    p.file_stem().map_or_else(
+                        || p.display().to_string(),
+                        |s| s.to_string_lossy().into_owned(),
+                    )
+                })
+                .collect();
+            self.dialog = Some(Dialog::Recover { when, plugins });
         }
         if std::fs::create_dir_all(&dir).is_ok() {
             let _ = std::fs::write(&lock, std::process::id().to_string());
         }
     }
 
-    fn recover(&mut self) {
+    fn recover(&mut self, without_plugins: bool) {
         let dir = self.recovery_dir();
         let autosave = dir.join(format!("autosave.{}", gt_project::file::EXTENSION));
         let original = std::fs::read_to_string(dir.join("autosave-path.txt"))
@@ -1430,6 +1502,12 @@ impl GloomApp {
             Ok(loaded) => {
                 let missing = loaded.missing.clone();
                 self.replace_project(loaded.project, original);
+                if without_plugins {
+                    self.plugins.hold(
+                        &self.project,
+                        "switched off after the crash; Retry to load it",
+                    );
+                }
                 // Recovered work is not saved anywhere yet.
                 self.edits = 1;
                 self.dialog = None;
@@ -1472,6 +1550,7 @@ impl GloomApp {
         }
         let dir = self.recovery_dir();
         let path = dir.join(format!("autosave.{}", gt_project::file::EXTENSION));
+        self.plugins.store_states(&mut self.project);
         let result = std::fs::create_dir_all(&dir)
             .map_err(gt_project::file::FileError::from)
             .and_then(|()| gt_project::file::save(&self.project, &path, Default::default()));
@@ -1666,6 +1745,7 @@ enum FileCmd {
 
 impl eframe::App for GloomApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.plugins.shutdown();
         self.end_session();
     }
 
@@ -1674,6 +1754,7 @@ impl eframe::App for GloomApp {
         self.audio.poll();
         if self.audio.take_fresh_engine() {
             self.sync_new_engine();
+            self.fresh_engine = true;
         }
         let ready = self.library.poll();
         self.on_samples_ready(ready);
@@ -1858,6 +1939,8 @@ impl eframe::App for GloomApp {
         }
         let sample_rate = self.rate() as f32;
         let show_instrument = matches!(self.main_view, MainView::Rack | MainView::PianoRoll);
+        let mut plugin_actions = Vec::new();
+        let mut plugin_changed = false;
         let (sampler_changed, synth_actions) = if !show_instrument {
             (false, Vec::new())
         } else {
@@ -1891,6 +1974,20 @@ impl eframe::App for GloomApp {
                             };
                             (false, synth_panel(ui, &theme, &mut ch.name, patch, view))
                         }
+                        Instrument::Plugin(p) => {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(&p.name).strong().color(theme.accent));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut ch.name).desired_width(140.0),
+                                )
+                                .on_hover_text("Channel name");
+                            });
+                            let view = plugin_view(&self.plugins, p.instance);
+                            let owner = gt_core::PluginOwner::Channel(ch.id);
+                            plugin_changed =
+                                plugin_controls(ui, &theme, owner, p, &view, &mut plugin_actions);
+                            (false, Vec::new())
+                        }
                     }
                 })
                 .inner
@@ -1901,6 +1998,9 @@ impl eframe::App for GloomApp {
         }
         for a in synth_actions {
             self.on_synth_panel(a);
+        }
+        if plugin_changed {
+            self.pending_edit = Some("Plugin parameter");
         }
 
         let playing = self.transport.state == PlayState::Playing;
@@ -1989,11 +2089,18 @@ impl eframe::App for GloomApp {
                             .audio
                             .engine()
                             .map_or(0, |e| e.telemetry().latency_frames.load(Ordering::Relaxed));
+                        let open_plugin = self.mixer_state.slot.and_then(|k| {
+                            let strip = &self.project.mixer.strips
+                                [self.mixer_state.selected.min(STRIPS - 1)];
+                            let p = strip.slots.get(k)?.as_ref()?.plugin.as_ref()?;
+                            Some(plugin_view(&self.plugins, p.instance))
+                        });
                         let view = MixerView {
                             meters: &self.strip_view,
                             fx_meters: &self.fx_meters,
                             sample_rate,
                             latency_ms: latency as f32 * 1000.0 / sample_rate,
+                            plugin: open_plugin.as_ref(),
                         };
                         if mixer_view(
                             ui,
@@ -2021,6 +2128,18 @@ impl eframe::App for GloomApp {
         if mixer_changed {
             self.pending_edit = Some("Mixer");
         }
+        if let Some(target) = self.mixer_state.plugin_request.take() {
+            self.show_plugins = true;
+            self.plugin_browser.kind = Some(PluginKind::Effect);
+            self.plugin_slot = Some(target);
+        }
+        plugin_actions.append(&mut self.mixer_state.plugin_actions);
+        for a in plugin_actions {
+            self.on_plugin_action(a);
+        }
+        if self.show_plugins {
+            self.plugin_window(&ctx, &theme);
+        }
         if self.show_modulators {
             let mut open = true;
             let mut changed = false;
@@ -2040,6 +2159,7 @@ impl eframe::App for GloomApp {
         if let Some(req) = param_ui::take_request(&ctx) {
             self.on_param_request(req);
         }
+        self.sync_plugins(&ctx);
         self.sync_mixer();
         self.sync_modulation();
         if self.main_view != MainView::PianoRoll {

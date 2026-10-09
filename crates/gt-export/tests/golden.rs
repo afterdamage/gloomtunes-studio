@@ -64,7 +64,14 @@ fn reference_project_exports_to_the_stored_hash() {
         stems: false,
     };
     let out = dir.join("reference.wav");
-    let written = export(&loaded.project, &settings, &out, &Progress::default()).unwrap();
+    let written = export(
+        &loaded.project,
+        &settings,
+        &out,
+        &Progress::default(),
+        &mut Vec::new(),
+    )
+    .unwrap();
     assert_eq!(written, vec![out.clone()]);
     let bytes = std::fs::read(&out).unwrap();
     // 4 s of music plus a tail; 44-byte header, 4 bytes per frame.

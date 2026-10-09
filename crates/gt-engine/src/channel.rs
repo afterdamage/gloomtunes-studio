@@ -51,6 +51,8 @@ pub(crate) struct ChannelSlot {
     gain_l: LinearRamp,
     gain_r: LinearRamp,
     ramp_frames: u32,
+    /// Plugin table entry running this channel's instrument plugin.
+    pub(crate) plugin: Option<u8>,
 }
 
 /// Equal-power pan law: -3 dB per side at centre, so a sound keeps its loudness as it moves.
@@ -73,7 +75,20 @@ impl ChannelSlot {
             gain_l: LinearRamp::new(0.0),
             gain_r: LinearRamp::new(0.0),
             ramp_frames: (sample_rate * GAIN_RAMP_S) as u32,
+            plugin: None,
         }
+    }
+
+    /// The instrument plugin instance this channel plays, if it is a plugin channel.
+    pub(crate) fn plugin_instance(&self) -> Option<gt_core::PluginInstanceId> {
+        (self.params.kind == InstrumentKind::Plugin)
+            .then_some(self.params.plugin)
+            .flatten()
+    }
+
+    /// True for a plugin channel (its notes and audio go through the plugin table).
+    pub(crate) fn is_plugin(&self) -> bool {
+        self.params.kind == InstrumentKind::Plugin
     }
 
     fn env_for(sr: f32, p: &ChannelParams) -> AdsrParams {
@@ -230,6 +245,9 @@ impl ChannelSlot {
 
     /// Starts a note. `age` orders voices for stealing.
     pub(crate) fn note_on(&mut self, key: u8, velocity: f32, age: u64) {
+        if self.params.kind == InstrumentKind::Plugin {
+            return;
+        }
         if self.params.kind == InstrumentKind::Synth {
             self.synth.note_on(key, velocity, age);
             return;

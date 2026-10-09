@@ -4,7 +4,7 @@
 //! of the project document (channels, patterns, notes) and in-memory sample data. Step 5 adds
 //! Gloom Synth patches; Step 6 the mixer and its effects; Step 7 the playlist; Step 8 the
 //! parameter registry ([`ParamId`]), automation curves and modulators; Step 10 MIDI learn
-//! bindings ([`MidiBinding`]).
+//! bindings ([`MidiBinding`]); Step 11 third-party plugins ([`PluginRef`]).
 
 #![forbid(unsafe_code)]
 
@@ -16,6 +16,7 @@ pub mod param;
 pub mod params;
 pub mod peaks;
 pub mod playlist;
+pub mod plugin;
 pub mod project;
 pub mod sample;
 pub mod synth;
@@ -30,6 +31,10 @@ pub use params::{ChannelParam, ParamId, StripParam, MASTER_VOLUME};
 pub use peaks::Peaks;
 pub use playlist::{
     AutoPoint, Automation, Clip, ClipId, ClipKind, Curve, Marker, Playlist, Track, TrackId,
+};
+pub use plugin::{
+    PluginFormat, PluginInstanceId, PluginKind, PluginOwner, PluginParamInfo, PluginRef,
+    MAX_PLUGIN_PARAMS,
 };
 pub use project::{
     Adsr, BuiltInSample, Channel, ChannelId, Instrument, LoopMode, Note, Pattern, PatternId,

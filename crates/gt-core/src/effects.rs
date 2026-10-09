@@ -7,6 +7,7 @@
 use crate::param::ParamCurve::{Exp, Linear, Power, Stepped};
 use crate::param::ParamUnit::{self, Choice, Db, Hz, Ms, Percent, Plain, Ratio, Seconds};
 use crate::param::{ParamCurve, ParamInfo};
+use crate::plugin::PluginRef;
 
 /// The built-in effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -27,6 +28,8 @@ pub enum EffectKind {
     Limiter,
     /// Stereo width.
     Width,
+    /// A third-party effect plugin (its parameters live in [`EffectSlot::plugin`]).
+    Plugin,
 }
 
 const fn info(
@@ -197,7 +200,7 @@ static WIDTH: [ParamInfo; 2] = [
 ];
 
 impl EffectKind {
-    /// Every kind, in menu order.
+    /// Every built-in kind, in menu order.
     pub const ALL: [EffectKind; 8] = [
         Self::Eq,
         Self::Compressor,
@@ -220,6 +223,7 @@ impl EffectKind {
             Self::Distortion => "distortion",
             Self::Limiter => "limiter",
             Self::Width => "width",
+            Self::Plugin => "plugin",
         }
     }
 
@@ -234,12 +238,16 @@ impl EffectKind {
             Self::Distortion => "Distortion",
             Self::Limiter => "Limiter",
             Self::Width => "Stereo Width",
+            Self::Plugin => "Plugin",
         }
     }
 
     /// The kind with a file key.
     pub fn from_key(key: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|k| k.key() == key)
+        Self::ALL
+            .into_iter()
+            .chain([Self::Plugin])
+            .find(|k| k.key() == key)
     }
 
     /// Parameter table, in index order.
@@ -253,6 +261,7 @@ impl EffectKind {
             Self::Distortion => &DISTORTION,
             Self::Limiter => &LIMITER,
             Self::Width => &WIDTH,
+            Self::Plugin => &[],
         }
     }
 }
@@ -264,8 +273,10 @@ pub struct EffectSlot {
     pub kind: EffectKind,
     /// Bypassed when false.
     pub enabled: bool,
-    /// Values in the order of `kind.params()`.
+    /// Values in the order of `kind.params()` (empty for a plugin).
     pub params: Vec<f32>,
+    /// The plugin, when `kind` is [`EffectKind::Plugin`].
+    pub plugin: Option<Box<PluginRef>>,
 }
 
 impl EffectSlot {
@@ -275,6 +286,17 @@ impl EffectSlot {
             kind,
             enabled: true,
             params: kind.params().iter().map(|p| p.default).collect(),
+            plugin: None,
+        }
+    }
+
+    /// An enabled slot holding an effect plugin.
+    pub fn plugin(plugin: PluginRef) -> Self {
+        Self {
+            kind: EffectKind::Plugin,
+            enabled: true,
+            params: Vec::new(),
+            plugin: Some(Box::new(plugin)),
         }
     }
 
@@ -294,6 +316,12 @@ impl EffectSlot {
 
     /// Fixes the parameter count and clamps every value into range.
     pub fn sanitize(&mut self) {
+        if self.kind != EffectKind::Plugin {
+            self.plugin = None;
+        }
+        if let Some(p) = &mut self.plugin {
+            p.sanitize();
+        }
         let table = self.kind.params();
         self.params.resize(table.len(), 0.0);
         for (v, info) in self.params.iter_mut().zip(table) {

@@ -20,6 +20,7 @@ gt-core.workspace = true
 gt-dsp.workspace = true
 gt-engine.workspace = true
 gt-export.workspace = true
+gt-plugin-host.workspace = true
 gt-project.workspace = true
 gt-ui.workspace = true
 cpal.workspace = true

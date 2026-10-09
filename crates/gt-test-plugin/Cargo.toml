@@ -1,0 +1,23 @@
+[package]
+name = "gt-test-plugin"
+description = "GloomTunes Studio: small CLAP plugins for testing the plugin host."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+clack-plugin.workspace = true
+clack-extensions = { workspace = true, features = ["clack-plugin", "audio-ports", "note-ports", "params", "state", "latency", "gui", "timer"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb.workspace = true
