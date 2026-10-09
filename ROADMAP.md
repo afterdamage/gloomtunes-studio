@@ -23,7 +23,8 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 9 | Save/load, export, recovery | Done (2026-10-08) |
 | 10 | MIDI input and recording | Done (2026-10-09) |
 | 11 | CLAP plugin hosting | Done (2026-10-09) |
-| 12 | Performance, polish, packaging | **In review** (v1.0) |
+| 12 | Performance, polish, packaging | Done (2026-10-09, v1.0) |
+| 12m | macOS port and packaging | **In review** |
 
 ## Phases at a glance
 
@@ -365,6 +366,28 @@ for schedule; Phase E is the riskiest technically.
     started; the CPU meter measures the engine's render time, not time lost to the operating
     system between callbacks, which only the underrun count shows.
 
+### Step 12 for macOS
+- Asked for after v1.0: the same performance, polish and packaging work for macOS.
+- Delivered (2026-10-09), in review:
+  - **Runs on macOS 11 or later**, Apple Silicon and Intel, from the same code. Sound goes
+    through CoreAudio, MIDI through CoreMIDI, the window through Metal. Flush-to-zero is set on
+    Apple Silicon too (FZ in FPCR, D91), so the sound and the CPU cost match the other systems.
+  - **Mac places** (D92): settings, presets, autosave and crash reports in
+    `~/Library/Application Support/GloomTunes Studio`; CLAP plugins from
+    `~/Library/Audio/Plug-Ins/CLAP` and `/Library/Audio/Plug-Ins/CLAP`, as bundles.
+  - **Plugin editors** open in their own Mac window (D93).
+  - **Shortcuts** use Cmd (Cmd+S, Cmd+, for Settings, …) and say so everywhere (D94).
+  - **Package** (D95): `packaging/macos/build-app.sh` makes a universal `GloomTunes Studio.app`
+    with its icon and a `.dmg` to drag it to Applications. The release workflow builds it next
+    to the Windows and Ubuntu packages, attests it, and signs and notarizes it with a Developer
+    ID when those secrets are set (ad hoc signature otherwise, which Gatekeeper asks about once).
+  - CI builds and tests every crate on an Apple Silicon runner.
+  - Known limits: no Mac was available here, so the app was type-checked for macOS locally and
+    then built, tested and packaged only by CI; nobody has played it on a Mac yet. Opening a
+    `.gloom` file from Finder is not supported (use File > Open, D95); the memory figure on the
+    Performance page is Linux only; the test plugin's own editor exists on Linux only, so editor
+    windows were not exercised by a plugin in CI.
+
 ---
 
 ## v1.0 scope
@@ -380,7 +403,7 @@ Out (post-v1 backlog):
 - Tempo ramps (the tempo map currently has step changes only).
 - Out-of-process plugin sandbox (evaluated and deferred in Step 11, D74).
 - Additional built-in instruments (FM, wavetable, drum synth).
-- macOS (not a target; the architecture does not prevent it).
+- macOS: opening `.gloom` files from Finder (D95).
 
 ## Keeping this file current
 

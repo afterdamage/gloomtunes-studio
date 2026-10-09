@@ -1,17 +1,22 @@
 name: Release
 
-# Builds the Windows installer, the .deb and the AppImage, signs them and drafts a GitHub
-# release. Runs when a version tag (v1.0.0) is pushed; "Run workflow" builds the same files as
-# downloadable artifacts without a release, and pull requests that touch packaging build them
-# too (unsigned, not attested) so a broken installer shows up before a release.
+# Builds the Windows installer, the .deb, the AppImage and the macOS .dmg, signs them and
+# drafts a GitHub release. Runs when a version tag (v1.0.0) is pushed; "Run workflow" builds
+# the same files as downloadable artifacts without a release, and pull requests that touch
+# packaging build them too (unsigned, not attested) so a broken installer shows up before a
+# release.
 #
 # Signing:
 # - Always: a Sigstore build-provenance attestation for every file (keyless, tied to this
 #   workflow run). Verify with `gh attestation verify <file> --repo <owner>/<repo>`.
 # - Optional Authenticode for the .exe and installer: repository secrets WINDOWS_CERT_PFX
 #   (base64 of a .pfx) and WINDOWS_CERT_PASSWORD.
+# - Optional Developer ID signing of the macOS app and .dmg: secrets MACOS_CERT_P12 (base64 of
+#   a .p12 holding the "Developer ID Application" certificate and key) and MACOS_CERT_PASSWORD.
+#   With APPLE_ID, APPLE_TEAM_ID and APPLE_APP_PASSWORD (app-specific) too, it is notarized.
+#   Without them the app is signed ad hoc.
 # - Optional GPG signature of SHA256SUMS: secrets GPG_PRIVATE_KEY (armored) and GPG_PASSPHRASE.
-# Without those secrets the files are still attested, just not Authenticode/GPG signed.
+# Without those secrets the files are still attested, just not Authenticode/Apple/GPG signed.
 
 on:
   push:
@@ -113,9 +118,50 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  macos:
+    name: macOS app
+    runs-on: macos-latest
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Prepare signing
+        if: env.MACOS_CERT_P12 != ''
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          pass="$(uuidgen)"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$pass" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$pass" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          identity="$(security find-identity -v -p codesigning "$keychain" \
+            | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -n1)"
+          test -n "$identity" || { echo "::error::no Developer ID Application identity in MACOS_CERT_P12"; exit 1; }
+          echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+      - name: App and disk image
+        run: packaging/macos/build-app.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.dmg
+          if-no-files-found: error
+
   publish:
     name: Attest and draft the release
-    needs: [linux, windows]
+    needs: [linux, windows, macos]
     runs-on: ubuntu-22.04
     permissions:
       contents: write # create the release

@@ -20,6 +20,7 @@ use gt_project::file;
 const EXPECTED: &[(&str, &str)] = &[
     ("linux", "b399cad748bb62c9"),
     ("windows", "e682a81ea7dbbf92"),
+    ("macos", "3e0e8fe1ac328dda"), // Apple Silicon (the CI runner)
 ];
 
 fn fixture() -> PathBuf {

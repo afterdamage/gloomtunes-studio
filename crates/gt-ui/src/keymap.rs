@@ -165,12 +165,21 @@ impl Command {
     }
 }
 
-/// Shortcut text as shown and saved: `Ctrl+Shift+S`, `F5`, `Space`.
+/// The name of the key that shortcuts use: Cmd on macOS, Ctrl elsewhere. Both are
+/// [`Modifiers::COMMAND`] in egui, so the same shortcut is Cmd+S on a Mac and Ctrl+S on a PC.
+pub const COMMAND_KEY: &str = if cfg!(target_os = "macos") {
+    "Cmd"
+} else {
+    "Ctrl"
+};
+
+/// Shortcut text as shown and saved: `Ctrl+Shift+S` (`Cmd+Shift+S` on macOS), `F5`, `Space`.
 pub fn format_shortcut(s: &KeyboardShortcut) -> String {
     let m = s.modifiers;
     let mut out = String::new();
     if m.command || m.ctrl || m.mac_cmd {
-        out.push_str("Ctrl+");
+        out.push_str(COMMAND_KEY);
+        out.push('+');
     }
     if m.shift {
         out.push_str("Shift+");
@@ -182,7 +191,8 @@ pub fn format_shortcut(s: &KeyboardShortcut) -> String {
     out
 }
 
-/// Parses the output of [`format_shortcut`] (case-insensitive modifiers; `Cmd` = `Ctrl`).
+/// Parses the output of [`format_shortcut`] (case-insensitive modifiers; `Cmd` = `Ctrl`, so
+/// a settings file works on every system).
 pub fn parse_shortcut(text: &str) -> Option<KeyboardShortcut> {
     let mut parts: Vec<&str> = text.split('+').map(str::trim).collect();
     // "Ctrl++" names the Plus key.
@@ -359,7 +369,7 @@ mod tests {
                 Modifiers::COMMAND | Modifiers::SHIFT,
                 Key::S
             )),
-            "Ctrl+Shift+S"
+            format!("{COMMAND_KEY}+Shift+S")
         );
         assert_eq!(
             parse_shortcut("cmd+alt+F2"),

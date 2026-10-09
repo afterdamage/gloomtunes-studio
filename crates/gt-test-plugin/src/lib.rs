@@ -8,8 +8,9 @@
 //!   host parameter path.
 //!
 //! Both save their state. The crate builds as a `cdylib` (the `.clap` file: copy
-//! `libgt_test_plugin.so` or `gt_test_plugin.dll` to a CLAP folder under a `.clap` name) and as
-//! an `rlib`, so the host's tests can load it in process. It is not shipped with the app.
+//! `libgt_test_plugin.so`, `gt_test_plugin.dll` or `libgt_test_plugin.dylib` to a CLAP folder
+//! under a `.clap` name) and as an `rlib`, so the host's tests can load it in process. It is
+//! not shipped with the app. Its gain editor exists on Linux (X11) only.
 
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicU32, Ordering};

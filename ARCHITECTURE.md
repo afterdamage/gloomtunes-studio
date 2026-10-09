@@ -1,11 +1,12 @@
 # GloomTunes Studio: Architecture
 
-Status: **design baseline (Prompt 0); Steps 1 to 11 implemented** (see ROADMAP.md for what each delivered). This document is the contract that
+Status: **design baseline (Prompt 0); Steps 1 to 12 implemented, plus macOS (D91-D95)** (see ROADMAP.md for what each delivered). This document is the contract that
 Prompts 1 to 12 implement; when an implementation step has to deviate, the step updates this file
 and adds an entry to the [decision log](#9-decision-log).
 
 GloomTunes Studio is an original, open-source, pattern-based DAW written in Rust for Windows 10/11
-and Ubuntu 22.04+ (x86_64) from one codebase. License: GPL-3.0-or-later. Author: Vasil Vasilev.
+and Ubuntu 22.04+ (x86_64) from one codebase; macOS 11+ (Apple Silicon and Intel) was added after
+Step 12 (D91-D95). License: GPL-3.0-or-later. Author: Vasil Vasilev.
 
 Contents
 
@@ -400,7 +401,11 @@ many plugins only test against a few hosts. Estimated effort: 3 to 5 weeks, afte
 - `app/prefs.rs` (Step 12): the settings window (Audio and MIDI, Shortcuts, Theme,
   Performance, Privacy), the first-run wizard, the crash-report notice, global shortcuts
   through `gt_ui::Keymap` (D86) and the performance figures (frame time from eframe, resident
-  memory from `/proc` on Linux, time to the first frame).
+  memory from `/proc` on Linux only, time to the first frame).
+- Data folder (`library::data_folder`): `%APPDATA%\GloomTunes Studio` on Windows,
+  `~/Library/Application Support/GloomTunes Studio` on macOS, `$XDG_DATA_HOME/gloomtunes-studio`
+  (default `~/.local/share/gloomtunes-studio`) on Linux. Settings, presets, autosave and crash
+  reports live there (D92).
 - `crash` (Step 12): the opt-in panic hook and the GitHub issue link (D88).
 - `audio_io` (Step 12 additions): sample-rate choice from the device's supported ranges; the
   callback timing that feeds `gt_engine::LoadMeter`; xruns and refused real-time priority
@@ -1063,6 +1068,9 @@ OS. The cross-OS tolerance comparison is still planned.
 > the guard to nothing. The tests check that subnormals flush inside the guard and not outside
 > it; the "10 s of silence" cost tests per effect were not written, the `render_cost` example
 > measures the effect on the whole demo song instead (§7.9).
+>
+> **macOS (D91):** on 64-bit ARM (Apple Silicon) the same guard sets FZ (bit 24) in FPCR, which
+> flushes subnormal inputs and results alike; the same tests run there in CI.
 
 ### 7.7 Plugin delay compensation (groundwork)
 
@@ -1082,17 +1090,23 @@ nodes from Prompt 6 even if all latencies are zero.
 
 ### 7.8 Platform specifics
 
-| Area | Windows | Ubuntu |
-|---|---|---|
-| Audio backend | WASAPI shared (cpal default); ASIO via `asio` feature (needs the Steinberg ASIO SDK, not shipped) | ALSA (cpal default; works on PipeWire through pipewire-alsa); JACK via `jack` feature |
-| Exclusive/low latency | WASAPI exclusive is not available: cpal 0.18 opens shared-mode streams only. Evaluated in Step 12 and deferred (D85); the settings show the row disabled with the reason. ASIO (`asio` feature) is the low-latency route | PipeWire quantum governs latency (`PIPEWIRE_QUANTUM`, README) |
-| Thread priority | cpal's `realtime` feature registers the audio thread with MMCSS ("Pro Audio") through `audio_thread_priority`, falling back to `THREAD_PRIORITY_TIME_CRITICAL` (D84) | The same feature asks for `SCHED_FIFO` through `audio_thread_priority` (RLIMIT_RTPRIO: the `audio` group or rtkit); a refusal is shown on the Performance page |
-| Packaging | Inno Setup installer from `packaging/windows/gloomtunes.iss`: per-user by default, Start menu entry, optional desktop icon, `.gloom` association (D89) | `.deb` from `cargo deb` (metadata in `crates/gt-app/Cargo.toml`) and an AppImage from `packaging/linux/build-appimage.sh`; both carry the desktop entry, icons, MIME type and AppStream metadata. Built on 22.04 so they install on 22.04 and later (D89) |
-| Release | `.github/workflows/release.yml` on a `v*` tag: builds both, Sigstore build provenance for every file, optional Authenticode and GPG when the secrets exist, draft GitHub release (D90) | same workflow |
-| MIDI | WinMM via midir | ALSA sequencer via midir |
-| Build deps | MSVC toolchain | `libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev pkg-config` (+ `libjack-jackd2-dev` for JACK) |
-| Runtime libs | none beyond the OS | `libxkbcommon-x11-0` on X11 sessions (present on standard desktop installs) |
-| Renderer | wgpu (DX12/Vulkan); automatic fallback to OpenGL (glow) if wgpu cannot start; `GT_RENDERER=glow` forces it | same |
+| Area | Windows | Ubuntu | macOS (D91-D95) |
+|---|---|---|---|
+| Audio backend | WASAPI shared (cpal default); ASIO via `asio` feature (needs the Steinberg ASIO SDK, not shipped) | ALSA (cpal default; works on PipeWire through pipewire-alsa); JACK via `jack` feature | CoreAudio (cpal default) |
+| Exclusive/low latency | WASAPI exclusive is not available: cpal 0.18 opens shared-mode streams only. Evaluated in Step 12 and deferred (D85); the settings show the row disabled with the reason. ASIO (`asio` feature) is the low-latency route | PipeWire quantum governs latency (`PIPEWIRE_QUANTUM`, README) | CoreAudio is low latency by itself; no extra mode |
+| Thread priority | cpal's `realtime` feature registers the audio thread with MMCSS ("Pro Audio") through `audio_thread_priority`, falling back to `THREAD_PRIORITY_TIME_CRITICAL` (D84) | The same feature asks for `SCHED_FIFO` through `audio_thread_priority` (RLIMIT_RTPRIO: the `audio` group or rtkit); a refusal is shown on the Performance page | CoreAudio calls the engine on its own real-time I/O thread, so there is nothing to request (cpal's `realtime` feature does nothing on macOS) |
+| Denormals | FTZ/DAZ in MXCSR (D82) | same | FZ in FPCR on Apple Silicon, MXCSR on Intel (D91) |
+| Data folder | `%APPDATA%\GloomTunes Studio` | `~/.local/share/gloomtunes-studio` | `~/Library/Application Support/GloomTunes Studio` (D92) |
+| CLAP folders | `Common Files\CLAP`, `%LOCALAPPDATA%\Programs\Common\CLAP`, `CLAP_PATH` | `~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap`, `CLAP_PATH` | `~/Library/Audio/Plug-Ins/CLAP`, `/Library/Audio/Plug-Ins/CLAP`, `CLAP_PATH`; `.clap` bundles are plugin files (D92) |
+| Plugin editors | Win32 window | X11 window (XWayland on Wayland) | AppKit window through `objc2-app-kit` (D93) |
+| Shortcuts | Ctrl | Ctrl | Cmd (the same bindings; labels say Cmd, D94) |
+| Packaging | Inno Setup installer from `packaging/windows/gloomtunes.iss`: per-user by default, Start menu entry, optional desktop icon, `.gloom` association (D89) | `.deb` from `cargo deb` (metadata in `crates/gt-app/Cargo.toml`) and an AppImage from `packaging/linux/build-appimage.sh`; both carry the desktop entry, icons, MIME type and AppStream metadata. Built on 22.04 so they install on 22.04 and later (D89) | Universal `GloomTunes Studio.app` in a `.dmg` from `packaging/macos/build-app.sh` (Info.plist, .icns); no `.gloom` association (D95) |
+| Release | `.github/workflows/release.yml` on a `v*` tag: builds all three, Sigstore build provenance for every file, optional Authenticode and GPG when the secrets exist, draft GitHub release (D90) | same workflow | same workflow; ad hoc signature, or Developer ID plus notarization when the secrets exist (D95) |
+| MIDI | WinMM via midir | ALSA sequencer via midir | CoreMIDI via midir |
+| Build deps | MSVC toolchain | `libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev pkg-config` (+ `libjack-jackd2-dev` for JACK) | Xcode command line tools |
+| Runtime libs | none beyond the OS | `libxkbcommon-x11-0` on X11 sessions (present on standard desktop installs) | none beyond the OS (macOS 11 or later) |
+| Renderer | wgpu (DX12/Vulkan); automatic fallback to OpenGL (glow) if wgpu cannot start; `GT_RENDERER=glow` forces it | same | wgpu (Metal); same fallback |
+| Memory figure (Performance page) | not shown | from `/proc/self/status` | not shown |
 
 ### 7.9 Performance measurements (Step 12)
 
@@ -1222,7 +1236,7 @@ polled), and float determinism across compilers.
 | D79 | Editors embed into a native top-level window of ours (X11 through `x11rb`, Win32 through `windows-sys`), falling back to the plugin's own floating window; the UI frame loop polls those windows and runs the plugins' timers (10 ms to 1 s) and file descriptors, asking for frames as needed. On Wayland, editors need XWayland | No dependency on a windowing toolkit beyond what egui uses; CLAP's X11 and Win32 APIs are what plugins support | Wayland-native editors when CLAP plugins support them |
 | D80 | Offline export uses fresh plugin instances created from the live state, switched to offline rendering, handed to `gt-export` and reused for every stem pass (reset in between); they are released when the export finishes | Export never disturbs what is playing; the same render path as real time | — |
 | D81 | An in-tree `gt-test-plugin` crate (built with `clack-plugin`) provides two small CLAP plugins, a gain effect with a "misbehave" switch and a sine/square instrument with an X11 editor, for tests and smoke tests; never shipped | Real third-party plugins cannot be downloaded in CI; misbehaviour must be testable on demand | — |
-| D82 | Flush-to-zero (FTZ and DAZ) is set by a guard around every `AudioProcessor::process` call and restored afterwards (x86_64; a no-op elsewhere) | Subnormals in decaying feedback state made the 99th-percentile callback twice as slow; setting it inside `process` covers device callbacks and export alike, so their output stays identical | ARM targets: set FZ in FPCR the same way |
+| D82 | Flush-to-zero (FTZ and DAZ) is set by a guard around every `AudioProcessor::process` call and restored afterwards (x86_64; a no-op elsewhere) | Subnormals in decaying feedback state made the 99th-percentile callback twice as slow; setting it inside `process` covers device callbacks and export alike, so their output stays identical | Done for ARM in D91 |
 | D83 | CPU load is measured in the device layer around `process` (render time over buffer duration) and published as smoothed load, peak, late-callback count and backend xrun count; the transport bar shows a meter that turns red for 3 s after any dropout | Cheap (two clock reads per callback), honest about the engine's own cost, and the counts catch dropouts the average hides. Time the OS takes between callbacks is invisible to it, which is what the xrun count is for | A backend reports its own load (JACK) |
 | D84 | Real-time priority comes from cpal's `realtime` feature (`audio_thread_priority`, MPL-2.0): MMCSS on Windows, `SCHED_FIFO` on Linux. A refusal is not an error: it shows on the Performance page with how to fix it | The library already knows each backend's thread; no `unsafe` in gt-app | — |
 | D85 | WASAPI exclusive mode is shown as unavailable with the reason, not implemented | cpal 0.18 has no exclusive streams; a second WASAPI backend (the `wasapi` crate) would duplicate device handling, format negotiation and recovery for a mode ASIO builds already cover | cpal gains exclusive mode, or users without ASIO drivers ask for lower latency |
@@ -1231,6 +1245,11 @@ polled), and float determinism across compilers.
 | D88 | Crash reports are opt-in (off by default, asked in the first-run wizard and on the Privacy page). The panic hook writes a local text file (message, location, thread, version, OS, backtrace); the next start shows it and can open a pre-filled GitHub issue in the browser. No network code in the app | Nothing leaves the machine without the user reading it and pressing Submit on GitHub; no server to run | Many reports, or reports need symbols: add symbol upload to the release workflow |
 | D89 | Shipped builds use a `dist` profile (thin LTO, one codegen unit, no line tables, symbols kept). Windows: Inno Setup (free, scriptable, per-user installs without admin); Ubuntu: `cargo deb` and an AppImage built with appimagetool, without bundling system libraries | Small packages that still give function names in crash reports; Inno Setup is preinstalled or one `choco` away on CI; system audio and GL libraries must match the host | Flatpak, or MSI for managed Windows installs |
 | D90 | Releases are built by `.github/workflows/release.yml` from a `v*` tag that must match the Cargo version. Every file gets a Sigstore build-provenance attestation (keyless); Authenticode and GPG signatures are added when their secrets are configured; the release is a draft for a human to publish. PRs touching packaging run the same build unsigned | Signing that works today without buying a certificate, upgradeable when one exists; nothing is published without a person | A code-signing certificate is bought (SmartScreen warnings) |
+| D91 | macOS is a supported platform from the same codebase (macOS 11+, Apple Silicon and Intel, one universal app). `DenormalGuard` sets FZ in FPCR on aarch64 the way it sets FTZ/DAZ on x86_64; CI builds and tests on Apple Silicon | Asked for after v1.0; cpal, midir, eframe and clack already support it, so the port is platform edges, not a rewrite. FZ keeps exports bit-identical in behaviour to real time on ARM as well | — |
+| D92 | macOS paths follow Apple's layout: data in `~/Library/Application Support/GloomTunes Studio` (presets under `Presets/Gloom Synth`), CLAP plugins in `~/Library/Audio/Plug-Ins/CLAP` and `/Library/Audio/Plug-Ins/CLAP`. A `.clap` folder that contains `Contents` is a plugin bundle: the scan lists it as one file and the catalog's change check uses the size and time of the binaries in `Contents/MacOS` | Where Mac users and plugin installers expect them; a bundle folder's own date does not change when its binary is updated | — |
+| D93 | Plugin editors on macOS embed into an `NSWindow` made with `objc2-app-kit` (the same objc2 version winit uses, so no new code is compiled for the framework bindings). There is no delegate: each UI frame polls whether the window is still visible (closed) and its content size (resized). The window is not released on close, so the plugin's view is removed first | No Objective-C class of our own to declare; the poll matches how the X11 and Win32 windows are handled | Closing needs to be vetoed, or polling misses an event |
+| D94 | Shortcuts use egui's `COMMAND` modifier everywhere, which is Cmd on macOS and Ctrl elsewhere. Labels and saved text say `Cmd` on macOS (`keymap::COMMAND_KEY`); both words parse on every system, so a settings file moves between machines | One keymap; Mac conventions (Cmd+S, Cmd+, for Settings) without a second set of defaults | — |
+| D95 | macOS packaging: `packaging/macos/build-app.sh` builds both architectures in the `dist` profile, joins them with `lipo`, writes the bundle (Info.plist template, `.icns`) and a compressed `.dmg` with an Applications link. Without secrets it signs ad hoc (Apple Silicon refuses unsigned code; Gatekeeper asks once). With a Developer ID certificate it signs with the hardened runtime and `disable-library-validation` (plugins are other vendors' code) and notarizes when Apple credentials exist. No `.gloom` document type is declared: Finder opens documents with an Apple Event that eframe does not pass on, so an association would start the app without the file | Works without an Apple developer account today and becomes a fully trusted download once one exists; no promise the app cannot keep | Handle `application:openURLs:` (through winit) and declare the document type |
 
 ---
 
@@ -1259,11 +1278,14 @@ GPL-3.0-or-later. **Flagged** entries are copyleft or have special terms.
 | x11rb 0.13 (Linux) | plugin editor windows | MIT OR Apache-2.0 | 11 |
 | windows-sys 0.61 (Windows) | plugin editor windows | MIT OR Apache-2.0 | 11 |
 | libc (Unix) | `poll` for plugins' file descriptors | MIT OR Apache-2.0 | 11 |
+| objc2 0.6, objc2-app-kit 0.3, objc2-foundation 0.3 (macOS) | plugin editor windows; already used by winit, added directly for macOS | MIT (objc2); Zlib OR Apache-2.0 OR MIT (the framework crates) | 12 (macOS) |
+| coreaudio-rs, objc2-core-audio (macOS, through cpal) | CoreAudio backend | MIT OR Apache-2.0; Zlib OR Apache-2.0 OR MIT | 12 (macOS) |
 | criterion 0.8 (`cargo_bench_support` only, no plotters) | benchmarks (dev); added in Step 5 | MIT OR Apache-2.0 | 5 |
 | insta | snapshot tests (dev); added in Step 5 | Apache-2.0 | 5 |
-| audio_thread_priority 0.35 (through cpal's `realtime` feature) | real-time priority for the audio thread (MMCSS on Windows, SCHED_FIFO on Linux); added in Step 12 | **MPL-2.0 (flag: file-level copyleft; compatible with GPL-3.0)** | 12 |
+| audio_thread_priority 0.35 (through cpal's `realtime` feature) | real-time priority for the audio thread (MMCSS on Windows, SCHED_FIFO on Linux; not used on macOS); added in Step 12 | **MPL-2.0 (flag: file-level copyleft; compatible with GPL-3.0)** | 12 |
 | epaint_default_fonts (part of egui) | the built-in UI fonts (Ubuntu Light, Hack, Noto Emoji) | MIT OR Apache-2.0 for the code; **flag: the fonts are OFL-1.1 and the Ubuntu Font Licence 1.0**, free font licenses for data shipped inside the binary; allowed by name in `deny.toml` | 1 |
 | cargo-deb, appimagetool, Inno Setup (build tools only, not linked or shipped) | packaging; added in Step 12 | MIT; MIT; Inno Setup license (free, permissive) | 12 |
+| Xcode command line tools: lipo, codesign, hdiutil, notarytool (build tools only) | macOS packaging | Apple's Xcode license; not shipped | 12 (macOS) |
 | cargo-deny (CI tool) | license, ban, source and advisory checks; added in Step 12 | MIT OR Apache-2.0 | 12 |
 | ASIO SDK (Windows, optional feature) | ASIO backend | **Steinberg terms (flag): not redistributed; user supplies it** | 12 |
 | VST3 SDK (design only, §2.6.1) | VST3 hosting | MIT since SDK 3.8 (earlier: GPLv3 or Steinberg's proprietary agreement); **flag: "VST" is a Steinberg trademark with its own usage guidelines** | — |

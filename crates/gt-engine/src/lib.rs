@@ -12,7 +12,7 @@
 //! This crate deliberately does not depend on any audio device library: the device layer in
 //! `gt-app` calls `process`, and so can tests and offline export.
 
-// The only unsafe code is setting the FTZ/DAZ flags (ARCHITECTURE.md §7.6) in `denormal`.
+// The only unsafe code is setting the flush-to-zero flags (ARCHITECTURE.md §7.6) in `denormal`.
 #![deny(unsafe_code)]
 
 mod atomic;

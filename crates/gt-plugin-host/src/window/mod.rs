@@ -1,9 +1,9 @@
 //! Native windows that hold plugin editors.
 //!
 //! The app's own window belongs to egui, so each plugin editor gets a separate top-level
-//! window of ours, made with the platform's own API (X11 on Linux, Win32 on Windows), and the
-//! plugin embeds its editor in it (`gui.set_parent`). Its events are polled once per UI frame
-//! on the main thread, as CLAP requires.
+//! window of ours, made with the platform's own API (X11 on Linux, Win32 on Windows, AppKit
+//! on macOS), and the plugin embeds its editor in it (`gui.set_parent`). Its events are
+//! polled once per UI frame on the main thread, as CLAP requires.
 
 #[cfg(target_os = "linux")]
 mod x11;
@@ -14,6 +14,11 @@ use x11 as imp;
 mod win32;
 #[cfg(windows)]
 use win32 as imp;
+
+#[cfg(target_os = "macos")]
+mod cocoa;
+#[cfg(target_os = "macos")]
+use cocoa as imp;
 
 use clack_extensions::gui::{GuiApiType, Window};
 
@@ -28,7 +33,7 @@ pub(crate) struct WindowEvents {
 
 /// A window holding one plugin editor.
 pub(crate) struct HostWindow {
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     inner: imp::Native,
 }
 
@@ -39,6 +44,8 @@ impl HostWindow {
             Some(GuiApiType::X11)
         } else if cfg!(windows) {
             Some(GuiApiType::WIN32)
+        } else if cfg!(target_os = "macos") {
+            Some(GuiApiType::COCOA)
         } else {
             None
         }
@@ -52,7 +59,7 @@ impl HostWindow {
         height: u32,
         resizable: bool,
     ) -> Result<Self, String> {
-        #[cfg(any(target_os = "linux", windows))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         return Ok(Self {
             inner: imp::Native::open(title, width.max(1), height.max(1), resizable)?,
         });
@@ -62,7 +69,7 @@ impl HostWindow {
 
     /// The window as CLAP describes it, to pass to the plugin.
     pub(crate) fn clap_window(&self) -> Window<'static, 'static> {
-        #[cfg(any(target_os = "linux", windows))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         return self.inner.clap_window();
         #[allow(unreachable_code)]
         {
@@ -72,7 +79,7 @@ impl HostWindow {
 
     /// Handles pending events.
     pub(crate) fn poll(&mut self) -> WindowEvents {
-        #[cfg(any(target_os = "linux", windows))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         return self.inner.poll();
         #[allow(unreachable_code)]
         WindowEvents::default()
@@ -81,13 +88,13 @@ impl HostWindow {
     /// Sets the inner size.
     #[allow(unused_variables)]
     pub(crate) fn resize(&mut self, width: u32, height: u32, resizable: bool) {
-        #[cfg(any(target_os = "linux", windows))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         self.inner.resize(width.max(1), height.max(1), resizable);
     }
 
     /// Brings the window to the front.
     pub(crate) fn raise(&mut self) {
-        #[cfg(any(target_os = "linux", windows))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         self.inner.raise();
     }
 }

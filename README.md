@@ -1,10 +1,10 @@
 # GloomTunes Studio
 
 An original, open-source, pattern-based digital audio workstation written in Rust, for
-Windows 10/11 and Ubuntu 22.04+ from a single codebase. Channel rack, piano roll, mixer and
+Windows 10/11, Ubuntu 22.04+ and macOS 11+ from a single codebase. Channel rack, piano roll, mixer and
 playlist, with built-in instruments and effects, wrapped in a dark, moody "Gloom" interface.
 
-> **Status:** v0.1 alpha, Step 11 of the [roadmap](ROADMAP.md): CLAP instrument and effect
+> **Status:** v1.0, every step of the [roadmap](ROADMAP.md) done, on Windows, Ubuntu and macOS. CLAP instrument and effect
 > plugins load into the channel rack and the mixer, with their own editors, automatable
 > parameters, saved state and crash protection. A MIDI keyboard (plugged in any
 > time) or the computer keyboard plays the selected channel, takes record into the piano roll
@@ -28,7 +28,7 @@ playlist, with built-in instruments and effects, wrapped in a dark, moody "Gloom
 
 ## Installing
 
-Releases on GitHub carry three packages, each with a build-provenance attestation:
+Releases on GitHub carry four packages, each with a build-provenance attestation:
 
 - **Windows 10/11:** `GloomTunes-Studio-<version>-x64-setup.exe`. Installs for your user
   without administrator rights (the first page offers all users), adds a Start menu entry and
@@ -38,6 +38,12 @@ Releases on GitHub carry three packages, each with a build-provenance attestatio
   start **GloomTunes Studio** from the app menu or run `gloomtunes`.
 - **Any recent Linux (AppImage):** `chmod +x GloomTunes-Studio-<version>-x86_64.AppImage` and
   run it. It uses the system's ALSA and graphics libraries.
+- **macOS 11 or later (Apple Silicon or Intel):** open
+  `GloomTunes-Studio-<version>-macos-universal.dmg` and drag **GloomTunes Studio** to
+  **Applications**. Until the project has an Apple Developer ID, macOS says it cannot check the
+  app for malicious software the first time: open it once with right-click (or Control-click)
+  **> Open > Open**, or allow it under **System Settings > Privacy & Security > Open Anyway**.
+  Releases signed and notarized with a Developer ID open normally.
 
 To check that a file was built by this repository's release workflow:
 `gh attestation verify <file> --repo afterdamage/gloomtunes-studio`. When the release also
@@ -78,7 +84,21 @@ cargo run --release -p gt-app
 Audio goes through WASAPI (shared mode). ASIO is an optional feature (`--features asio`) that
 needs the Steinberg ASIO SDK, which is not shipped with this project.
 
+### macOS 11+
+
+Install the Xcode command line tools (`xcode-select --install`), then:
+
+```sh
+cargo run --release -p gt-app
+```
+
+Audio goes through CoreAudio, MIDI through CoreMIDI and drawing through Metal; nothing else is
+needed. Plugin editors open in their own window.
+
 ### Using it
+
+On macOS every shortcut below that uses Ctrl uses **Cmd** instead (Cmd+S, Cmd+, and so on),
+and the app shows it that way. Function keys on a Mac laptop may need **fn** held down.
 
 - **Space** plays and pauses. The app opens on the **Playlist** with a 12-bar demo song (an
   intro, the main beat, a break with a delay swell and the beat again) in **Song** mode. **Pat**
@@ -120,7 +140,8 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
   8-slot modulation matrix (source, destination, amount) and an oscilloscope of that channel.
   Knobs drag up/down (Shift for fine, double-click to reset). The **Preset** menu lists the
   factory sounds and your own; **Save preset** writes the sound under the name beside it to
-  `%APPDATA%\GloomTunes Studio\Presets\Gloom Synth` on Windows or
+  `%APPDATA%\GloomTunes Studio\Presets\Gloom Synth` on Windows,
+  `~/Library/Application Support/GloomTunes Studio/Presets/Gloom Synth` on macOS or
   `~/.local/share/gloomtunes-studio/presets/gloom-synth` on Linux, as a `.gloomsynth` JSON file.
 - **First start:** a short wizard picks the audio output and buffer size (with a test tone),
   an accent colour and text size, and asks whether to save crash reports (off unless you turn
@@ -193,7 +214,8 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
     search (with its subfolders) or locate each file. The title bar shows `*` while there are
     unsaved edits; New, Open and closing the window ask to save them first.
   - Every 60 s with unsaved edits, the app autosaves to `recovery/` in its data folder
-    (`%APPDATA%\GloomTunes Studio` or `~/.local/share/gloomtunes-studio`). If the app crashed,
+    (`%APPDATA%\GloomTunes Studio`, `~/Library/Application Support/GloomTunes Studio` or
+    `~/.local/share/gloomtunes-studio`). If the app crashed,
     the next start offers **Recover**.
   - **Export audio** (Ctrl+Shift+E) writes WAV: 16-bit, 24-bit or 32-bit float, 44.1 to
     96 kHz, optional dither (16/24-bit), optional normalization to a peak level, the whole song
@@ -221,7 +243,9 @@ needs the Steinberg ASIO SDK, which is not shipped with this project.
 - **CLAP plugins:**
   - At start the app looks for `.clap` files in `CLAP_PATH`, the standard folders
     (`~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap` on Linux; `Common Files\CLAP` and
-    `%LOCALAPPDATA%\Programs\Common\CLAP` on Windows) and any folder added under **Folders**
+    `%LOCALAPPDATA%\Programs\Common\CLAP` on Windows; `~/Library/Audio/Plug-Ins/CLAP` and
+    `/Library/Audio/Plug-Ins/CLAP` on macOS, where plugins are `.clap` bundles) and any folder
+    added under **Folders**
     in the plugin browser. Each file is opened by a separate process, so a broken one cannot
     crash the app; **Rescan** looks again.
   - **+ Plugin** in the channel rack opens the browser on instruments: **Add** makes a new
@@ -254,6 +278,7 @@ cargo test -p gt-plugin-host
 # Try the test plugins in the app: build them and install as a .clap file
 cargo build -p gt-test-plugin
 cp target/debug/libgt_test_plugin.so ~/.clap/gt_test_plugin.clap   # Windows: gt_test_plugin.dll to %LOCALAPPDATA%\Programs\Common\CLAP\gt_test_plugin.clap
+# macOS: cp target/debug/libgt_test_plugin.dylib ~/Library/Audio/Plug-Ins/CLAP/gt_test_plugin.clap
 # Piano roll frame time with 10,000 notes (prints the median):
 cargo test --release -p gt-ui -- --ignored --nocapture
 # Engine cost of the demo song, as a share of real time:
@@ -279,6 +304,12 @@ cargo deb -p gt-app --profile dist --no-build --no-strip --output dist/
 packaging/linux/build-appimage.sh
 ```
 
+```sh
+# macOS: universal GloomTunes Studio.app and a .dmg into dist/ (builds both architectures
+# itself; ARCHS=aarch64 for a quicker Apple Silicon-only build)
+packaging/macos/build-app.sh
+```
+
 ```powershell
 # Windows installer into dist\ (Inno Setup 6: choco install innosetup)
 & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.0.0 packaging\windows\gloomtunes.iss
@@ -291,7 +322,7 @@ version`), update `Cargo.lock` (`cargo build`), merge, then push a matching tag:
 git tag v1.0.0 && git push origin v1.0.0
 ```
 
-`.github/workflows/release.yml` builds the three packages, writes `SHA256SUMS`, attests every
+`.github/workflows/release.yml` builds the four packages, writes `SHA256SUMS`, attests every
 file with Sigstore build provenance and opens a **draft** release with generated notes; check it
 and press **Publish**. **Actions > Release > Run workflow** builds the same files as artifacts
 without a release, and pull requests that change `packaging/` build them too. Optional
@@ -300,6 +331,8 @@ repository secrets add signatures:
 | Secret | Adds |
 |---|---|
 | `WINDOWS_CERT_PFX` (base64 of a .pfx), `WINDOWS_CERT_PASSWORD` | Authenticode signatures on `gloomtunes.exe` and the installer |
+| `MACOS_CERT_P12` (base64 of a .p12 with the "Developer ID Application" certificate and key), `MACOS_CERT_PASSWORD` | Developer ID signature (hardened runtime) on the macOS app and .dmg instead of an ad hoc one |
+| `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD` (an app-specific password), with the two above | Notarization of the .dmg, so Gatekeeper opens it without asking |
 | `GPG_PRIVATE_KEY` (armored), `GPG_PASSPHRASE` | `SHA256SUMS.asc` |
 
 ### Environment variables
