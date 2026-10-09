@@ -19,19 +19,21 @@ use gt_plugin_host::{PluginHost, PluginStatus};
 use gt_project::{ops, presets, History};
 use gt_ui::param_ui::{self, ParamMarks, ParamRequest};
 use gt_ui::views::{
-    add_automation, audio_panel, browser, channel_rack, mixer_view, modulators_panel, piano_roll,
-    playlist, plugin_controls, sampler_panel, synth_panel, transport_bar, AudioAction,
-    AudioPanelModel, BrowserAction, BrowserModel, MidiPanelModel, MixerState, MixerView,
-    ModulatorsState, PianoRollAction, PianoRollState, PianoRollView, PlayState, PlaylistAction,
-    PlaylistState, PlaylistView, PluginBrowserState, PluginPanelView, PluginState, RackAction,
-    RackState, RackView, SamplerPanelView, StripMeter, SynthPanelAction, SynthPanelView,
-    TransportAction, TransportModel,
+    add_automation, browser, channel_rack, mixer_view, modulators_panel, piano_roll, playlist,
+    plugin_controls, sampler_panel, synth_panel, transport_bar, AudioAction, BrowserAction,
+    BrowserModel, MidiPanelModel, MixerState, MixerView, ModulatorsState, PianoRollAction,
+    PianoRollState, PianoRollView, PlayState, PlaylistAction, PlaylistState, PlaylistView,
+    PluginBrowserState, PluginPanelView, PluginState, RackAction, RackState, RackView,
+    SamplerPanelView, StripMeter, SynthPanelAction, SynthPanelView, TransportAction,
+    TransportModel,
 };
+use gt_ui::views::{FirstRunState, SettingsPage, ShortcutEditorState};
 use gt_ui::widgets::MeterBallistics;
-use gt_ui::GloomTheme;
+use gt_ui::{Command, GloomTheme, Keymap};
 
 mod midi;
 mod plugins;
+mod prefs;
 
 use crate::audio_io::AudioIo;
 use crate::files::{self, Dialog, DialogAction, ExportForm, Then};
@@ -64,7 +66,20 @@ pub struct GloomApp {
     meter: MeterBallistics,
     transport: TransportModel,
     test_tone: bool,
-    show_audio: bool,
+    show_settings: bool,
+    settings_page: SettingsPage,
+    /// Saved preferences; written back by `save_settings`.
+    settings: crate::settings::Settings,
+    /// A preference changed that `save_settings` cannot detect by comparison alone.
+    settings_dirty: bool,
+    settings_checked: Instant,
+    keymap: Keymap,
+    shortcut_state: ShortcutEditorState,
+    /// The first-run wizard while it is open.
+    wizard: Option<FirstRunState>,
+    /// A crash report saved last time (path and text), until the user dismisses it.
+    crash_report: Option<(PathBuf, String)>,
+    perf: prefs::Perf,
 
     project: Project,
     rack: RackState,
@@ -196,8 +211,9 @@ fn effect_of(dest: &ParamDest) -> Option<(usize, usize, usize)> {
 }
 
 impl GloomApp {
-    pub fn new(ctx: &egui::Context, open: Option<PathBuf>) -> Self {
-        let theme = GloomTheme::default();
+    pub fn new(ctx: &egui::Context, open: Option<PathBuf>, boot: crate::Boot) -> Self {
+        let settings = boot.settings;
+        let theme = settings.theme.to_theme();
         theme.apply(ctx);
         let project = Project::demo();
         let history = History::new(&project);
@@ -211,7 +227,7 @@ impl GloomApp {
         );
         let mut app = Self {
             theme,
-            audio: AudioIo::new(),
+            audio: AudioIo::new(&settings.audio),
             meter: MeterBallistics::default(),
             // The demo opens on its arrangement, ready to play.
             transport: TransportModel {
@@ -219,7 +235,15 @@ impl GloomApp {
                 ..TransportModel::default()
             },
             test_tone: false,
-            show_audio: false,
+            show_settings: false,
+            settings_page: SettingsPage::default(),
+            keymap: settings.keymap(),
+            shortcut_state: ShortcutEditorState::default(),
+            wizard: (!settings.first_run_done).then(FirstRunState::default),
+            crash_report: Self::find_crash_report(),
+            perf: prefs::Perf::new(boot.started, boot.renderer),
+            settings_dirty: false,
+            settings_checked: Instant::now(),
             project,
             rack: RackState::default(),
             library: Library::new(),
@@ -266,7 +290,13 @@ impl GloomApp {
             keyboard: crate::live::TypingKeyboard::default(),
             recorder: crate::live::Recorder::default(),
             take: None,
-            midi_model: MidiPanelModel::default(),
+            midi_model: MidiPanelModel {
+                count_in_bars: settings.midi.count_in_bars,
+                record_click: settings.midi.record_click,
+                extra_ms: settings.midi.extra_ms,
+                octave: settings.midi.octave,
+                ..MidiPanelModel::default()
+            },
             sent_live_slot: None,
             learning: None,
             midi_seen: 0,
@@ -276,7 +306,11 @@ impl GloomApp {
             plugin_browser: PluginBrowserState::default(),
             plugin_slot: None,
             fresh_engine: false,
+            settings,
         };
+        for port in &app.settings.midi.disabled_ports {
+            app.midi.set_enabled(port, false);
+        }
         if let Some((path, plugin, action)) = &crash.quarantined {
             app.toast(format!(
                 "{plugin} was switched off: GloomTunes closed while {action} it ({}). \
@@ -1106,6 +1140,7 @@ impl GloomApp {
             AudioAction::RestartAudio => self.audio.reopen(),
             AudioAction::SelectDevice(i) => self.audio.select_device(i),
             AudioAction::SelectBufferSize(n) => self.audio.select_buffer_size(n),
+            AudioAction::SelectSampleRate(r) => self.audio.select_sample_rate(r),
             AudioAction::Rescan => self.audio.rescan(),
         }
     }
@@ -1579,8 +1614,8 @@ impl GloomApp {
         let mut pick = None;
         ui.menu_button("File", |ui| {
             for (label, then, keys) in [
-                ("New", Some(Then::New), "Ctrl+N"),
-                ("Open…", Some(Then::Open), "Ctrl+O"),
+                ("New", Some(Then::New), self.keys(Command::New)),
+                ("Open…", Some(Then::Open), self.keys(Command::Open)),
             ] {
                 if ui
                     .add(egui::Button::new(label).shortcut_text(keys))
@@ -1591,20 +1626,23 @@ impl GloomApp {
             }
             ui.separator();
             if ui
-                .add(egui::Button::new("Save").shortcut_text("Ctrl+S"))
+                .add(egui::Button::new("Save").shortcut_text(self.keys(Command::Save)))
                 .clicked()
             {
                 pick = Some(FileCmd::Save);
             }
             if ui
-                .add(egui::Button::new("Save as…").shortcut_text("Ctrl+Shift+S"))
+                .add(egui::Button::new("Save as…").shortcut_text(self.keys(Command::SaveAs)))
                 .clicked()
             {
                 pick = Some(FileCmd::SaveAs);
             }
             ui.separator();
             if ui
-                .add(egui::Button::new("Export audio…").shortcut_text("Ctrl+Shift+E"))
+                .add(
+                    egui::Button::new("Export audio…")
+                        .shortcut_text(self.keys(Command::ExportAudio)),
+                )
                 .clicked()
             {
                 pick = Some(FileCmd::Export);
@@ -1615,6 +1653,13 @@ impl GloomApp {
             }
             if ui.button("Export MIDI file…").clicked() {
                 pick = Some(FileCmd::ExportMidi);
+            }
+            ui.separator();
+            if ui
+                .add(egui::Button::new("Settings…").shortcut_text(self.keys(Command::Settings)))
+                .clicked()
+            {
+                self.show_settings = true;
             }
         });
         if let Some(cmd) = pick {
@@ -1634,29 +1679,6 @@ impl GloomApp {
             FileCmd::Export => self.show_export(),
             FileCmd::ImportMidi => self.show_import_midi(),
             FileCmd::ExportMidi => self.show_export_midi(),
-        }
-    }
-
-    /// Ctrl+N/O/S, Ctrl+Shift+S and Ctrl+Shift+E.
-    fn file_shortcuts(&mut self, ctx: &egui::Context) {
-        use egui::{Key, Modifiers};
-        let cs = Modifiers::COMMAND | Modifiers::SHIFT;
-        let key = |m, k| ctx.input_mut(|i| i.consume_key(m, k));
-        let cmd = if key(cs, Key::S) {
-            Some(FileCmd::SaveAs)
-        } else if key(cs, Key::E) {
-            Some(FileCmd::Export)
-        } else if key(Modifiers::COMMAND, Key::S) {
-            Some(FileCmd::Save)
-        } else if key(Modifiers::COMMAND, Key::O) {
-            Some(FileCmd::Request(Then::Open))
-        } else if key(Modifiers::COMMAND, Key::N) {
-            Some(FileCmd::Request(Then::New))
-        } else {
-            None
-        };
-        if let Some(c) = cmd {
-            self.file_cmd(c);
         }
     }
 
@@ -1745,12 +1767,14 @@ enum FileCmd {
 
 impl eframe::App for GloomApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_settings_now();
         self.plugins.shutdown();
         self.end_session();
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.perf.frame(frame.info().cpu_usage);
         self.audio.poll();
         if self.audio.take_fresh_engine() {
             self.sync_new_engine();
@@ -1789,54 +1813,21 @@ impl eframe::App for GloomApp {
         // Before any shortcut: in piano mode the typing keyboard takes its keys first.
         self.live_frame(&ctx, dt);
 
-        // Space toggles play. Consumed before any widget runs, so a focused button does not
-        // also react to it; left alone while a text field (e.g. typing a BPM) has focus.
-        let space = !ctx.text_edit_focused()
-            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space));
-
-        // Undo/redo and view switching, unless a text field wants the keys. Ctrl+Shift+Z is
-        // checked before Ctrl+Z because egui ignores extra Shift when matching.
-        if !ctx.text_edit_focused() {
-            use egui::{Key, Modifiers};
-            let key = |m, k| ctx.input_mut(|i| i.consume_key(m, k));
-            if key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || key(Modifiers::COMMAND, Key::Y)
-            {
-                self.undo(true);
-            } else if key(Modifiers::COMMAND, Key::Z) {
-                self.undo(false);
-            }
-            if key(Modifiers::NONE, Key::F5) {
-                self.main_view = MainView::Playlist;
-            }
-            if key(Modifiers::NONE, Key::F6) {
-                self.main_view = MainView::Rack;
-            }
-            if key(Modifiers::NONE, Key::L) {
-                self.transport.song_mode = !self.transport.song_mode;
-                self.push_song();
-            }
-            if key(Modifiers::NONE, Key::F7) {
-                self.main_view = MainView::PianoRoll;
-            }
-            if key(Modifiers::NONE, Key::F9) {
-                self.main_view = MainView::Mixer;
-            }
-        }
-        if self.dialog.is_none() {
-            self.file_shortcuts(&ctx);
-        }
+        // Shortcuts run before any widget, so a focused button does not also react to Space;
+        // keys the typing keyboard took above are gone by now.
+        self.run_shortcuts(&ctx);
 
         let theme = self.theme.clone();
         let mut undo_clicked = None;
         let undo_tip = self
             .history
             .undo_label()
-            .map(|l| format!("Undo {l} (Ctrl+Z)"));
+            .map(|l| format!("Undo {l} ({})", self.keys(Command::Undo)));
         let redo_tip = self
             .history
             .redo_label()
-            .map(|l| format!("Redo {l} (Ctrl+Shift+Z)"));
-        let mut transport_actions = egui::Panel::top("transport")
+            .map(|l| format!("Redo {l} ({})", self.keys(Command::Redo)));
+        let transport_actions = egui::Panel::top("transport")
             .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(8))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -1846,11 +1837,13 @@ impl eframe::App for GloomApp {
                         transport_bar(ui, &theme, &mut self.transport, &self.project.signatures);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .add(egui::Button::selectable(self.show_audio, "Audio"))
-                            .on_hover_text("Audio device, MIDI inputs and recording settings")
+                            .add(egui::Button::selectable(self.show_settings, "Settings"))
+                            .on_hover_text(
+                                "Audio device, MIDI, shortcuts, theme, performance and privacy",
+                            )
                             .clicked()
                         {
-                            self.show_audio = !self.show_audio;
+                            self.show_settings = !self.show_settings;
                         }
                         let redo = ui.add_enabled(redo_tip.is_some(), egui::Button::new("Redo"));
                         if redo
@@ -1872,15 +1865,13 @@ impl eframe::App for GloomApp {
                             self.meter.level_db(),
                             egui::vec2(90.0, 8.0),
                         );
+                        self.cpu_meter_ui(ui, &theme);
                     });
                     a
                 })
                 .inner
             })
             .inner;
-        if space {
-            transport_actions.push(TransportAction::PlayPause);
-        }
         for a in transport_actions {
             self.on_transport(a);
         }
@@ -1888,27 +1879,12 @@ impl eframe::App for GloomApp {
             self.undo(redo);
         }
 
-        if self.show_audio {
-            let model = AudioPanelModel {
-                level_db: self.meter.level_db(),
-                ..self.audio.panel_model(self.test_tone)
-            };
-            let mut open = true;
-            let action = egui::Window::new("Audio and MIDI settings")
-                .open(&mut open)
-                .resizable(false)
-                .collapsible(false)
-                .show(&ctx, |ui| {
-                    let a = audio_panel(ui, &theme, &model);
-                    ui.separator();
-                    self.midi_settings(ui, &theme);
-                    a
-                })
-                .and_then(|r| r.inner.flatten());
-            self.show_audio = open;
-            if let Some(a) = action {
-                self.on_audio(a);
-            }
+        if self.show_settings {
+            self.settings_window(&ctx, &theme);
+        }
+        self.first_run_window(&ctx);
+        if self.wizard.is_none() {
+            self.crash_window(&ctx, &theme);
         }
 
         let target = self
@@ -2168,6 +2144,7 @@ impl eframe::App for GloomApp {
         }
         self.commit_if_idle(&ctx);
         self.document_frame(&ctx, &theme);
+        self.save_settings(&ctx, false);
 
         // Repaint at display rate while anything moves; idle otherwise.
         let lights = self.activity.iter().any(|&a| a > 0.0)

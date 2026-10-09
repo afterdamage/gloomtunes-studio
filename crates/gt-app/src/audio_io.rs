@@ -4,13 +4,21 @@
 //! `AudioProcessor`, converts samples at the edge, and turns device errors into status text.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig, SupportedBufferSize};
-use gt_engine::{AudioProcessor, EngineCommand, EngineConfig, EngineHandle};
+use cpal::{
+    ErrorKind, FromSample, SampleFormat, SizedSample, StreamConfig, SupportedBufferSize,
+    SupportedStreamConfig,
+};
+use gt_engine::{AudioProcessor, EngineCommand, EngineConfig, EngineHandle, LoadMeter, Telemetry};
+
+use crate::settings::AudioPrefs;
+
+/// Sample rates offered when the device supports them.
+const STANDARD_RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
 
 /// Frames of f32 scratch for devices that want integer samples. Larger callbacks are rendered
 /// in several chunks, so this only bounds the chunk size, not the device buffer size.
@@ -36,6 +44,10 @@ pub struct AudioIo {
     names: Vec<String>,
     selected: usize,
     buffer_size: u32,
+    /// Requested sample rate; `None` uses the device's own default.
+    sample_rate: Option<u32>,
+    /// Standard rates the selected device supports.
+    rates: Vec<u32>,
     running: Option<Running>,
     /// Set while the output fades out before the stream is reopened.
     reopening_since: Option<Instant>,
@@ -44,29 +56,51 @@ pub struct AudioIo {
     /// Engine events since the app last took them.
     events: Vec<gt_engine::EngineEvent>,
     stream_error: Arc<Mutex<Option<String>>>,
+    /// The backend could not give the audio thread real-time priority.
+    rt_denied: Arc<AtomicBool>,
     status: String,
 }
 
 impl AudioIo {
-    pub fn new() -> Self {
+    /// Opens the output with the saved preferences (device by name, buffer size, rate).
+    pub fn new(prefs: &AudioPrefs) -> Self {
         let host = pick_host();
         log::info!("audio host: {}", host.id().name());
         let mut io = Self {
             host,
             devices: Vec::new(),
-            names: Vec::new(),
+            names: vec!["System default".to_owned()],
             selected: 0,
-            buffer_size: 256,
+            buffer_size: prefs.buffer_size,
+            sample_rate: prefs.sample_rate,
+            rates: Vec::new(),
             running: None,
             reopening_since: None,
             fresh_engine: false,
             events: Vec::new(),
             stream_error: Arc::new(Mutex::new(None)),
+            rt_denied: Arc::new(AtomicBool::new(false)),
             status: String::new(),
         };
+        if let Some(name) = &prefs.device {
+            // rescan keeps the selection by name.
+            io.names.push(name.clone());
+            io.selected = 1;
+        }
         io.rescan();
         io.open();
         io
+    }
+
+    /// The settings to save: device by name (none: system default), buffer size and rate.
+    pub fn prefs(&self) -> AudioPrefs {
+        AudioPrefs {
+            device: (self.selected > 0)
+                .then(|| self.names.get(self.selected).cloned())
+                .flatten(),
+            buffer_size: self.buffer_size,
+            sample_rate: self.sample_rate,
+        }
     }
 
     /// Re-enumerates output devices, keeping the selection by name when possible.
@@ -87,13 +121,21 @@ impl AudioIo {
         self.selected = previous
             .and_then(|p| self.names.iter().position(|n| *n == p))
             .unwrap_or(0);
+        self.rates = self.device().map_or_else(Vec::new, |d| supported_rates(&d));
     }
 
     pub fn select_device(&mut self, index: usize) {
         if index < self.devices.len() {
             self.selected = index;
+            self.rates = self.device().map_or_else(Vec::new, |d| supported_rates(&d));
             self.reopen();
         }
+    }
+
+    /// Picks a sample rate (`None`: the device's default) and reopens the stream.
+    pub fn select_sample_rate(&mut self, rate: Option<u32>) {
+        self.sample_rate = rate;
+        self.reopen();
     }
 
     pub fn select_buffer_size(&mut self, frames: u32) {
@@ -175,6 +217,24 @@ impl AudioIo {
         }
     }
 
+    /// Load figures for the meter: smoothed load, worst callback since the last call (reset
+    /// on read), overload and xrun counts. `None` without a stream.
+    pub fn load(&self) -> Option<gt_ui::views::CpuLoad> {
+        let t = self.engine()?.telemetry();
+        Some(gt_ui::views::CpuLoad {
+            load: t.cpu_load.load(Ordering::Relaxed),
+            peak: t.cpu_peak.swap(0.0, Ordering::Relaxed),
+            overloads: t.overloads.load(Ordering::Relaxed),
+            xruns: t.xruns.load(Ordering::Relaxed),
+        })
+    }
+
+    /// True when the backend reported that the audio thread could not get real-time
+    /// priority (see README: the `audio` group on Linux).
+    pub fn realtime_denied(&self) -> bool {
+        self.running.is_some() && self.rt_denied.load(Ordering::Relaxed)
+    }
+
     pub fn panel_model(&self, test_tone: bool) -> gt_ui::views::AudioPanelModel {
         let (sample_rate, channels, callback_frames) = match &self.running {
             Some(r) => {
@@ -196,6 +256,14 @@ impl AudioIo {
             devices: self.names.clone(),
             selected_device: self.selected,
             buffer_size: self.buffer_size,
+            sample_rates: self.rates.clone(),
+            requested_rate: self.sample_rate,
+            exclusive_note: cfg!(windows).then(|| {
+                "WASAPI exclusive mode is not available yet: the audio library GloomTunes uses \
+                 (cpal) only opens shared-mode streams. For the lowest latency on Windows, use \
+                 an ASIO build (see README)."
+                    .to_owned()
+            }),
             sample_rate,
             channels,
             callback_frames,
@@ -229,9 +297,19 @@ impl AudioIo {
 
     fn open_stream(&mut self) -> Result<Running, String> {
         let device = self.device().ok_or("No output device available")?;
-        let supported = device
+        let default = device
             .default_output_config()
             .map_err(|e| format!("Device has no usable output config: {e}"))?;
+        let mut rate_note = String::new();
+        let supported = match self.sample_rate {
+            Some(rate) if rate != default.sample_rate() => {
+                pick_config(&device, rate, default.channels()).unwrap_or_else(|| {
+                    rate_note = format!(" ({rate} Hz not supported; using the device default)");
+                    default
+                })
+            }
+            _ => default,
+        };
         let sample_format = supported.sample_format();
         let mut config: StreamConfig = supported.config();
 
@@ -257,7 +335,12 @@ impl AudioIo {
             sample_rate: config.sample_rate,
             out_channels: usize::from(config.channels),
         });
-        let error_slot = Arc::clone(&self.stream_error);
+        self.rt_denied.store(false, Ordering::Relaxed);
+        let error_slot = ErrorSink {
+            slot: Arc::clone(&self.stream_error),
+            rt_denied: Arc::clone(&self.rt_denied),
+            telemetry: engine.shared_telemetry(),
+        };
         let stream = match sample_format {
             SampleFormat::F32 => build_f32(&device, &config, processor, error_slot),
             SampleFormat::F64 => build_converted::<f64>(&device, &config, processor, error_slot),
@@ -284,7 +367,7 @@ impl AudioIo {
             engine,
             channels: config.channels,
             sample_rate: config.sample_rate,
-            device_name: format!("{}{note}", device_name(&device)),
+            device_name: format!("{}{note}{rate_note}", device_name(&device)),
         })
     }
 }
@@ -319,13 +402,57 @@ fn device_name(device: &cpal::Device) -> String {
         .unwrap_or_else(|_| "Unknown device".to_owned())
 }
 
-fn error_callback(slot: Arc<Mutex<Option<String>>>) -> impl FnMut(cpal::Error) + Send + 'static {
-    // Runs on a backend thread, never on the audio callback, so a lock is fine here.
+/// Where stream errors go: xruns are counted in the telemetry, a refused real-time priority
+/// is flagged, anything else becomes the status line.
+struct ErrorSink {
+    slot: Arc<Mutex<Option<String>>>,
+    rt_denied: Arc<AtomicBool>,
+    telemetry: Arc<Telemetry>,
+}
+
+fn error_callback(sink: ErrorSink) -> impl FnMut(cpal::Error) + Send + 'static {
+    // Some backends (ALSA) call this on the audio thread itself, so it never blocks: an xrun
+    // is one atomic add, and other errors are dropped if the UI holds the slot right now.
     move |err| {
-        if let Ok(mut s) = slot.lock() {
+        if err.kind() == ErrorKind::Xrun {
+            sink.telemetry.xruns.fetch_add(1, Ordering::Relaxed);
+        } else if err.kind() == ErrorKind::RealtimeDenied {
+            // Audio still plays; the performance page explains it.
+            sink.rt_denied.store(true, Ordering::Relaxed);
+        } else if let Ok(mut s) = sink.slot.try_lock() {
             *s = Some(format!("Audio device: {err}"));
         }
     }
+}
+
+/// Standard rates `device` can output.
+fn supported_rates(device: &cpal::Device) -> Vec<u32> {
+    let Ok(configs) = device.supported_output_configs() else {
+        return Vec::new();
+    };
+    let ranges: Vec<_> = configs
+        .map(|c| (c.min_sample_rate(), c.max_sample_rate()))
+        .collect();
+    STANDARD_RATES
+        .into_iter()
+        .filter(|r| ranges.iter().any(|(lo, hi)| (lo..=hi).contains(&r)))
+        .collect()
+}
+
+/// A config at `rate`, preferring the default channel count and f32 samples.
+fn pick_config(device: &cpal::Device, rate: u32, channels: u16) -> Option<SupportedStreamConfig> {
+    let mut configs: Vec<_> = device
+        .supported_output_configs()
+        .ok()?
+        .filter(|c| (c.min_sample_rate()..=c.max_sample_rate()).contains(&rate))
+        .collect();
+    configs.sort_by_key(|c| {
+        (
+            c.channels() != channels,
+            c.sample_format() != SampleFormat::F32,
+        )
+    });
+    configs.into_iter().next()?.try_with_sample_rate(rate)
 }
 
 /// f32 devices: the engine renders straight into the device buffer.
@@ -333,9 +460,11 @@ fn build_f32(
     device: &cpal::Device,
     config: &StreamConfig,
     mut processor: AudioProcessor,
-    error_slot: Arc<Mutex<Option<String>>>,
+    error_slot: ErrorSink,
 ) -> Result<cpal::Stream, cpal::Error> {
     let mut faulted = false;
+    let channels = usize::from(config.channels.max(1));
+    let mut meter = LoadMeter::new(config.sample_rate);
     device.build_output_stream::<f32, _, _>(
         *config,
         move |out: &mut [f32], _| {
@@ -343,13 +472,17 @@ fn build_f32(
                 out.fill(0.0);
                 return;
             }
+            let start = Instant::now();
             // Last line of defence (ARCHITECTURE.md §3): a panic must not unwind into the
             // backend. On panic, mute for good and let the UI offer a restart.
             if catch_unwind(AssertUnwindSafe(|| processor.process(out))).is_err() {
                 faulted = true;
                 out.fill(0.0);
                 processor_fault(&processor);
+                return;
             }
+            let ns = start.elapsed().as_nanos() as u64;
+            meter.record(processor.telemetry(), ns, out.len() / channels);
         },
         error_callback(error_slot),
         None,
@@ -361,7 +494,7 @@ fn build_converted<T>(
     device: &cpal::Device,
     config: &StreamConfig,
     mut processor: AudioProcessor,
-    error_slot: Arc<Mutex<Option<String>>>,
+    error_slot: ErrorSink,
 ) -> Result<cpal::Stream, cpal::Error>
 where
     T: SizedSample + FromSample<f32>,
@@ -370,6 +503,7 @@ where
     // Allocated here, on the UI thread, and moved into the callback.
     let mut scratch = vec![0.0_f32; SCRATCH_FRAMES * channels];
     let mut faulted = false;
+    let mut meter = LoadMeter::new(config.sample_rate);
     device.build_output_stream::<T, _, _>(
         *config,
         move |out: &mut [T], _| {
@@ -377,6 +511,7 @@ where
                 out.fill(T::EQUILIBRIUM);
                 return;
             }
+            let start = Instant::now();
             let result = catch_unwind(AssertUnwindSafe(|| {
                 for chunk in out.chunks_mut(scratch.len()) {
                     let tmp = &mut scratch[..chunk.len()];
@@ -390,7 +525,10 @@ where
                 faulted = true;
                 out.fill(T::EQUILIBRIUM);
                 processor_fault(&processor);
+                return;
             }
+            let ns = start.elapsed().as_nanos() as u64;
+            meter.record(processor.telemetry(), ns, out.len() / channels);
         },
         error_callback(error_slot),
         None,

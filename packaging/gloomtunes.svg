@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- GloomTunes Studio icon: an ember "G" around a waveform on the Gloom background. -->
+  <rect x="8" y="8" width="240" height="240" rx="36" fill="#0e0e11"/>
+  <rect x="8.5" y="8.5" width="239" height="239" rx="35.5" fill="none" stroke="#34343d" stroke-width="3"/>
+  <path d="M 196 92 A 76 76 0 1 0 204 140 L 148 140" fill="none" stroke="#e2733a"
+        stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="62,128 76,128 86,100 100,158 114,86 127,148 137,124 146,124"
+            fill="none" stroke="#e4e2e8" stroke-width="7" stroke-linecap="round"
+            stroke-linejoin="round"/>
+</svg>

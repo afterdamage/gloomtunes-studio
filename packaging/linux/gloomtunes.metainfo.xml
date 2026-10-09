@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.afterdamage.gloomtunes</id>
+  <name>GloomTunes Studio</name>
+  <summary>Pattern-based music production</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.afterdamage">
+    <name>Vasil Vasilev</name>
+  </developer>
+  <description>
+    <p>
+      A pattern-based digital audio workstation: channel rack, piano roll, playlist, mixer
+      with effects, automation, MIDI input and CLAP plugins.
+    </p>
+  </description>
+  <launchable type="desktop-id">gloomtunes.desktop</launchable>
+  <url type="homepage">https://github.com/afterdamage/gloomtunes-studio</url>
+  <url type="bugtracker">https://github.com/afterdamage/gloomtunes-studio/issues</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.0.0" date="2026-10-09"/>
+  </releases>
+</component>

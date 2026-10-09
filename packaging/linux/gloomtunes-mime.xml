@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-gloomtunes-project">
+    <comment>GloomTunes Studio project</comment>
+    <glob pattern="*.gloom"/>
+  </mime-type>
+</mime-info>
