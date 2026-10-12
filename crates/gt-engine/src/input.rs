@@ -170,6 +170,9 @@ pub(crate) struct InputEngine {
     takes: u32,
     /// An end mark that did not fit into the mark ring yet.
     end_pending: Option<u64>,
+    /// A filled gap (take frame, frames) not sent yet: it grows while the samples ring stays
+    /// full.
+    fill_pending: Option<(u64, u32)>,
     calib: Option<Box<CalibrationSink>>,
     calib_frame: usize,
 }
@@ -190,6 +193,7 @@ impl InputEngine {
             gap_reported: false,
             takes: 0,
             end_pending: None,
+            fill_pending: None,
             calib: None,
             calib_frame: 0,
         }
@@ -210,6 +214,7 @@ impl InputEngine {
         self.end_take();
         self.next = None;
         self.flush_end();
+        self.fill_pending = None;
         self.takes = 0;
         std::mem::replace(&mut self.sink, sink)
     }
@@ -429,13 +434,16 @@ impl InputEngine {
                             fill: false,
                         });
                     }
-                    if !self.write(from, from + frames as usize) {
-                        self.mark(RecMark::Gap {
-                            at: take.frames,
-                            frames,
-                            fill: true,
-                        });
-                        telemetry.record_gaps.fetch_add(1, Relaxed);
+                    if !(self.flush_fill() && self.write(from, from + frames as usize)) {
+                        // Frames that did not fit become one growing gap, sent before the
+                        // next frames that fit, so a long stall costs one mark.
+                        match self.fill_pending.as_mut() {
+                            Some((_, n)) => *n += frames,
+                            None => {
+                                self.fill_pending = Some((take.frames, frames));
+                                telemetry.record_gaps.fetch_add(1, Relaxed);
+                            }
+                        }
                     }
                     take.frames += written;
                 }
@@ -540,7 +548,30 @@ impl InputEngine {
         }
     }
 
+    /// Sends the pending filled gap. False while the marks ring has no room for it (nothing
+    /// may be written after it until it is sent, or the file would lose its timing).
+    fn flush_fill(&mut self) -> bool {
+        let (Some((at, frames)), Some(sink)) = (self.fill_pending, self.sink.as_deref_mut()) else {
+            return true;
+        };
+        let sent = sink
+            .marks
+            .push(RecMark::Gap {
+                at,
+                frames,
+                fill: true,
+            })
+            .is_ok();
+        if sent {
+            self.fill_pending = None;
+        }
+        sent
+    }
+
     fn flush_end(&mut self) {
+        if !self.flush_fill() {
+            return;
+        }
         let (Some(frames), Some(sink)) = (self.end_pending, self.sink.as_deref_mut()) else {
             return;
         };
