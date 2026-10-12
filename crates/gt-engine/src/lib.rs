@@ -41,6 +41,7 @@ pub use input::{
 pub use live::{LiveInput, LiveNote, LIVE_CAPACITY};
 pub use load::LoadMeter;
 pub use mixer::{create_effect, EffectBox, MixerParams, StripParams, MAX_PDC_FRAMES};
+pub use mixer::{freeze_post_fx, Tap};
 pub use plugin::{PluginBox, PluginContext, PluginProcessor, MAX_PLUGINS};
 pub use processor::{AudioProcessor, PREVIEW_GAIN, TEST_TONE_DBFS, TEST_TONE_HZ};
 pub use song::{

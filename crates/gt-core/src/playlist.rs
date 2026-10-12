@@ -57,6 +57,17 @@ pub struct Track {
     pub insert: usize,
     /// Input the track records from when armed (none: the track cannot record audio).
     pub input: Option<AudioInput>,
+    /// While frozen, the track plays this render instead of its clips (D105).
+    pub frozen: Option<Frozen>,
+}
+
+/// A frozen track's render: the track's clips through its insert's effects, from `start`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Frozen {
+    /// The rendered audio.
+    pub source: SampleSource,
+    /// Tick where the render starts.
+    pub start: i64,
 }
 
 /// Shape of an automation segment, from one point to the next.
@@ -501,6 +512,7 @@ impl Playlist {
             solo: false,
             insert: MASTER,
             input: None,
+            frozen: None,
         });
         id
     }
@@ -514,6 +526,11 @@ impl Playlist {
     /// Index of a track, top to bottom.
     pub fn track_index(&self, id: TrackId) -> Option<usize> {
         self.tracks.iter().position(|t| t.id == id)
+    }
+
+    /// The track with `id`, for editing.
+    pub fn track_mut(&mut self, id: TrackId) -> Option<&mut Track> {
+        self.tracks.iter_mut().find(|t| t.id == id)
     }
 
     /// The track with this id.

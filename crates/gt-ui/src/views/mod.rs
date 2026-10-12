@@ -30,7 +30,7 @@ pub use piano_roll::{
     key_name, piano_roll, PianoRollAction, PianoRollState, PianoRollView, ScaleKind, Snap, Tool,
 };
 pub use playlist::{
-    add_automation, playlist, AudioLookup, PlaylistAction, PlaylistSnap, PlaylistState,
+    add_automation, playlist, AudioLookup, BounceKind, PlaylistAction, PlaylistSnap, PlaylistState,
     PlaylistTool, PlaylistView,
 };
 pub use plugins::{

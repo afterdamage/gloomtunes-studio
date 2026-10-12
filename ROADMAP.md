@@ -457,6 +457,24 @@ sound identical; the golden export test stays.
   - Known limits: chase works in song mode only (pattern mode starts patterns from their
     start anyway); plugin instruments get held notes but not one-shot tails; looped sampler
     voices are chased only while held.
+- Part 2 delivered (2026-10-12), in review (D105). From a track's header menu:
+  - **Render to audio**: the selected clips of the track, or the loop region (the whole track
+    without a loop), become one audio clip on a new track right below, with the release and
+    effect tails; what it replaces is muted, not deleted.
+  - **Consolidate**: the selected clips of a track become one rendered clip in their place.
+  - **Freeze / Unfreeze**: the track plays a render taken through its mixer insert's effects,
+    and its instruments and clips are bypassed until unfrozen. A frozen mix matches the
+    unfrozen one to below -120 dBFS (tested).
+  - All three use the export renderer on a worker thread. Files go to the project's
+    `recordings` folder, so saving copies, embeds and relinks them like takes. Each result is
+    one undo step.
+  - CPU cost: a frozen track costs one audio clip instead of its instruments and clip
+    rendering; the render itself runs offline at full speed.
+  - Known limits: every instrument on the track must play into the track's mixer strip, or
+    into strips leading to it (otherwise the menu explains which channel to reroute). A freeze
+    renders from the song start (so every instrument and effect starts exactly as in playback),
+    which leaves silence before a late track's first clip. Exporting a range that cuts a frozen
+    track's clips renders its clips instead of the freeze.
 
 ---
 
