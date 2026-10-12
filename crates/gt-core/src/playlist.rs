@@ -236,6 +236,8 @@ pub enum ClipKind {
         /// The other takes recorded here (loop passes), not playing; empty for ordinary
         /// audio. [`Clip::use_take`] swaps one in.
         takes: Vec<AudioTake>,
+        /// Fades and direction.
+        edit: AudioEdit,
     },
     /// Automation of one parameter.
     Automation(Automation),
@@ -258,6 +260,92 @@ pub struct Clip {
     pub muted: bool,
     /// Source.
     pub kind: ClipKind,
+}
+
+/// Shape of a clip fade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FadeCurve {
+    /// Gain rises in a straight line.
+    Linear,
+    /// Quarter sine: constant power when crossfaded with its mirror.
+    #[default]
+    EqualPower,
+    /// Slow start, fast end (exponential in amplitude).
+    Exponential,
+    /// Slow at both ends (half a cosine).
+    SCurve,
+}
+
+impl FadeCurve {
+    /// Every curve, in menu order.
+    pub const ALL: [Self; 4] = [
+        Self::Linear,
+        Self::EqualPower,
+        Self::Exponential,
+        Self::SCurve,
+    ];
+
+    /// Menu name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Linear => "Linear",
+            Self::EqualPower => "Equal power",
+            Self::Exponential => "Exponential",
+            Self::SCurve => "S-curve",
+        }
+    }
+
+    /// File key.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::EqualPower => "power",
+            Self::Exponential => "exp",
+            Self::SCurve => "s",
+        }
+    }
+
+    /// Parses [`FadeCurve::key`]; unknown text gives the default.
+    pub fn from_key(key: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|c| c.key() == key)
+            .unwrap_or_default()
+    }
+
+    /// Fade-in gain at `x` from 0 (start of the fade) to 1 (end): 0 at 0, 1 at 1, rising.
+    /// A fade-out at progress `x` uses `gain(1 - x)`, so an equal-power fade-out and fade-in
+    /// over the same stretch keep `out² + in² = 1`.
+    pub fn gain(self, x: f64) -> f64 {
+        let x = x.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => x,
+            Self::EqualPower => (x * std::f64::consts::FRAC_PI_2).sin(),
+            // 36 dB of range, shifted so it starts at exactly 0.
+            Self::Exponential => ((6.0 * x).exp2() - 1.0) / 63.0,
+            Self::SCurve => 0.5 - 0.5 * (x * std::f64::consts::PI).cos(),
+        }
+    }
+}
+
+/// A fade at one end of an audio clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Fade {
+    /// Length in ticks (0: none).
+    pub len: i64,
+    /// Shape.
+    pub curve: FadeCurve,
+}
+
+/// Non-destructive edits of an audio clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AudioEdit {
+    /// Fade at the left edge.
+    pub fade_in: Fade,
+    /// Fade at the right edge.
+    pub fade_out: Fade,
+    /// Play the audio backwards (the clip's offset counts from the audio's end).
+    pub reverse: bool,
 }
 
 /// A take of an audio clip that is not playing.
@@ -594,7 +682,11 @@ impl Playlist {
                 }
                 gaps.sort_by(|a, b| a.at_s.total_cmp(&b.at_s));
             }
-            if let ClipKind::Audio { takes, .. } = &mut c.kind {
+            if let ClipKind::Audio { takes, edit, .. } = &mut c.kind {
+                // Fades fit inside the clip, together.
+                let len = c.length.max(1);
+                edit.fade_in.len = edit.fade_in.len.clamp(0, len);
+                edit.fade_out.len = edit.fade_out.len.clamp(0, len - edit.fade_in.len);
                 for t in takes.iter_mut() {
                     t.length = t.length.max(1);
                     t.gaps.retain(|g| {
@@ -618,6 +710,33 @@ impl Playlist {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fade_curves_rise_from_silence_to_unity() {
+        for c in FadeCurve::ALL {
+            assert_eq!(c.gain(0.0), 0.0, "{c:?}");
+            assert!((c.gain(1.0) - 1.0).abs() < 1e-12, "{c:?}");
+            let mut last = 0.0;
+            for i in 1..=100 {
+                let g = c.gain(f64::from(i) / 100.0);
+                assert!(g >= last, "{c:?} rises");
+                last = g;
+            }
+            assert_eq!(FadeCurve::from_key(c.key()), c);
+        }
+        // Equal power: a fade-out and a fade-in over the same stretch keep the power.
+        for i in 0..=100 {
+            let x = f64::from(i) / 100.0;
+            let (a, b) = (
+                FadeCurve::EqualPower.gain(1.0 - x),
+                FadeCurve::EqualPower.gain(x),
+            );
+            assert!((a * a + b * b - 1.0).abs() < 1e-12);
+        }
+        assert!((FadeCurve::Linear.gain(0.25) - 0.25).abs() < 1e-12);
+        assert!(FadeCurve::Exponential.gain(0.5) < 0.15, "slow start");
+        assert!((FadeCurve::SCurve.gain(0.5) - 0.5).abs() < 1e-12);
+    }
     use crate::project::PatternId;
 
     fn pat() -> ClipKind {

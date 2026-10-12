@@ -57,6 +57,7 @@ fn takes_stack_switch_and_undo() {
             gain: 1.0,
             gaps: first.gaps,
             takes: Vec::new(),
+            edit: gt_core::AudioEdit::default(),
         },
     );
     let mut h = History::new(&p);

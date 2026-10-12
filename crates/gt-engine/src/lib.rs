@@ -44,8 +44,8 @@ pub use mixer::{create_effect, EffectBox, MixerParams, StripParams, MAX_PDC_FRAM
 pub use plugin::{PluginBox, PluginContext, PluginProcessor, MAX_PLUGINS};
 pub use processor::{AudioProcessor, PREVIEW_GAIN, TEST_TONE_DBFS, TEST_TONE_HZ};
 pub use song::{
-    synth_settings, AudioPlay, AutoLane, ChannelParams, InstrumentKind, NoteKind, PatchValues,
-    SongEvent, SongSnapshot,
+    synth_settings, AudioPlay, AutoLane, ChannelParams, InstrumentKind, NoteKind, NoteSpan,
+    PatchValues, SongEvent, SongSnapshot,
 };
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};

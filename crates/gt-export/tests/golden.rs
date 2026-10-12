@@ -18,9 +18,9 @@ use gt_project::file;
 
 /// Expected FNV-1a 64 hash of the exported WAV, per operating system.
 const EXPECTED: &[(&str, &str)] = &[
-    ("linux", "b399cad748bb62c9"),
-    ("windows", "e682a81ea7dbbf92"),
-    ("macos", "3e0e8fe1ac328dda"), // Apple Silicon (the CI runner)
+    ("linux", "707f29310659b97f"),
+    ("windows", "4d63501e72f371e3"),
+    ("macos", "5fb200a92a5b7222"), // Apple Silicon (the CI runner)
 ];
 
 fn fixture() -> PathBuf {

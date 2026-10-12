@@ -31,12 +31,12 @@ use gt_core::effects::EffectKind;
 use gt_core::modulation::SYNC_RATES;
 use gt_core::synth::{ModDest, ModSlot, ModSource, SynthParam, SynthPatch, MOD_SLOTS};
 use gt_core::{
-    Adsr, AudioInput, AudioTake, AutoPoint, Automation, BuiltInSample, Channel, ChannelId, Clip,
-    ClipId, ClipKind, Curve, EffectSlot, Gap, Instrument, LfoRate, LfoShape, LoopMode, Marker,
-    ModSourceKind, Modulator, ModulatorId, Note, ParamId, Pattern, PatternId, PluginFormat,
-    PluginInstanceId, PluginKind, PluginParamInfo, PluginRef, Project, SampleSource,
-    SamplerSettings, SigChange, TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, Track, TrackId,
-    FX_SLOTS, SENDS,
+    Adsr, AudioEdit, AudioInput, AudioTake, AutoPoint, Automation, BuiltInSample, Channel,
+    ChannelId, Clip, ClipId, ClipKind, Curve, EffectSlot, Fade, FadeCurve, Gap, Instrument,
+    LfoRate, LfoShape, LoopMode, Marker, ModSourceKind, Modulator, ModulatorId, Note, ParamId,
+    Pattern, PatternId, PluginFormat, PluginInstanceId, PluginKind, PluginParamInfo, PluginRef,
+    Project, SampleSource, SamplerSettings, SigChange, TempoMap, TempoPoint, Tick, TimeSig,
+    TimeSigMap, Track, TrackId, FX_SLOTS, SENDS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -623,11 +623,23 @@ enum ClipContentDto {
         /// Inactive takes of a loop recording (schema 3).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         takes: Vec<TakeDto>,
+        /// Fades as `[ticks, curve]` (schema 4).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fade_in: Option<(i64, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fade_out: Option<(i64, String)>,
+        /// Plays backwards (schema 4).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reverse: bool,
     },
     Automation {
         target: String,
         points: Vec<PointDto>,
     },
+}
+
+fn fade_dto(f: Fade) -> Option<(i64, String)> {
+    (f.len > 0).then(|| (f.len, f.curve.key().to_owned()))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -852,6 +864,7 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                         gain,
                         gaps,
                         takes,
+                        edit,
                     } => ClipContentDto::Audio {
                         source: sample_dto(source, dir, embedded),
                         gain: *gain,
@@ -864,6 +877,9 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                                 length: t.length,
                             })
                             .collect(),
+                        fade_in: fade_dto(edit.fade_in),
+                        fade_out: fade_dto(edit.fade_out),
+                        reverse: edit.reverse,
                     },
                     ClipKind::Automation(a) => ClipContentDto::Automation {
                         target: a.target.key(),
@@ -1221,7 +1237,21 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                 gain,
                 gaps,
                 takes,
+                fade_in,
+                fade_out,
+                reverse,
             } => {
+                let fade = |f: Option<(i64, String)>| {
+                    f.map_or_else(Fade::default, |(len, curve)| Fade {
+                        len,
+                        curve: FadeCurve::from_key(&curve),
+                    })
+                };
+                let edit = AudioEdit {
+                    fade_in: fade(fade_in),
+                    fade_out: fade(fade_out),
+                    reverse,
+                };
                 let to_gaps = |g: Vec<(f64, f64)>| {
                     g.into_iter()
                         .map(|(at_s, len_s)| Gap { at_s, len_s })
@@ -1243,6 +1273,7 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                     gain,
                     gaps: to_gaps(gaps),
                     takes,
+                    edit,
                 })
             }
             ClipContentDto::Automation { target, points } => match ParamId::parse(&target) {
@@ -1669,6 +1700,17 @@ mod tests {
                 len_s: 0.0,
             },
         ];
+        let edit = AudioEdit {
+            fade_in: Fade {
+                len: 480,
+                curve: FadeCurve::SCurve,
+            },
+            fade_out: Fade {
+                len: 240,
+                curve: FadeCurve::Exponential,
+            },
+            reverse: true,
+        };
         p.playlist.add_clip(
             t,
             1234,
@@ -1682,6 +1724,7 @@ mod tests {
                     gaps: Vec::new(),
                     length: 4800,
                 }],
+                edit,
             },
         );
         let path = dir.join("song/song.gloom");
@@ -1718,12 +1761,14 @@ mod tests {
             source: SampleSource::File(got),
             gaps: back,
             takes,
+            edit: edit_back,
             ..
         } = &q.playlist.clips[0].kind
         else {
             panic!("an audio clip")
         };
         assert_eq!(back, &gaps);
+        assert_eq!(edit_back, &edit, "fades and reverse survive");
         assert_eq!(std::fs::read(got).unwrap(), b"RIFF....take");
         let [AudioTake {
             source: SampleSource::File(got_other),

@@ -27,7 +27,7 @@ use egui::{
 };
 use gt_core::playlist::TRACK_COLORS;
 use gt_core::{
-    AutoPoint, Automation, ClipId, ClipKind, Curve, ParamId, PatternId, Peaks, Project,
+    AutoPoint, Automation, ClipId, ClipKind, Curve, FadeCurve, ParamId, PatternId, Peaks, Project,
     SampleSource, SigChange, StripKind, TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, TrackId,
     FX_SLOTS, MASTER, PPQ, STRIPS,
 };
@@ -40,6 +40,8 @@ const RULER_H: f32 = 3.0 * ROW_H;
 const EDGE_PX: f32 = 6.0;
 const LABEL_H: f32 = 14.0;
 const POINT_R: f32 = 4.0;
+const GAIN_MIN_DB: f32 = -60.0;
+const GAIN_MAX_DB: f32 = 12.0;
 const MIN_PX_PER_BEAT: f32 = 1.5;
 const MAX_PX_PER_BEAT: f32 = 400.0;
 const MIN_TRACK_H: f32 = 24.0;
@@ -161,6 +163,11 @@ enum Drag {
         grab_y: f32,
         orig: f32,
     },
+    /// Dragging an audio clip's fade-in or fade-out handle.
+    Fade {
+        clip: ClipId,
+        out: bool,
+    },
     Loop {
         from: i64,
     },
@@ -186,8 +193,8 @@ enum Popup {
         index: usize,
     },
     Sig(usize),
-    /// Pick which take of a loop recording plays.
-    Takes(ClipId),
+    /// Gain, reverse, fade shapes and takes of an audio clip.
+    Clip(ClipId),
 }
 
 /// View and editing state of the playlist that is not part of the document.
@@ -660,6 +667,8 @@ enum Zone {
     Curve,
     /// On an automation point.
     Point(usize),
+    /// On the fade-in (false) or fade-out (true) handle of an audio clip.
+    Fade(bool),
 }
 
 fn track_row(project: &Project, id: TrackId) -> Option<usize> {
@@ -683,6 +692,13 @@ fn hit_clip(geo: &Geo, project: &Project, p: Pos2) -> Option<(ClipId, Zone)> {
                 return Some((c.id, Zone::Point(i)));
             }
         }
+        if let ClipKind::Audio { edit, .. } = &c.kind {
+            for (out, q) in fade_handles(geo, r, c.start, c.end(), edit) {
+                if q.distance(p) <= POINT_R + 2.0 {
+                    return Some((c.id, Zone::Fade(out)));
+                }
+            }
+        }
         let grip = EDGE_PX.min(r.width() * 0.25);
         let zone = if p.x <= r.left() + grip {
             Zone::Left
@@ -695,6 +711,21 @@ fn hit_clip(geo: &Geo, project: &Project, p: Pos2) -> Option<(ClipId, Zone)> {
         };
         Some((c.id, zone))
     })
+}
+
+/// Screen positions of an audio clip's fade handles: (is fade-out, position), on the top edge
+/// of the body where each fade ends.
+fn fade_handles(
+    geo: &Geo,
+    r: Rect,
+    start: i64,
+    end: i64,
+    edit: &gt_core::AudioEdit,
+) -> [(bool, Pos2); 2] {
+    let y = r.top() + LABEL_H;
+    let x_in = geo.x(start + edit.fade_in.len).min(r.right());
+    let x_out = geo.x(end - edit.fade_out.len).max(r.left());
+    [(false, pos2(x_in, y)), (true, pos2(x_out, y))]
 }
 
 /// Screen positions of an automation clip's points inside the clip window.
@@ -802,6 +833,9 @@ fn grid_input(
                 }
                 (_, Some((id, Zone::Point(i)))) => {
                     st.drag = Some(Drag::Point { clip: id, index: i });
+                }
+                (_, Some((id, Zone::Fade(out)))) => {
+                    st.drag = Some(Drag::Fade { clip: id, out });
                 }
                 (_, Some((id, Zone::Curve)))
                     if ctrl
@@ -933,16 +967,16 @@ fn grid_input(
                 }
             }
             if let Some((id, Zone::Body)) = hit {
-                // Right-click on the name strip of a clip with takes: pick a take.
+                // Right-click on the name strip of an audio clip: its gain, fades and takes.
                 let label = project.playlist.clip(id).is_some_and(|c| {
-                    matches!(&c.kind, ClipKind::Audio { takes, .. } if !takes.is_empty())
+                    matches!(&c.kind, ClipKind::Audio { .. })
                         && track_row(project, c.track).is_some_and(|row| {
                             p.y <= geo.clip_rect(row, c.start, c.end()).top() + LABEL_H
                         })
                 });
                 if label {
                     st.drag = None;
-                    st.popup = Some((Popup::Takes(id), p, 0));
+                    st.popup = Some((Popup::Clip(id), p, 0));
                 }
             }
             if let Some((id, Zone::Point(i))) = hit {
@@ -961,7 +995,7 @@ fn grid_input(
     if matches!(st.drag, Some(Drag::Erase)) {
         if let Some(p) = pointer {
             if let Some((id, zone)) = hit_clip(geo, project, p) {
-                if !matches!(zone, Zone::Point(_)) {
+                if !matches!(zone, Zone::Point(_) | Zone::Fade(_)) {
                     project.playlist.remove_clips(&[id]);
                     st.selected.retain(|x| *x != id);
                     changed = true;
@@ -1152,6 +1186,23 @@ fn drag_update(
             }
             false
         }
+        Some(Drag::Fade { clip, out }) => {
+            let Some(c) = project.playlist.clip_mut(clip) else {
+                return false;
+            };
+            let (start, end, length) = (c.start, c.end(), c.length);
+            let ClipKind::Audio { edit, .. } = &mut c.kind else {
+                return false;
+            };
+            // Fades are free-running (no snap); the two never overlap.
+            let before = (edit.fade_in.len, edit.fade_out.len);
+            if out {
+                edit.fade_out.len = (end - tick).clamp(0, length - edit.fade_in.len);
+            } else {
+                edit.fade_in.len = (tick - start).clamp(0, length - edit.fade_out.len);
+            }
+            before != (edit.fade_in.len, edit.fade_out.len)
+        }
         Some(Drag::Point { clip, index }) => {
             let Some(track) = project.playlist.clip(clip).map(|c| c.track) else {
                 return false;
@@ -1221,6 +1272,7 @@ fn drop_audio(
             gain: 1.0,
             gaps: Vec::new(),
             takes: Vec::new(),
+            edit: gt_core::AudioEdit::default(),
         },
     );
     st.selected = vec![id];
@@ -1657,41 +1709,91 @@ fn show_popup(
                             }
                         }
                     }
-                    Popup::Takes(id) => {
+                    Popup::Clip(id) => {
                         let Some(c) = project.playlist.clip_mut(id) else {
                             close = true;
                             return;
                         };
-                        let ClipKind::Audio { source, takes, .. } = &c.kind else {
+                        let ClipKind::Audio {
+                            source,
+                            gain,
+                            takes,
+                            edit,
+                            ..
+                        } = &mut c.kind
+                        else {
                             close = true;
                             return;
                         };
                         let current = source.display_name();
                         let others: Vec<String> =
                             takes.iter().map(|t| t.source.display_name()).collect();
+                        let mut pick = None;
+                        let mut clear = false;
                         ui.vertical(|ui| {
-                            ui.label(RichText::new("Takes").color(theme.text_dim));
-                            let _ = ui.selectable_label(true, current);
-                            let mut pick = None;
-                            for (i, name) in others.iter().enumerate() {
-                                if ui.selectable_label(false, name).clicked() {
-                                    pick = Some(i);
+                            ui.label(RichText::new(current.clone()).color(theme.text_dim));
+                            ui.horizontal(|ui| {
+                                ui.label("Gain");
+                                let mut db = gain_db(*gain);
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut db)
+                                            .range(GAIN_MIN_DB..=GAIN_MAX_DB)
+                                            .speed(0.1)
+                                            .fixed_decimals(1)
+                                            .suffix(" dB"),
+                                    )
+                                    .changed()
+                                {
+                                    *gain = db_gain(db);
+                                    changed = true;
                                 }
+                            });
+                            changed |= ui
+                                .checkbox(&mut edit.reverse, "Reverse")
+                                .on_hover_text("Play the clip backwards (the file is untouched)")
+                                .changed();
+                            for (label, fade) in [
+                                ("Fade in", &mut edit.fade_in),
+                                ("Fade out", &mut edit.fade_out),
+                            ] {
+                                ui.horizontal(|ui| {
+                                    ui.label(label);
+                                    egui::ComboBox::from_id_salt(("pl_fade", label))
+                                        .width(96.0)
+                                        .selected_text(fade.curve.name())
+                                        .show_ui(ui, |ui| {
+                                            for k in FadeCurve::ALL {
+                                                changed |= ui
+                                                    .selectable_value(&mut fade.curve, k, k.name())
+                                                    .changed();
+                                            }
+                                        });
+                                });
                             }
-                            let clear = !others.is_empty()
-                                && ui
+                            if !others.is_empty() {
+                                ui.separator();
+                                ui.label(RichText::new("Takes").color(theme.text_dim));
+                                let _ = ui.selectable_label(true, current);
+                                for (i, name) in others.iter().enumerate() {
+                                    if ui.selectable_label(false, name).clicked() {
+                                        pick = Some(i);
+                                    }
+                                }
+                                clear = ui
                                     .button("Keep only this take")
                                     .on_hover_text("Remove the other takes from the clip")
                                     .clicked();
-                            if let Some(i) = pick {
-                                changed |= c.use_take(i);
-                            }
-                            if clear {
-                                c.clear_takes();
-                                changed = true;
-                                close = true;
                             }
                         });
+                        if let Some(i) = pick {
+                            changed |= c.use_take(i);
+                        }
+                        if clear {
+                            c.clear_takes();
+                            changed = true;
+                            close = true;
+                        }
                     }
                     Popup::Sig(i) => {
                         let mut ch: Vec<SigChange> = project.signatures.changes().collect();
@@ -1876,12 +1978,24 @@ fn paint(
                 source,
                 gaps,
                 takes,
+                edit,
                 ..
             } => {
                 if let Some((peaks, rate)) = view.audio.peaks(source) {
-                    paint_wave(&cp, geo, c, &project.tempo, peaks, rate, body, ink);
+                    paint_wave(
+                        &cp,
+                        geo,
+                        c,
+                        &project.tempo,
+                        peaks,
+                        rate,
+                        edit.reverse,
+                        body,
+                        ink,
+                    );
                 }
                 paint_gaps(&cp, geo, c, &project.tempo, gaps, body, theme.warn);
+                paint_fades(&cp, geo, c, edit, r, body, ink);
                 if takes.is_empty() {
                     source.display_name()
                 } else {
@@ -2119,6 +2233,7 @@ fn paint_wave(
     tempo: &TempoMap,
     peaks: &Peaks,
     rate: u32,
+    reverse: bool,
     body: Rect,
     ink: Color32,
 ) {
@@ -2135,7 +2250,14 @@ fn paint_wave(
     let mut f0 = frame_at(x);
     while x < vis.right() {
         let f1 = frame_at(x + 1.0);
-        if let Some((mn, mx)) = peaks.range(f0, f1.max(f0 + 1.0)) {
+        // Reversed clips read the sample from its end, as the engine plays it.
+        let (a, b) = if reverse {
+            let last = peaks.frames() as f64 - 1.0;
+            ((last - f1.max(f0 + 1.0)).max(0.0), last - f0)
+        } else {
+            (f0, f1.max(f0 + 1.0))
+        };
+        if let Some((mn, mx)) = peaks.range(a, b) {
             p.line_segment(
                 [
                     pos2(x + 0.5, mid - mx.clamp(-1.0, 1.0) * half),
@@ -2146,6 +2268,60 @@ fn paint_wave(
         }
         f0 = f1;
         x += 1.0;
+    }
+}
+
+/// Fade shapes over an audio clip (the gain curve from the bottom of the body to the top)
+/// and their handles.
+fn paint_fades(
+    p: &egui::Painter,
+    geo: &Geo,
+    c: &gt_core::Clip,
+    edit: &gt_core::AudioEdit,
+    r: Rect,
+    body: Rect,
+    ink: Color32,
+) {
+    let y = |g: f64| body.bottom() - g as f32 * body.height();
+    let stroke = Stroke::new(1.0, ink);
+    for (fade, out) in [(edit.fade_in, false), (edit.fade_out, true)] {
+        if fade.len <= 0 {
+            continue;
+        }
+        let (x0, x1) = if out {
+            (geo.x(c.end() - fade.len), geo.x(c.end()))
+        } else {
+            (geo.x(c.start), geo.x(c.start + fade.len))
+        };
+        let steps = ((x1 - x0) / 3.0).clamp(2.0, 64.0) as usize;
+        let pts: Vec<Pos2> = (0..=steps)
+            .map(|i| {
+                let u = i as f64 / steps as f64;
+                let g = fade.curve.gain(if out { 1.0 - u } else { u });
+                pos2(x0 + (x1 - x0) * u as f32, y(g))
+            })
+            .collect();
+        p.add(egui::Shape::line(pts, stroke));
+    }
+    for (_, q) in fade_handles(geo, r, c.start, c.end(), edit) {
+        p.rect_filled(Rect::from_center_size(q, egui::vec2(6.0, 6.0)), 1.0, ink);
+    }
+}
+
+/// Clip gain in dB for the popup; `GAIN_MIN_DB` stands for silence.
+fn gain_db(gain: f32) -> f32 {
+    if gain <= 0.0 {
+        GAIN_MIN_DB
+    } else {
+        (20.0 * gain.log10()).clamp(GAIN_MIN_DB, GAIN_MAX_DB)
+    }
+}
+
+fn db_gain(db: f32) -> f32 {
+    if db <= GAIN_MIN_DB {
+        0.0
+    } else {
+        10f32.powf(db / 20.0)
     }
 }
 

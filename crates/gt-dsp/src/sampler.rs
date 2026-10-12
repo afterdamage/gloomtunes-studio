@@ -105,6 +105,12 @@ impl SamplerVoice {
         self.age = age;
     }
 
+    /// Moves the play position to frame `pos` of the sample (chasing a note that started
+    /// earlier). Positions outside the region are clamped into it.
+    pub fn seek(&mut self, pos: f64) {
+        self.pos = pos.clamp(self.region.start, self.region.end);
+    }
+
     /// Note-off: loop voices enter their release, one-shot voices play on.
     pub fn release(&mut self) {
         if self.region.looped {

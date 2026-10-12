@@ -87,6 +87,10 @@ pub struct AudioProcessor {
     song: Option<Box<SongSnapshot>>,
     /// Song tick where the last control step ended (NaN when stopped).
     control_tick: f64,
+    /// Song time where audio clips continue next quantum (anything else is a jump).
+    clip_resume_s: f64,
+    /// Song time of the last jump (start, locate, wrap) for the clips' de-click.
+    clip_jump_s: f64,
     /// Modulators, grouped by parameter.
     mods: Option<Box<ModPlan>>,
     /// `MAX_CHANNELS` slots, allocated once in `new`.
@@ -166,6 +170,8 @@ impl AudioProcessor {
             scratch_r: [0.0; Q],
             song: None,
             control_tick: f64::NAN,
+            clip_resume_s: f64::NEG_INFINITY,
+            clip_jump_s: f64::NEG_INFINITY,
             mods: None,
             channels: (0..MAX_CHANNELS).map(|_| ChannelSlot::new(sr)).collect(),
             preview,
@@ -390,6 +396,15 @@ impl AudioProcessor {
                 } if usize::from(s) == slot => {
                     self.plugins.note_on(index, e.offset, key, velocity);
                 }
+                EventKind::Chase {
+                    slot: s,
+                    key,
+                    velocity,
+                    held: true,
+                    ..
+                } if usize::from(s) == slot => {
+                    self.plugins.note_on(index, e.offset, key, velocity);
+                }
                 EventKind::NoteOff { slot: s, key } if usize::from(s) == slot => {
                     self.plugins.note_off(index, e.offset, key);
                 }
@@ -485,6 +500,16 @@ impl AudioProcessor {
                     self.voice_age += 1;
                     ch.note_on(key, velocity, self.voice_age);
                 }
+                EventKind::Chase {
+                    key,
+                    velocity,
+                    into_s,
+                    held,
+                    ..
+                } => {
+                    self.voice_age += 1;
+                    ch.chase(key, velocity, into_s, held, self.voice_age);
+                }
                 EventKind::NoteOff { key, .. } => ch.note_off(key),
                 EventKind::Wrap => ch.release_all(),
                 EventKind::Beat { .. } => {}
@@ -506,6 +531,9 @@ impl AudioProcessor {
     /// continuous playback maps engine frames to song seconds linearly, so a clip's source
     /// position is `(song time - origin) · sample rate`, read with linear interpolation.
     fn render_audio_clips(&mut self) {
+        if self.scheduled.segments().is_empty() {
+            self.clip_resume_s = f64::NEG_INFINITY;
+        }
         let Some(song) = self.song.as_deref() else {
             return;
         };
@@ -517,6 +545,13 @@ impl AudioProcessor {
             let a = seg.seconds;
             let n = (seg.frames as usize).min(Q - (seg.offset as usize).min(Q));
             let b = a + n as f64 / sr;
+            // Playback started, located or wrapped here: clips already under way fade in
+            // over the de-click time instead of starting mid-waveform.
+            if (a - self.clip_resume_s).abs() * sr > 0.5 {
+                self.clip_jump_s = a;
+            }
+            self.clip_resume_s = b;
+            let jump = self.clip_jump_s;
             for clip in &song.audio {
                 if clip.start_s >= b {
                     break;
@@ -529,12 +564,19 @@ impl AudioProcessor {
                 let rate = f64::from(clip.sample.sample_rate.max(1));
                 let (src_l, src_r) = (clip.sample.left(), clip.sample.right());
                 let len = src_l.len().min(src_r.len());
+                let declick_jump = clip.start_s < jump;
                 let (dl, dr) = self.mixer.direct_mut(usize::from(clip.route));
                 for i in i0..i1.min(n) {
                     let t = a + i as f64 / sr;
-                    let pos = (t - clip.origin_s) * rate;
+                    let mut pos = (t - clip.origin_s) * rate;
                     if pos < 0.0 {
                         continue;
+                    }
+                    if clip.reverse {
+                        pos = (len as f64 - 1.0) - pos;
+                        if pos < 0.0 {
+                            break;
+                        }
                     }
                     let k = pos as usize;
                     if k >= len {
@@ -549,7 +591,10 @@ impl AudioProcessor {
                     if clip.fade_out {
                         edge = edge.min((clip.end_s - t) / CLIP_FADE_S);
                     }
-                    let edge = edge.clamp(0.0, 1.0);
+                    if declick_jump {
+                        edge = edge.min((t - jump) / CLIP_FADE_S);
+                    }
+                    let edge = edge.clamp(0.0, 1.0) * clip.fade_gain(t);
                     let g = clip.gain * edge as f32;
                     let o = seg.offset as usize + i;
                     dl[o] += (src_l[k] + (src_l[k1] - src_l[k]) * frac) * g;

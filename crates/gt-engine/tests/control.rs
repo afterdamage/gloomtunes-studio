@@ -50,6 +50,7 @@ fn dc_project(strip: usize, bars: i64) -> Project {
             gain: 1.0,
             gaps: Vec::new(),
             takes: Vec::new(),
+            edit: gt_core::AudioEdit::default(),
         },
     );
     p
@@ -206,6 +207,7 @@ fn an_envelope_follower_ducks_one_strip_under_another() {
         gain: 1.0,
         gaps: Vec::new(),
         takes: Vec::new(),
+        edit: gt_core::AudioEdit::default(),
     };
     for bar in 0..3 {
         p.playlist.add_clip(kick, bar * 3840, 960, src());

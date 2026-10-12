@@ -214,6 +214,7 @@ fn process_does_not_allocate() {
                     gain: 0.8,
                     gaps: Vec::new(),
                     takes: Vec::new(),
+                    edit: gt_core::AudioEdit::default(),
                 },
             );
             song.playlist.clip_mut(c).unwrap().offset = 200;
