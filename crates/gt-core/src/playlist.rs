@@ -13,6 +13,7 @@
 use crate::mixer::{MixerStrip, MASTER};
 use crate::params::ParamId;
 use crate::project::{PatternId, SampleSource};
+use crate::recording::{AudioInput, Gap};
 
 /// Stable identity of a playlist track. Never reused within a project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -54,6 +55,8 @@ pub struct Track {
     pub solo: bool,
     /// Mixer strip that the track's audio clips play into ([`MASTER`] or an insert).
     pub insert: usize,
+    /// Input the track records from when armed (none: the track cannot record audio).
+    pub input: Option<AudioInput>,
 }
 
 /// Shape of an automation segment, from one point to the next.
@@ -228,6 +231,8 @@ pub enum ClipKind {
         source: SampleSource,
         /// Linear gain.
         gain: f32,
+        /// Where a recording lost input (empty for imported audio).
+        gaps: Vec<Gap>,
     },
     /// Automation of one parameter.
     Automation(Automation),
@@ -339,6 +344,7 @@ impl Playlist {
             mute: false,
             solo: false,
             insert: MASTER,
+            input: None,
         });
         id
     }
@@ -508,17 +514,25 @@ impl Playlist {
                     }
                 }
             }
-            if let ClipKind::Audio { gain, .. } = &mut c.kind {
+            if let ClipKind::Audio { gain, gaps, .. } = &mut c.kind {
                 *gain = if gain.is_finite() {
                     gain.clamp(0.0, MAX_VOLUME)
                 } else {
                     1.0
                 };
+                gaps.retain(|g| g.at_s.is_finite() && g.len_s.is_finite() && g.at_s >= 0.0);
+                for g in gaps.iter_mut() {
+                    g.len_s = g.len_s.max(0.0);
+                }
+                gaps.sort_by(|a, b| a.at_s.total_cmp(&b.at_s));
             }
         }
         for t in &mut self.tracks {
             if t.insert >= crate::mixer::FIRST_SEND {
                 t.insert = MASTER;
+            }
+            if t.input.is_some_and(|x| !x.fits(crate::MAX_INPUT_CHANNELS)) {
+                t.input = None;
             }
         }
         self.sort_markers();

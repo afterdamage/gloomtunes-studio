@@ -7,6 +7,7 @@
 //! graph, which must be free of cycles; [`Mixer::processing_order`] sorts it.
 
 use crate::effects::EffectSlot;
+use crate::recording::AudioInput;
 
 /// Number of insert strips.
 pub const INSERTS: usize = 64;
@@ -84,6 +85,8 @@ pub struct MixerStrip {
     pub sidechain: Option<usize>,
     /// Effects, processed top to bottom.
     pub slots: [Option<EffectSlot>; FX_SLOTS],
+    /// A device input heard live through this strip (inserts only), for live effects.
+    pub input: Option<AudioInput>,
 }
 
 impl MixerStrip {
@@ -104,6 +107,7 @@ impl MixerStrip {
             sends: [0.0; SENDS],
             sidechain: None,
             slots: Default::default(),
+            input: None,
         }
     }
 }
@@ -273,6 +277,11 @@ impl Mixer {
             }
             if s.output >= STRIPS || s.output == i || i == MASTER {
                 s.output = MASTER;
+            }
+            if !(1..FIRST_SEND).contains(&i)
+                || s.input.is_some_and(|x| !x.fits(crate::MAX_INPUT_CHANNELS))
+            {
+                s.input = None;
             }
             if s.sidechain
                 .is_some_and(|x| x >= STRIPS || x == i || x == MASTER)

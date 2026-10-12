@@ -76,6 +76,8 @@ pub struct MixerView<'a> {
     pub latency_ms: f32,
     /// Status of the plugin in the open slot of the selected strip, if it holds one.
     pub plugin: Option<&'a PluginPanelView>,
+    /// Device inputs an insert can take.
+    pub inputs: &'a [gt_core::AudioInput],
 }
 
 /// Strips in display order: master first, then inserts, then sends.
@@ -344,6 +346,22 @@ fn detail(
                 changed = true;
             }
             ui.end_row();
+            if matches!(kind, StripKind::Insert(_)) {
+                ui.label(RichText::new("Input").small().color(theme.text_dim))
+                    .on_hover_text(
+                        "A device input heard live through this insert and its effects (live \
+                         effects). Record it by arming a playlist track that plays into this \
+                         insert with the same input.",
+                    );
+                changed |= crate::views::input_menu(
+                    ui,
+                    ("mixer_in", i),
+                    180.0,
+                    &mut mixer.strips[i].input,
+                    view.inputs,
+                );
+                ui.end_row();
+            }
         });
 
     if matches!(kind, StripKind::Insert(_)) {

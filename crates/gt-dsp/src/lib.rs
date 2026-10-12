@@ -13,6 +13,7 @@ pub mod drums;
 pub mod fx;
 mod gain;
 mod ladder;
+pub mod latency;
 mod lfo;
 mod osc;
 mod ramp;

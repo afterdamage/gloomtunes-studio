@@ -31,6 +31,8 @@
   <true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key>
   <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>GloomTunes Studio records audio from the input you choose in Settings.</string>
   <key>NSHumanReadableCopyright</key>
   <string>© Vasil Vasilev. Free software under the GNU GPL, version 3 or later.</string>
 </dict>

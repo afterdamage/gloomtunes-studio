@@ -243,6 +243,8 @@ impl GloomApp {
                         let model = self.audio_model();
                         let action = audio_panel(ui, theme, &model);
                         ui.separator();
+                        self.input_settings(ui, theme);
+                        ui.separator();
                         self.midi_settings(ui, theme);
                         if let Some(a) = action {
                             self.on_audio(a);

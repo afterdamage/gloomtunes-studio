@@ -1861,9 +1861,11 @@ dependencies = [
  "gt-plugin-host",
  "gt-project",
  "gt-ui",
+ "hound",
  "log",
  "midir",
  "rfd",
+ "rtrb",
  "serde",
  "serde_json",
 ]
@@ -1885,6 +1887,7 @@ name = "gt-engine"
 version = "1.0.0"
 dependencies = [
  "assert_no_alloc",
+ "criterion",
  "gt-core",
  "gt-dsp",
  "rtrb",

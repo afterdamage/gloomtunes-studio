@@ -11,6 +11,7 @@ use crate::channel::ChannelSlot;
 use crate::command::{EngineCommand, EngineEvent, Garbage, TransportState};
 use crate::control::{beats_of, ModClock, ModPlan, ParamDest};
 use crate::denormal::DenormalGuard;
+use crate::input::InputEngine;
 use crate::live::LiveNote;
 use crate::mixer::MixerEngine;
 use crate::plugin::{PluginContext, PluginTable};
@@ -116,6 +117,9 @@ pub struct AudioProcessor {
 
     master: LinearRamp,
     fade_frames: u32,
+
+    /// Device input: monitoring, recording, latency measurement.
+    input: Box<InputEngine>,
 }
 
 impl std::fmt::Debug for AudioProcessor {
@@ -181,6 +185,7 @@ impl AudioProcessor {
             tone_on: false,
             master: LinearRamp::new(1.0),
             fade_frames: (sr * FADE_SECONDS).round() as u32,
+            input: Box::new(InputEngine::new()),
         }
     }
 
@@ -246,6 +251,7 @@ impl AudioProcessor {
         self.apply_commands();
         let count_click = self.advance_count_in();
         self.apply_live();
+        self.input.read(&self.telemetry);
 
         self.quantum_l.fill(0.0);
         self.quantum_r.fill(0.0);
@@ -288,6 +294,16 @@ impl AudioProcessor {
             self.click.trigger(hz, self.click_gain);
         }
         self.click.add_to(&mut self.mono[cursor..]);
+        self.input
+            .calibrate(&mut self.mono, self.sample_rate as f32);
+        let playing = self.transport.state() == TransportState::Playing;
+        self.input.record(
+            playing,
+            self.scheduled.segments(),
+            &self.transport,
+            self.sample_rate,
+            &self.telemetry,
+        );
 
         self.apply_controls();
         let pctx = self.plugin_context();
@@ -295,6 +311,7 @@ impl AudioProcessor {
             self.render_channel(slot, &pctx);
         }
         self.render_audio_clips();
+        self.input.monitor(&mut self.mixer, playing);
         let bpm = self.transport.bpm_at(self.frame_clock) as f32;
         self.mixer.process(
             &mut self.scratch_l,
@@ -874,6 +891,27 @@ impl AudioProcessor {
                 self.live_slot = slot.filter(|&s| usize::from(s) < self.channels.len());
             }
             EngineCommand::CountIn { bars } => self.start_count_in(bars),
+            EngineCommand::SetInput(feed) => {
+                if let Some(old) = self.input.set_feed(feed) {
+                    self.retire(Garbage::Input(old));
+                }
+            }
+            EngineCommand::SetInputRoutes(routes) => {
+                if let Some(old) = self.input.set_routes(routes) {
+                    self.retire(Garbage::InputRoutes(old));
+                }
+            }
+            EngineCommand::SetRecorder(sink) => {
+                if let Some(old) = self.input.set_sink(sink) {
+                    self.retire(Garbage::Recorder(old));
+                }
+                self.telemetry.recording.store(false, Ordering::Relaxed);
+            }
+            EngineCommand::Calibrate(sink) => {
+                if let Some(old) = self.input.set_calibration(sink) {
+                    self.retire(Garbage::Calibration(old));
+                }
+            }
         }
         self.after_transport_change(before);
     }

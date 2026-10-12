@@ -5,6 +5,7 @@ use std::sync::Arc;
 use gt_core::{SampleData, TempoMap, Tick, TimeSigMap};
 
 use crate::control::ModPlan;
+use crate::input::{CalibrationSink, InputFeed, InputRoutes, RecordSink};
 use crate::mixer::{EffectBox, MixerParams};
 use crate::plugin::PluginBox;
 use crate::song::{ChannelParams, SongSnapshot};
@@ -154,6 +155,16 @@ pub enum EngineCommand {
         /// Bars to count; 0 plays at once.
         bars: u8,
     },
+    /// Read the device input from this ring (none: no input). The old feed comes back as
+    /// garbage.
+    SetInput(Option<Box<InputFeed>>),
+    /// Replace where live inputs are heard (mixer inserts, armed tracks).
+    SetInputRoutes(Box<InputRoutes>),
+    /// Record the armed tracks' inputs into this sink while playing (none: stop recording).
+    /// A take in progress ends; the old sink comes back as garbage.
+    SetRecorder(Option<Box<RecordSink>>),
+    /// Run the loopback latency measurement into this sink (none: stop it).
+    Calibrate(Option<Box<CalibrationSink>>),
 }
 
 impl EngineCommand {
@@ -173,6 +184,10 @@ impl EngineCommand {
                 | Self::SetMixer(_)
                 | Self::SetEffect { .. }
                 | Self::SetPlugin { .. }
+                | Self::SetInput(_)
+                | Self::SetInputRoutes(_)
+                | Self::SetRecorder(_)
+                | Self::Calibrate(_)
         )
     }
 }
@@ -246,4 +261,12 @@ pub enum Garbage {
     Effect(EffectBox),
     /// A plugin taken out of the plugin table (already stopped).
     Plugin(Box<PluginBox>),
+    /// A replaced input feed.
+    Input(Box<InputFeed>),
+    /// Replaced input routes.
+    InputRoutes(Box<InputRoutes>),
+    /// A recorder that is no longer used (its take, if any, has ended).
+    Recorder(Box<RecordSink>),
+    /// A finished or cancelled latency measurement.
+    Calibration(Box<CalibrationSink>),
 }

@@ -34,6 +34,7 @@ use gt_ui::{Command, GloomTheme, Keymap};
 mod midi;
 mod plugins;
 mod prefs;
+mod record;
 
 use crate::audio_io::AudioIo;
 use crate::files::{self, Dialog, DialogAction, ExportForm, Then};
@@ -172,6 +173,8 @@ pub struct GloomApp {
     plugin_slot: Option<(usize, usize)>,
     /// A new engine started this frame: the plugin host starts its plugins in it.
     fresh_engine: bool,
+    /// Audio recording: input routes, the session, the latency measurement.
+    record: record::RecordState,
 }
 
 /// What the plugin panels show for plugin `id`.
@@ -306,6 +309,7 @@ impl GloomApp {
             plugin_browser: PluginBrowserState::default(),
             plugin_slot: None,
             fresh_engine: false,
+            record: record::RecordState::default(),
             settings,
         };
         for port in &app.settings.midi.disabled_ports {
@@ -962,6 +966,7 @@ impl GloomApp {
             self.live.connect(p);
         }
         self.sent_live_slot = None;
+        self.record.sent_routes = None;
         self.push_channels();
         self.send(EngineCommand::SetScopeChannel(self.scope_slot));
         // A new engine has an empty mixer.
@@ -1175,6 +1180,7 @@ impl GloomApp {
     /// session and a document) and sends everything to the engine.
     fn replace_project(&mut self, project: gt_core::Project, path: Option<PathBuf>) {
         self.send(EngineCommand::Stop);
+        self.stop_audio_take();
         self.send(EngineCommand::Locate(Tick(0)));
         self.recorder = crate::live::Recorder::default();
         self.take = None;
@@ -1812,6 +1818,7 @@ impl eframe::App for GloomApp {
         param_ui::set_marks(&ctx, std::sync::Arc::new(self.param_marks()));
         // Before any shortcut: in piano mode the typing keyboard takes its keys first.
         self.live_frame(&ctx, dt);
+        self.record_frame();
 
         // Shortcuts run before any widget, so a focused button does not also react to Space;
         // keys the typing keyboard took above are gone by now.
@@ -2030,6 +2037,7 @@ impl eframe::App for GloomApp {
                     }
                 });
                 ui.separator();
+                let inputs = self.offered_inputs();
                 match self.main_view {
                     MainView::Playlist => {
                         let r = self.loop_region();
@@ -2042,6 +2050,8 @@ impl eframe::App for GloomApp {
                                 playhead: Some(self.transport.position.0),
                                 loop_region: (r.start.0, r.end.0, r.enabled),
                                 audio: &self.library,
+                                inputs: &inputs,
+                                recording: self.record.live_take(),
                             },
                         );
                         (Vec::new(), Vec::new())
@@ -2077,6 +2087,7 @@ impl eframe::App for GloomApp {
                             sample_rate,
                             latency_ms: latency as f32 * 1000.0 / sample_rate,
                             plugin: open_plugin.as_ref(),
+                            inputs: &inputs,
                         };
                         if mixer_view(
                             ui,

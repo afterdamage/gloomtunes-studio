@@ -231,6 +231,11 @@ impl Transport {
         self.tempo.seconds_to_tick(seconds)
     }
 
+    /// Song time (seconds from tick 0 through the tempo map) of fractional tick `t`.
+    pub fn seconds_at_tick(&self, t: f64) -> f64 {
+        self.tempo.tick_to_seconds(t)
+    }
+
     /// Tempo in BPM at the position of engine frame `now`.
     pub fn bpm_at(&self, now: u64) -> f64 {
         self.tempo

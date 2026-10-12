@@ -24,7 +24,8 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 10 | MIDI input and recording | Done (2026-10-09) |
 | 11 | CLAP plugin hosting | Done (2026-10-09) |
 | 12 | Performance, polish, packaging | Done (2026-10-09, v1.0) |
-| 12m | macOS port and packaging | **In review** |
+| 12m | macOS port and packaging | Done (2026-10-09) |
+| 13 | Parity: audio recording | **In review** (part 1 of 2) |
 
 ## Phases at a glance
 
@@ -36,6 +37,7 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | D. Keep and share | 9, 10 | **v0.1 alpha**: save, reopen, export a WAV; play it from a MIDI keyboard | 5 to 9 weeks |
 | E. Extend | 11 | A third-party CLAP synth and effect running in a project | 6 to 10 weeks |
 | F. Ship | 12 | **v1.0**: installers for Windows and Ubuntu, stable under load | 4 to 8 weeks |
+| G. Parity | 13 to 34 | The workflows FL Studio users expect (`fl-parity/parity-build-prompts.md`) | one prompt per milestone |
 
 Total: roughly 43 to 73 part-time weeks, i.e. about a year. Phase C is the largest and riskiest
 for schedule; Phase E is the riskiest technically.
@@ -368,7 +370,7 @@ for schedule; Phase E is the riskiest technically.
 
 ### Step 12 for macOS
 - Asked for after v1.0: the same performance, polish and packaging work for macOS.
-- Delivered (2026-10-09), in review:
+- Delivered (2026-10-09), merged:
   - **Runs on macOS 11 or later**, Apple Silicon and Intel, from the same code. Sound goes
     through CoreAudio, MIDI through CoreMIDI, the window through Metal. Flush-to-zero is set on
     Apple Silicon too (FZ in FPCR, D91), so the sound and the CPU cost match the other systems.
@@ -390,14 +392,52 @@ for schedule; Phase E is the riskiest technically.
 
 ---
 
+## Phase G: Parity
+
+Prompts 13 to 34 of the parity build plan, one milestone each, in order. Each follows the v1
+rules: new DSP gets tests, a benchmark and a CPU-cost note here; old projects open unchanged and
+sound identical; the golden export test stays.
+
+### Prompt 13: Audio recording
+- Split into two PRs. Part 1 is the core; part 2 adds takes, loop and punch recording.
+- Part 1 delivered (2026-10-12), in review:
+  - **Input device** in Settings > Audio and MIDI, with each channel pair offered as two monos,
+    a stereo pair, both, or off; level meters per channel (D96).
+  - **Arm any playlist track** (the R button) and give it an input from the menu under its
+    name. Record records every armed track to its own 32-bit float WAV in the project's
+    `recordings` folder, written by a disk-writer thread (D98, D100); each take becomes an
+    audio clip at the exact position.
+  - **Live effects**: any mixer insert can take an input (Input row in the routing grid).
+  - **Monitoring**: Off, Through the mixer, Auto (heard while stopped and while recording).
+  - **Latency compensation** from the device's reported latencies plus a manual offset, and a
+    loopback test that measures the real round trip and sets the offset (D99).
+  - **Dropouts are survived**: the file keeps its timing, and the lost stretches are reported
+    and drawn in the clip (D98). Separate input and output devices are kept aligned by
+    skipping or repeating input, with a warning to use one device (D97).
+  - Project schema 3 (inputs, gaps); recordings embed and relink like any sample.
+  - CPU cost: input plus recording about 0.5 % of one core (8 input channels, 4 routes, 4 stereo
+    tracks recording; `cargo bench -p gt-engine --bench input`); one loopback analysis about
+    14 ms on the UI thread (`cargo bench -p gt-dsp --bench latency`).
+  - Known limits: no audio interface was available here, so recording was tested through a
+    simulated loopback in the engine tests and a file-fed fake input device in the app; latency
+    accuracy on real hardware, the Windows and macOS input paths and the macOS microphone
+    prompt need a manual check. The input must run at the output's sample rate. Recording
+    needs song mode (pressing Record with armed tracks switches to it). Takes start on the
+    first whole tick at or after the playhead. Until part 2, each loop pass becomes a separate
+    clip and earlier passes of the session are muted; recordings of an unsaved project stay in
+    the data folder's `recordings` after Save as.
+- Part 2 (next): loop recording stacks takes in one clip, pick and promote the active take
+  with undo, punch in and out on the loop region, takes kept when embedding and relinking,
+  unsaved recordings moved next to the project on the first save.
+
+---
+
 ## v1.0 scope
 
 In: everything in Steps 1 to 10 and 12 at their non-cut level.
 Optional for v1.0: Step 11 (CLAP), delivered.
 Out (post-v1 backlog):
 
-- **Audio recording from an input device.** Not in the current plan; most users will expect it.
-  The engine already accepts `live_in`, so it is a contained addition after Step 10.
 - VST3 hosting.
 - Time-stretching and pitch-shifting of audio clips.
 - Tempo ramps (the tempo map currently has step changes only).
