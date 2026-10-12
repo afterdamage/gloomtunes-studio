@@ -11,7 +11,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use clack_host::events::event_types::{
-    MidiEvent, NoteOffEvent, NoteOnEvent, ParamValueEvent, TransportEvent, TransportFlags,
+    MidiEvent, NoteExpressionEvent, NoteExpressionType, NoteOffEvent, NoteOnEvent, ParamValueEvent,
+    TransportEvent, TransportFlags,
 };
 use clack_host::events::io::{OutputEventBuffer, TryPushError};
 use clack_host::events::spaces::CoreEventSpace;
@@ -321,6 +322,34 @@ impl PluginProcessor for ClapProcessor {
             if self.held[usize::from(key)] {
                 self.note(offset, key, 0.0, false);
             }
+        }
+    }
+
+    fn midi(&mut self, offset: u32, msg: [u8; 3]) {
+        let Some((port, _)) = self.layout.note_port else {
+            return;
+        };
+        let offset = offset.min(RENDER_QUANTUM as u32 - 1);
+        self.push(&MidiEvent::new(offset, port, msg));
+    }
+
+    fn key_pressure(&mut self, offset: u32, key: u8, value: f32) {
+        let Some((port, midi_only)) = self.layout.note_port else {
+            return;
+        };
+        let offset = offset.min(RENDER_QUANTUM as u32 - 1);
+        let key = key & 0x7F;
+        if midi_only {
+            let v = (value.clamp(0.0, 1.0) * 127.0).round() as u8;
+            self.push(&MidiEvent::new(offset, port, [0xA0, key, v]));
+        } else {
+            let pckn = Pckn::new(port, 0u16, u16::from(key), Match::All);
+            self.push(&NoteExpressionEvent::new(
+                offset,
+                pckn,
+                NoteExpressionType::Pressure,
+                f64::from(value.clamp(0.0, 1.0)),
+            ));
         }
     }
 

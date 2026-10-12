@@ -505,6 +505,22 @@ sound identical; the golden export test stays.
   octave off far from 120 BPM; markers only apply in tempo follow; no slicing to the channel
   rack yet.
 
+### Prompt 16: Expressive MIDI and recording modes
+- Split into two PRs: 1 expression, timestamps and routing; 2 recording modes, controller
+  recording, step recording and retroactive capture.
+- Part 1 delivered (2026-10-12), in review (D109):
+  - Pitch bend with a per-channel range (instrument panel, ±0 to 48 semitones, default 2),
+    sustain pedal across sampler and synth voices, mod wheel and channel aftertouch as Gloom
+    Synth matrix sources and as a new *MIDI* modulator source; plugins get them as MIDI and
+    polyphonic aftertouch as CLAP note expressions.
+  - Live MIDI is placed at its arrival time within the callback (one device period of
+    latency, no jitter).
+  - Input routing in MIDI settings: a port, or one of its MIDI channels, can play a fixed
+    channel; the rest follows the selected channel. Saved with the project.
+  - CPU: no measurable change (a few compares per live event).
+  - Limits: hardware MIDI cannot be tested in CI (decoding, timing and routing are tested
+    with synthetic events); plugins use their own bend range.
+
 ---
 
 ## v1.0 scope

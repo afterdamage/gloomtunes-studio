@@ -69,6 +69,10 @@ pub trait PluginProcessor: Send {
     fn note_off(&mut self, offset: u32, key: u8);
     /// Queues releases of every held note.
     fn release_all(&mut self, offset: u32);
+    /// Queues a channel MIDI message (pitch bend, controller, channel pressure) on channel 1.
+    fn midi(&mut self, _offset: u32, _msg: [u8; 3]) {}
+    /// Queues polyphonic aftertouch on `key`, 0 to 1.
+    fn key_pressure(&mut self, _offset: u32, _key: u8, _value: f32) {}
     /// Queues a parameter change: `index` in the plugin's parameter list, value normalized.
     fn set_param(&mut self, index: u32, value: f32);
     /// Clears tails and voices (the transport started from stop, or a retry after a failure).
@@ -178,6 +182,18 @@ impl PluginTable {
     pub(crate) fn release_all(&mut self, index: Option<u8>, offset: u32) {
         if let Some(e) = self.live(index) {
             e.plugin.processor.release_all(offset);
+        }
+    }
+
+    pub(crate) fn midi(&mut self, index: Option<u8>, offset: u32, msg: [u8; 3]) {
+        if let Some(e) = self.live(index) {
+            e.plugin.processor.midi(offset, msg);
+        }
+    }
+
+    pub(crate) fn key_pressure(&mut self, index: Option<u8>, offset: u32, key: u8, value: f32) {
+        if let Some(e) = self.live(index) {
+            e.plugin.processor.key_pressure(offset, key, value);
         }
     }
 

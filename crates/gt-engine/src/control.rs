@@ -7,7 +7,7 @@
 //! across the quantum, so they follow automation sample by sample between control points;
 //! everything else takes the value once per quantum and smooths it the way its knob does.
 
-use gt_core::modulation::{LfoRate, ModSourceKind, ModulatorId};
+use gt_core::modulation::{LfoRate, MidiControl, ModSourceKind, ModulatorId};
 use gt_core::params::{ChannelParam, StripParam};
 use gt_core::{ParamId, ParamInfo, Project, PPQ, STRIPS};
 use gt_dsp::Noise;
@@ -156,6 +156,9 @@ pub struct ModClock {
     pub bpm: f64,
     /// Song position in quarter notes at the end of the quantum while playing.
     pub beats: Option<f64>,
+    /// Mod wheel and aftertouch of the target's channel, 0 to 1 (MIDI sources).
+    pub mod_wheel: f32,
+    pub aftertouch: f32,
 }
 
 impl ModState {
@@ -207,6 +210,16 @@ impl ModState {
                 if self.env < 1e-6 {
                     self.env = 0.0;
                 }
+                self.env
+            }
+            ModSourceKind::Midi { control } => {
+                let x = match control {
+                    MidiControl::ModWheel => clock.mod_wheel,
+                    MidiControl::Aftertouch => clock.aftertouch,
+                };
+                // 7-bit steps would zipper: glide over about 5 ms.
+                let k = 1.0 - (-(clock.dt * 1000.0) / 5.0).exp();
+                self.env += (x.clamp(0.0, 1.0) - self.env) * k as f32;
                 self.env
             }
         };
@@ -322,7 +335,29 @@ mod tests {
             dt: 32.0 / 48_000.0,
             bpm: 120.0,
             beats,
+            mod_wheel: 0.0,
+            aftertouch: 0.0,
         }
+    }
+
+    #[test]
+    fn midi_sources_glide_to_the_channels_controller() {
+        let mut s = ModState::default();
+        let src = ModSourceKind::Midi {
+            control: MidiControl::Aftertouch,
+        };
+        let c = ModClock {
+            aftertouch: 0.8,
+            mod_wheel: 0.1,
+            ..clock(None)
+        };
+        let first = s.step(&src, &c, |_| 0.0);
+        assert!(first > 0.0 && first < 0.8, "glides, does not jump: {first}");
+        let mut v = 0.0;
+        for _ in 0..200 {
+            v = s.step(&src, &c, |_| 0.0);
+        }
+        assert!((v - 0.8).abs() < 1e-3);
     }
 
     #[test]

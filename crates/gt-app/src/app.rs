@@ -163,6 +163,8 @@ pub struct GloomApp {
     midi_model: MidiPanelModel,
     /// Live channel slot last sent to the engine (outer none: send it).
     sent_live_slot: Option<Option<u16>>,
+    /// The input routes the engine has (None after a restart).
+    sent_routes: Option<gt_engine::LiveRoutes>,
     /// Parameter waiting for a MIDI controller to move (MIDI learn).
     learning: Option<ParamId>,
     /// MIDI activity count last seen.
@@ -309,6 +311,7 @@ impl GloomApp {
                 ..MidiPanelModel::default()
             },
             sent_live_slot: None,
+            sent_routes: None,
             learning: None,
             midi_seen: 0,
             plugins,
@@ -989,6 +992,7 @@ impl GloomApp {
             self.live.connect(p);
         }
         self.sent_live_slot = None;
+        self.sent_routes = None;
         self.record.sent_routes = None;
         self.push_channels();
         self.send(EngineCommand::SetScopeChannel(self.scope_slot));
@@ -1962,7 +1966,25 @@ impl eframe::App for GloomApp {
                         return (false, Vec::new());
                     };
                     let channel = Some(ch.id);
-                    match &mut ch.instrument {
+                    let bend = ui
+                        .horizontal(|ui| {
+                            ui.label(egui::RichText::new("Pitch bend").color(theme.text_dim));
+                            ui.add(
+                                egui::DragValue::new(&mut ch.bend_range)
+                                    .range(0.0..=gt_core::Channel::MAX_BEND)
+                                    .speed(0.1)
+                                    .fixed_decimals(0)
+                                    .prefix("±")
+                                    .suffix(" st"),
+                            )
+                            .on_hover_text(
+                                "How far the pitch wheel bends this instrument, in semitones \
+                                 (plugins set their own range)",
+                            )
+                            .changed()
+                        })
+                        .inner;
+                    let (changed, actions) = match &mut ch.instrument {
                         Instrument::Sampler(s) => {
                             let loaded = s.sample.as_ref().and_then(|x| self.library.get(x));
                             let status = s.sample.as_ref().and_then(|x| self.library.status(x));
@@ -1998,13 +2020,14 @@ impl eframe::App for GloomApp {
                                 plugin_controls(ui, &theme, owner, p, &view, &mut plugin_actions);
                             (false, Vec::new())
                         }
-                    }
+                    };
+                    (changed || bend, actions)
                 })
                 .inner
         };
         if sampler_changed {
             self.push_all_params();
-            self.pending_edit = Some("Sampler settings");
+            self.pending_edit = Some("Instrument settings");
         }
         for a in synth_actions {
             self.on_synth_panel(a);

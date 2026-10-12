@@ -165,6 +165,8 @@ pub struct Channel {
     pub instrument: Instrument,
     /// Mixer strip the channel plays into ([`crate::MASTER`] or an insert).
     pub insert: usize,
+    /// Pitch bend range in semitones, each way (Prompt 16).
+    pub bend_range: f32,
 }
 
 /// The sound source of a channel.
@@ -239,6 +241,10 @@ impl Channel {
     /// Default channel gain (-4 dB), so a few full-scale drums hitting together stay below
     /// 0 dBFS (there is no master limiter yet).
     pub const DEFAULT_VOLUME: f32 = 0.63;
+    /// Default pitch bend range: a whole tone, the MIDI convention.
+    pub const DEFAULT_BEND: f32 = 2.0;
+    /// Largest pitch bend range.
+    pub const MAX_BEND: f32 = 48.0;
 }
 
 /// A note in a pattern. The step sequencer writes notes of one step at [`ROOT_KEY`]; the piano
@@ -364,6 +370,8 @@ pub struct Project {
     pub modulators: Vec<Modulator>,
     /// MIDI controllers bound to parameters (MIDI learn).
     pub midi_map: Vec<crate::MidiBinding>,
+    /// MIDI inputs that play fixed channels (the rest play the selected channel).
+    pub midi_routes: Vec<crate::MidiRoute>,
     next_id: u32,
 }
 
@@ -387,6 +395,7 @@ impl Project {
             signatures: TimeSigMap::default(),
             modulators: Vec::new(),
             midi_map: Vec::new(),
+            midi_routes: Vec::new(),
             next_id: 1,
         };
         let id = p.new_pattern();
@@ -899,6 +908,7 @@ impl Project {
             solo: false,
             instrument,
             insert,
+            bend_range: Channel::DEFAULT_BEND,
         });
         Some(id)
     }
@@ -907,6 +917,7 @@ impl Project {
     pub fn remove_channel(&mut self, id: ChannelId) {
         self.channels.retain(|c| c.id != id);
         self.modulators.retain(|m| m.target.channel() != Some(id));
+        self.midi_routes.retain(|r| r.target != id);
         for p in &mut self.patterns {
             p.notes.remove(&id);
         }

@@ -110,6 +110,10 @@ pub enum ModSource {
     Note,
     /// A random value per note, -1 to 1.
     Random,
+    /// The mod wheel (CC 1), 0 to 1.
+    ModWheel,
+    /// Aftertouch, 0 to 1: the channel's, or the key's own if it is larger.
+    Aftertouch,
 }
 
 /// Modulation destinations. Amount 1.0 means the range given for each.
@@ -286,6 +290,10 @@ fn key_hz(semitones: f32) -> f32 {
 struct Voice {
     active: bool,
     held: bool,
+    /// Released while the sustain pedal was down: keeps sounding until the pedal comes up.
+    sustained: bool,
+    /// Polyphonic aftertouch on this voice's key, 0 to 1.
+    pressure: f32,
     key: u8,
     age: u64,
     velocity: f32,
@@ -327,6 +335,8 @@ impl Voice {
         Self {
             active: false,
             held: false,
+            sustained: false,
+            pressure: 0.0,
             key: 0,
             age: 0,
             velocity: 0.0,
@@ -376,6 +386,8 @@ impl Voice {
         let stolen = self.active;
         self.active = true;
         self.held = true;
+        self.sustained = false;
+        self.pressure = 0.0;
         self.key = key;
         self.age = age;
         self.velocity = velocity.clamp(0.0, 1.0);
@@ -414,7 +426,7 @@ impl Voice {
 
     /// Recomputes modulation and everything derived from it, for the next `CONTROL_FRAMES`
     /// samples.
-    fn control(&mut self, p: &SynthSettings, sr: f32, glide_coef: f32) {
+    fn control(&mut self, p: &SynthSettings, x: &Expression, sr: f32, glide_coef: f32) {
         let ctl = CONTROL_FRAMES as f32;
         let lfo_v = [
             self.lfo[0].value(p.lfo[0].wave),
@@ -431,6 +443,8 @@ impl Voice {
                 ModSource::Velocity => self.velocity,
                 ModSource::Note => ((f32::from(self.key) - 60.0) / 60.0).clamp(-1.0, 1.0),
                 ModSource::Random => self.random,
+                ModSource::ModWheel => x.mod_wheel,
+                ModSource::Aftertouch => x.pressure.max(self.pressure),
             };
             m[slot.dest as usize] += slot.amount * s;
         }
@@ -447,7 +461,7 @@ impl Voice {
         }
 
         self.pitch += (self.target_pitch - self.pitch) * glide_coef;
-        let base = self.pitch + md(ModDest::Pitch) * 12.0;
+        let base = self.pitch + x.bend_semis + md(ModDest::Pitch) * 12.0;
         let n = usize::from(p.unison.clamp(1, MAX_UNISON as u8));
         self.n_uni = n;
         let detune = (p.unison_detune_cents + md(ModDest::UnisonDetune) * 100.0).clamp(0.0, 100.0);
@@ -530,6 +544,7 @@ impl Voice {
     fn render(
         &mut self,
         p: &SynthSettings,
+        x: &Expression,
         sr: f32,
         glide_coef: f32,
         out_l: &mut [f32],
@@ -538,7 +553,7 @@ impl Voice {
         let waves = [p.osc[0].wave, p.osc[1].wave];
         for (ol, or) in out_l.iter_mut().zip(out_r.iter_mut()) {
             if self.ctl_left == 0 {
-                self.control(p, sr, glide_coef);
+                self.control(p, x, sr, glide_coef);
                 self.ctl_left = CONTROL_FRAMES;
             }
             self.ctl_left -= 1;
@@ -547,6 +562,7 @@ impl Voice {
             if !self.amp.is_active() {
                 self.active = false;
                 self.held = false;
+                self.sustained = false;
                 return;
             }
             let (mut l, mut r) = (0.0_f32, 0.0_f32);
@@ -587,9 +603,22 @@ impl Voice {
     }
 }
 
+/// What the player does on top of the notes: pitch bend, mod wheel, aftertouch.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Expression {
+    /// Pitch bend in semitones (the bend times the instrument's range).
+    pub bend_semis: f32,
+    /// Mod wheel, 0 to 1.
+    pub mod_wheel: f32,
+    /// Channel aftertouch, 0 to 1.
+    pub pressure: f32,
+}
+
 /// The synth: settings plus a fixed pool of voices.
 #[derive(Debug, Clone)]
 pub struct GloomSynth {
+    expr: Expression,
+    sustain: bool,
     sr: f32,
     settings: SynthSettings,
     amp_params: AdsrParams,
@@ -609,6 +638,8 @@ impl GloomSynth {
             *v = Voice::new(0x2545_F491 ^ (i as u32 + 1).wrapping_mul(0x9E37_79B9));
         }
         let mut s = Self {
+            expr: Expression::default(),
+            sustain: false,
             sr,
             settings: SynthSettings::default(),
             amp_params: AdsrParams::default(),
@@ -680,13 +711,54 @@ impl GloomSynth {
         oldest(true).or_else(|| oldest(false)).unwrap_or(0)
     }
 
-    /// Releases held voices playing `key`.
+    /// Releases held voices playing `key`; with the sustain pedal down they keep sounding
+    /// until it comes up.
     pub fn note_off(&mut self, key: u8) {
+        let sustain = self.sustain;
         for v in &mut self.voices {
-            if v.active && v.held && v.key == key {
+            if v.active && v.held && !v.sustained && v.key == key {
+                if sustain {
+                    v.sustained = true;
+                } else {
+                    v.held = false;
+                    v.amp.release();
+                    v.menv.release();
+                }
+            }
+        }
+    }
+
+    /// Sustain pedal down or up. Up releases every voice whose key was let go meanwhile.
+    pub fn set_sustain(&mut self, down: bool) {
+        self.sustain = down;
+        if down {
+            return;
+        }
+        for v in &mut self.voices {
+            if v.active && v.sustained {
+                v.sustained = false;
                 v.held = false;
                 v.amp.release();
                 v.menv.release();
+            }
+        }
+    }
+
+    /// Bend, mod wheel and channel aftertouch, applied at each voice's next control update.
+    pub fn set_expression(&mut self, x: Expression) {
+        self.expr = x;
+    }
+
+    /// The current expression.
+    pub fn expression(&self) -> Expression {
+        self.expr
+    }
+
+    /// Polyphonic aftertouch on `key` (0 to 1), for the voices holding it.
+    pub fn set_key_pressure(&mut self, key: u8, value: f32) {
+        for v in &mut self.voices {
+            if v.active && v.key == key {
+                v.pressure = value.clamp(0.0, 1.0);
             }
         }
     }
@@ -696,6 +768,7 @@ impl GloomSynth {
         for v in &mut self.voices {
             if v.active {
                 v.held = false;
+                v.sustained = false;
                 v.amp.release();
                 v.menv.release();
             }
@@ -707,6 +780,7 @@ impl GloomSynth {
         for v in &mut self.voices {
             v.active = false;
             v.held = false;
+            v.sustained = false;
             v.amp.reset();
             v.menv.reset();
         }
@@ -729,7 +803,14 @@ impl GloomSynth {
         let (out_l, out_r) = (&mut out_l[..n], &mut out_r[..n]);
         for v in &mut self.voices {
             if v.active {
-                v.render(&self.settings, self.sr, self.glide_coef, out_l, out_r);
+                v.render(
+                    &self.settings,
+                    &self.expr,
+                    self.sr,
+                    self.glide_coef,
+                    out_l,
+                    out_r,
+                );
             }
         }
     }
@@ -955,5 +1036,72 @@ mod tests {
         }
         let (l, r) = render(&mut s, 48_000);
         assert!(l.iter().chain(&r).all(|x| x.is_finite() && x.abs() < 50.0));
+    }
+
+    #[test]
+    fn bend_moves_the_pitch_by_its_semitones() {
+        let mut s = GloomSynth::new(SR);
+        s.set_settings(&sine_patch());
+        s.set_expression(Expression {
+            bend_semis: 12.0,
+            ..Expression::default()
+        });
+        s.note_on(57, 1.0, 1); // A3 bent up an octave
+        let (l, _) = render(&mut s, 48_000);
+        let f = pitch_hz(&l);
+        assert!((f - 440.0).abs() <= 1.0, "{f}");
+    }
+
+    #[test]
+    fn sustain_holds_released_keys_until_the_pedal_lifts() {
+        let mut s = GloomSynth::new(SR);
+        s.set_settings(&sine_patch());
+        s.set_sustain(true);
+        s.note_on(60, 1.0, 1);
+        s.note_on(64, 1.0, 2);
+        s.note_off(60);
+        let (l, _) = render(&mut s, 4800);
+        assert!(rms(&l[4000..]) > 0.05, "held by the pedal");
+        assert_eq!(s.active_voices(), 2);
+        s.set_sustain(false);
+        render(&mut s, 4800);
+        // 60 was let go: it released. 64 is still down: it keeps sounding.
+        assert_eq!(s.active_voices(), 1);
+        s.note_off(64);
+        render(&mut s, 4800);
+        assert!(!s.is_active());
+    }
+
+    #[test]
+    fn mod_wheel_and_aftertouch_drive_the_matrix() {
+        let mut p = sine_patch();
+        p.mods[0] = ModSlot {
+            source: ModSource::ModWheel,
+            dest: ModDest::Pitch,
+            amount: 1.0,
+        };
+        p.mods[1] = ModSlot {
+            source: ModSource::Aftertouch,
+            dest: ModDest::Amp,
+            amount: -1.0,
+        };
+        let mut s = GloomSynth::new(SR);
+        s.set_settings(&p);
+        s.note_on(57, 1.0, 1);
+        let (l, _) = render(&mut s, 24_000);
+        assert!((pitch_hz(&l) - 220.0).abs() <= 1.0);
+        s.set_expression(Expression {
+            mod_wheel: 1.0,
+            ..Expression::default()
+        });
+        let (l, _) = render(&mut s, 24_000);
+        assert!(
+            (pitch_hz(&l[2400..]) - 440.0).abs() <= 2.0,
+            "wheel up: +12 st"
+        );
+        // Polyphonic pressure on the key silences it through the amp row.
+        s.set_key_pressure(57, 1.0);
+        let (l, _) = render(&mut s, 4800);
+        assert!(rms(&l[2400..]) < 1e-3);
     }
 }

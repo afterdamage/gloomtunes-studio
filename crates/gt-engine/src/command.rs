@@ -127,9 +127,11 @@ pub enum EngineCommand {
         /// New value.
         value: f32,
     },
-    /// The channel slot that live notes ([`crate::LiveNote`]) play, or none to mute them.
-    /// Notes already held finish on the slot they started on.
+    /// The channel slot that live input ([`crate::LiveEvent`]) plays unless routed elsewhere,
+    /// or none to mute it. Notes already held finish on the slot they started on.
     SetLiveChannel(Option<u16>),
+    /// Where each MIDI input port and channel plays (D109).
+    SetLiveRoutes(Box<crate::LiveRoutes>),
     /// Put a plugin into the plugin table (or empty an entry). Channels and effect slots that
     /// name its instance start using it. The previous one comes back as garbage, stopped.
     SetPlugin {
@@ -188,6 +190,7 @@ impl EngineCommand {
                 | Self::SetInputRoutes(_)
                 | Self::SetRecorder(_)
                 | Self::Calibrate(_)
+                | Self::SetLiveRoutes(_)
         )
     }
 }
@@ -269,4 +272,6 @@ pub enum Garbage {
     Recorder(Box<RecordSink>),
     /// A finished or cancelled latency measurement.
     Calibration(Box<CalibrationSink>),
+    /// Replaced live routes.
+    LiveRoutes(Box<crate::LiveRoutes>),
 }

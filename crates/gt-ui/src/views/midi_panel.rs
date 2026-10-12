@@ -1,5 +1,5 @@
-//! MIDI and recording settings: input devices, count-in, metronome while recording, latency
-//! compensation and the typing keyboard's octave.
+//! MIDI and recording settings: input devices, input routing, count-in, metronome while
+//! recording, latency compensation and the typing keyboard's octave.
 
 use egui::{Grid, RichText, Ui};
 
@@ -14,6 +14,17 @@ pub struct MidiPortRow {
     pub enabled: bool,
     /// It is connected now.
     pub connected: bool,
+}
+
+/// One input route: a port (and MIDI channel) that plays a fixed rack channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MidiRouteRow {
+    /// Port name.
+    pub port: String,
+    /// MIDI channel 0 to 15, or `None` for all of the port's channels.
+    pub channel: Option<u8>,
+    /// Rack channel index.
+    pub target: usize,
 }
 
 /// Everything the panel shows and edits.
@@ -33,6 +44,10 @@ pub struct MidiPanelModel {
     pub extra_ms: f32,
     /// Octave of the typing keyboard's bottom-row C.
     pub octave: i32,
+    /// Input routes; anything not routed plays the selected channel.
+    pub routes: Vec<MidiRouteRow>,
+    /// Rack channel names, for route targets.
+    pub channels: Vec<String>,
 }
 
 impl Default for MidiPanelModel {
@@ -45,6 +60,8 @@ impl Default for MidiPanelModel {
             buffer_ms: 0.0,
             extra_ms: 0.0,
             octave: 3,
+            routes: Vec::new(),
+            channels: Vec::new(),
         }
     }
 }
@@ -54,6 +71,8 @@ impl Default for MidiPanelModel {
 pub enum MidiAction {
     /// Connect (true) or disconnect a port, by name.
     SetPortEnabled(String, bool),
+    /// `routes` changed (they belong to the project).
+    RoutesChanged,
 }
 
 /// Draws the panel; edits `m` in place.
@@ -79,8 +98,12 @@ pub fn midi_panel(ui: &mut Ui, theme: &GloomTheme, m: &mut MidiPanelModel) -> Ve
         });
     }
     ui.label(dim(
-        "Notes play the selected channel. Right-click a knob or fader for MIDI learn.",
+        "Notes play the selected channel unless routed below. Right-click a knob or fader \
+         for MIDI learn.",
     ));
+    if routes(ui, m) {
+        actions.push(MidiAction::RoutesChanged);
+    }
     ui.add_space(6.0);
     ui.label(RichText::new("Recording").strong());
     Grid::new("midi_panel")
@@ -126,4 +149,70 @@ pub fn midi_panel(ui: &mut Ui, theme: &GloomTheme, m: &mut MidiPanelModel) -> Ve
             ui.end_row();
         });
     actions
+}
+
+/// The route list. True when it changed.
+fn routes(ui: &mut Ui, m: &mut MidiPanelModel) -> bool {
+    let mut changed = false;
+    let mut names: Vec<String> = m.ports.iter().map(|p| p.name.clone()).collect();
+    for r in &m.routes {
+        if !names.contains(&r.port) {
+            names.push(r.port.clone());
+        }
+    }
+    let channel_text =
+        |c: Option<u8>| c.map_or("All channels".to_owned(), |c| format!("Ch {}", c + 1));
+    let mut remove = None;
+    for (i, r) in m.routes.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt(("route_port", i))
+                .width(160.0)
+                .selected_text(r.port.as_str())
+                .show_ui(ui, |ui| {
+                    for n in &names {
+                        changed |= ui.selectable_value(&mut r.port, n.clone(), n).changed();
+                    }
+                });
+            egui::ComboBox::from_id_salt(("route_ch", i))
+                .width(90.0)
+                .selected_text(channel_text(r.channel))
+                .show_ui(ui, |ui| {
+                    for c in std::iter::once(None).chain((0..16).map(Some)) {
+                        changed |= ui
+                            .selectable_value(&mut r.channel, c, channel_text(c))
+                            .changed();
+                    }
+                });
+            ui.label("plays");
+            egui::ComboBox::from_id_salt(("route_target", i))
+                .width(120.0)
+                .selected_text(m.channels.get(r.target).map_or("?", String::as_str))
+                .show_ui(ui, |ui| {
+                    for (t, n) in m.channels.iter().enumerate() {
+                        changed |= ui.selectable_value(&mut r.target, t, n).changed();
+                    }
+                });
+            if ui.small_button("Remove").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        m.routes.remove(i);
+        changed = true;
+    }
+    let can_add = !names.is_empty() && !m.channels.is_empty();
+    if ui
+        .add_enabled(can_add, egui::Button::new("Add route"))
+        .on_hover_text("Send a controller (or one of its MIDI channels) to a fixed channel, so two controllers can play two instruments")
+        .clicked()
+    {
+        m.routes.push(MidiRouteRow {
+            port: names[0].clone(),
+            channel: None,
+            target: 0,
+        });
+        changed = true;
+    }
+    changed
 }

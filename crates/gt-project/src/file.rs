@@ -33,10 +33,10 @@ use gt_core::synth::{ModDest, ModSlot, ModSource, SynthParam, SynthPatch, MOD_SL
 use gt_core::{
     Adsr, AudioEdit, AudioInput, AudioTake, AutoPoint, Automation, BuiltInSample, Channel,
     ChannelId, Clip, ClipId, ClipKind, ClipStretch, Curve, EffectSlot, Fade, FadeCurve, Frozen,
-    Gap, Instrument, LfoRate, LfoShape, LoopMode, Marker, ModSourceKind, Modulator, ModulatorId,
-    Note, ParamId, Pattern, PatternId, PluginFormat, PluginInstanceId, PluginKind, PluginParamInfo,
-    PluginRef, Project, SampleSource, SamplerSettings, SigChange, StretchMode, TempoMap,
-    TempoPoint, Tick, TimeSig, TimeSigMap, Track, TrackId, WarpMarker, FX_SLOTS, SENDS,
+    Gap, Instrument, LfoRate, LfoShape, LoopMode, Marker, MidiControl, ModSourceKind, Modulator,
+    ModulatorId, Note, ParamId, Pattern, PatternId, PluginFormat, PluginInstanceId, PluginKind,
+    PluginParamInfo, PluginRef, Project, SampleSource, SamplerSettings, SigChange, StretchMode,
+    TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, Track, TrackId, WarpMarker, FX_SLOTS, SENDS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -410,6 +410,18 @@ struct ProjectDto {
     modulators: Vec<ModulatorDto>,
     /// MIDI learn bindings (added in Step 10; absent in older files).
     midi_map: Vec<MidiBindingDto>,
+    /// MIDI inputs playing fixed channels (Prompt 16).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    midi_routes: Vec<MidiRouteDto>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MidiRouteDto {
+    port: String,
+    /// 1 to 16, or absent for every channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    channel: Option<u8>,
+    target: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -445,7 +457,13 @@ struct ChannelDto {
     solo: bool,
     #[serde(default)]
     insert: usize,
+    #[serde(default = "default_bend")]
+    bend_range: f32,
     instrument: InstrumentDto,
+}
+
+fn default_bend() -> f32 {
+    Channel::DEFAULT_BEND
 }
 
 #[derive(Serialize, Deserialize)]
@@ -745,6 +763,9 @@ enum ModSourceDto {
         release_ms: f32,
         gain: f32,
     },
+    Midi {
+        control: String,
+    },
 }
 
 /// The project as the JSON tree written to `project.json`. Audio paths are made relative to
@@ -792,6 +813,7 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
             mute: c.mute,
             solo: c.solo,
             insert: c.insert,
+            bend_range: c.bend_range,
             instrument: match &c.instrument {
                 Instrument::Sampler(s) => InstrumentDto::Sampler {
                     sample: s.sample.as_ref().map(|s| sample_dto(s, dir, embedded)),
@@ -998,6 +1020,9 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                     release_ms,
                     gain,
                 },
+                ModSourceKind::Midi { control } => ModSourceDto::Midi {
+                    control: control.key().to_owned(),
+                },
             },
         })
         .collect();
@@ -1034,6 +1059,15 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                 channel: b.channel + 1,
                 cc: b.cc,
                 param: b.param.key(),
+            })
+            .collect(),
+        midi_routes: p
+            .midi_routes
+            .iter()
+            .map(|r| MidiRouteDto {
+                port: r.port.clone(),
+                channel: r.channel.map(|c| c + 1),
+                target: r.target.0,
             })
             .collect(),
     }
@@ -1209,6 +1243,11 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
             solo: c.solo,
             instrument,
             insert: c.insert,
+            bend_range: if c.bend_range.is_finite() {
+                c.bend_range.clamp(0.0, Channel::MAX_BEND)
+            } else {
+                Channel::DEFAULT_BEND
+            },
         });
     }
     for pat in d.patterns {
@@ -1431,6 +1470,9 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                 release_ms,
                 gain,
             },
+            ModSourceDto::Midi { control } => ModSourceKind::Midi {
+                control: MidiControl::from_key(&control),
+            },
         };
         p.modulators.push(Modulator {
             id: ModulatorId(m.id),
@@ -1451,6 +1493,16 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                 "MIDI binding of controller {} to \"{}\" removed",
                 b.cc, b.param
             )),
+        }
+    }
+    for r in d.midi_routes {
+        let target = ChannelId(r.target);
+        if p.channel_index(target).is_some() && r.channel.is_none_or(|c| (1..=16).contains(&c)) {
+            p.midi_routes.push(gt_core::MidiRoute {
+                port: r.port,
+                channel: r.channel.map(|c| c - 1),
+                target,
+            });
         }
     }
     p.set_id_counter(d.next_id);
@@ -1670,6 +1722,19 @@ mod tests {
         };
         assert!(p.learn_midi(9, 74, pan));
         assert!(p.learn_midi(0, 1, gt_core::MASTER_VOLUME));
+        p.channels[0].bend_range = 12.0;
+        p.midi_routes = vec![
+            gt_core::MidiRoute {
+                port: "Keys".into(),
+                channel: None,
+                target: p.channels[1].id,
+            },
+            gt_core::MidiRoute {
+                port: "Pads".into(),
+                channel: Some(9),
+                target: p.channels[0].id,
+            },
+        ];
         // Start = end is not a valid sampler range; loading repairs it, so compare with the
         // repaired project.
         p.sanitize();

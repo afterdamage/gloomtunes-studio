@@ -143,6 +143,45 @@ impl LfoRate {
     }
 }
 
+/// A MIDI controller a modulator can follow (Prompt 16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MidiControl {
+    /// The mod wheel (CC 1).
+    #[default]
+    ModWheel,
+    /// Channel aftertouch.
+    Aftertouch,
+}
+
+impl MidiControl {
+    /// Every control, in menu order.
+    pub const ALL: [MidiControl; 2] = [Self::ModWheel, Self::Aftertouch];
+
+    /// Menu label.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ModWheel => "Mod wheel",
+            Self::Aftertouch => "Aftertouch",
+        }
+    }
+
+    /// Project-file key.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::ModWheel => "modwheel",
+            Self::Aftertouch => "aftertouch",
+        }
+    }
+
+    /// The control for a key; unknown keys give the mod wheel.
+    pub fn from_key(key: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|c| c.key() == key)
+            .unwrap_or_default()
+    }
+}
+
 /// What drives a modulator.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ModSourceKind {
@@ -165,6 +204,12 @@ pub enum ModSourceKind {
         release_ms: f32,
         /// Input gain: a peak level of `1 / gain` drives the follower to 1.
         gain: f32,
+    },
+    /// A MIDI controller of the channel the target belongs to (else of the selected channel),
+    /// 0 to 1.
+    Midi {
+        /// Which controller.
+        control: MidiControl,
     },
 }
 
@@ -193,6 +238,7 @@ impl ModSourceKind {
         match self {
             Self::Lfo { .. } => "LFO",
             Self::Follower { .. } => "Follower",
+            Self::Midi { .. } => "MIDI",
         }
     }
 
@@ -220,6 +266,7 @@ impl ModSourceKind {
                 *release_ms = fin(*release_ms, 150.0).clamp(1.0, 5000.0);
                 *gain = fin(*gain, 1.0).clamp(0.1, 100.0);
             }
+            Self::Midi { .. } => {}
         }
     }
 }

@@ -3,9 +3,13 @@
 //! A background thread lists the input ports once a second, connects to every new one the
 //! user has not switched off and drops the ones that disappeared, on Windows and Linux alike
 //! (neither backend reports plugging reliably, so polling is the portable way). Each
-//! connection's callback runs on a MIDI thread owned by midir: notes go straight to the
-//! engine through the shared [`LiveInput`], controller moves go to the UI thread (MIDI learn
-//! and bound parameters) with a repaint request.
+//! connection's callback runs on a MIDI thread owned by midir: notes, pitch bend, sustain, the
+//! mod wheel and aftertouch go straight to the engine through the shared [`LiveInput`], stamped
+//! with their arrival time and tagged with their port and channel (for routing); controller
+//! moves also go to the UI thread (MIDI learn and bound parameters) with a repaint request.
+//!
+//! Each port gets a number the first time it is seen, kept while the app runs, so a route set
+//! for a port still applies after it is unplugged and plugged back in.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -14,7 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use gt_engine::{LiveInput, LiveNote};
+use gt_engine::{LiveEvent, LiveInput, LiveKind, LiveNote};
 use midir::{Ignore, MidiInput, MidiInputConnection};
 
 /// How often the port list is checked.
@@ -45,28 +49,50 @@ pub struct MidiPortInfo {
 /// A decoded channel message.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum MidiIn {
-    Note(LiveNote),
+    /// For the engine, on a MIDI channel.
+    Live(LiveKind, u8),
+    /// For the UI (learn, bound parameters).
     Cc(MidiCc),
+    /// The mod wheel or sustain: both.
+    Both(LiveKind, MidiCc),
     /// All notes off (CC 123) or all sound off (CC 120).
-    AllOff,
+    AllOff(u8),
 }
 
-/// Decodes one message; anything that is not a note or controller is ignored.
+/// Decodes one message; anything that is not a note, controller, bend or aftertouch is
+/// ignored.
 fn decode(msg: &[u8]) -> Option<MidiIn> {
     let (&status, data) = msg.split_first()?;
     let channel = status & 0x0F;
+    let unit = |v: u8| f32::from(v & 0x7F) / 127.0;
+    let live = |k| Some(MidiIn::Live(k, channel));
     match (status & 0xF0, data) {
-        (0x90, &[key, vel, ..]) if vel > 0 => Some(MidiIn::Note(LiveNote::on(
-            key & 0x7F,
-            f32::from(vel & 0x7F) / 127.0,
-        ))),
-        (0x80 | 0x90, &[key, _, ..]) => Some(MidiIn::Note(LiveNote::off(key & 0x7F))),
-        (0xB0, &[120 | 123, ..]) => Some(MidiIn::AllOff),
-        (0xB0, &[cc, value, ..]) => Some(MidiIn::Cc(MidiCc {
-            channel,
-            cc: cc & 0x7F,
-            value: value & 0x7F,
-        })),
+        (0x90, &[key, vel, ..]) if vel > 0 => {
+            live(LiveKind::Note(LiveNote::on(key & 0x7F, unit(vel))))
+        }
+        (0x80 | 0x90, &[key, _, ..]) => live(LiveKind::Note(LiveNote::off(key & 0x7F))),
+        (0xE0, &[lsb, msb, ..]) => {
+            let v = (i32::from(msb & 0x7F) << 7 | i32::from(lsb & 0x7F)) - 8192;
+            live(LiveKind::Bend((v as f32 / 8191.0).clamp(-1.0, 1.0)))
+        }
+        (0xD0, &[v, ..]) => live(LiveKind::Pressure(unit(v))),
+        (0xA0, &[key, v, ..]) => live(LiveKind::KeyPressure {
+            key: key & 0x7F,
+            value: unit(v),
+        }),
+        (0xB0, &[120 | 123, ..]) => Some(MidiIn::AllOff(channel)),
+        (0xB0, &[cc, value, ..]) => {
+            let c = MidiCc {
+                channel,
+                cc: cc & 0x7F,
+                value: value & 0x7F,
+            };
+            match c.cc {
+                1 => Some(MidiIn::Both(LiveKind::ModWheel(unit(value)), c)),
+                64 => Some(MidiIn::Both(LiveKind::Sustain(c.value >= 64), c)),
+                _ => Some(MidiIn::Cc(c)),
+            }
+        }
         _ => None,
     }
 }
@@ -81,6 +107,8 @@ struct Shared {
     activity: AtomicU32,
     /// Why MIDI is unavailable, if it is.
     error: Mutex<Option<String>>,
+    /// Port names in the order they were first seen: a port's number is its index.
+    numbers: Mutex<Vec<String>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -103,6 +131,7 @@ impl MidiIo {
             ports: Mutex::new(Vec::new()),
             activity: AtomicU32::new(0),
             error: Mutex::new(None),
+            numbers: Mutex::new(Vec::new()),
         });
         let (tx, rx) = channel();
         let s = Arc::clone(&shared);
@@ -153,6 +182,11 @@ impl MidiIo {
         self.cc.try_iter().collect()
     }
 
+    /// The number live events from port `name` carry, once it has been seen.
+    pub fn port_number(&self, name: &str) -> Option<usize> {
+        lock(&self.shared.numbers).iter().position(|n| n == name)
+    }
+
     /// Count of messages received so far (changes when anything arrives).
     pub fn activity(&self) -> u32 {
         self.shared.activity.load(Ordering::Relaxed)
@@ -173,9 +207,20 @@ impl Drop for MidiIo {
     }
 }
 
-/// Keys held on one connection, to release them on "all notes off" or disconnect.
+/// Keys held on one connection by MIDI channel, to release them on "all notes off" or
+/// disconnect.
 struct PortState {
-    held: [bool; 128],
+    number: u8,
+    held: [[bool; 128]; 16],
+}
+
+impl PortState {
+    fn new(number: u8) -> Self {
+        Self {
+            number,
+            held: [[false; 128]; 16],
+        }
+    }
 }
 
 fn scan_loop(shared: &Arc<Shared>, live: &LiveInput, tx: &Sender<MidiCc>, ctx: &egui::Context) {
@@ -218,8 +263,8 @@ fn scan_loop(shared: &Arc<Shared>, live: &LiveInput, tx: &Sender<MidiCc>, ctx: &
                 .collect();
             for name in gone {
                 if let Some(c) = conns.remove(&name) {
-                    let (_, state) = c.close();
-                    release_held(live, &state);
+                    let (_, mut state) = c.close();
+                    release_held(live, &mut state, None);
                     log::info!("MIDI input closed: {name}");
                 }
             }
@@ -227,7 +272,15 @@ fn scan_loop(shared: &Arc<Shared>, live: &LiveInput, tx: &Sender<MidiCc>, ctx: &
                 if conns.contains_key(name) || disabled.contains(name) {
                     continue;
                 }
-                match connect(port, shared, live, tx, ctx) {
+                let number = {
+                    let mut numbers = lock(&shared.numbers);
+                    numbers.iter().position(|n| n == name).unwrap_or_else(|| {
+                        numbers.push(name.clone());
+                        numbers.len() - 1
+                    })
+                };
+                let number = u8::try_from(number).unwrap_or(u8::MAX - 1);
+                match connect(port, number, shared, live, tx, ctx) {
                     Ok(c) => {
                         log::info!("MIDI input opened: {name}");
                         conns.insert(name.clone(), c);
@@ -247,21 +300,37 @@ fn scan_loop(shared: &Arc<Shared>, live: &LiveInput, tx: &Sender<MidiCc>, ctx: &
         }
     }
     for (_, c) in conns.drain() {
-        let (_, state) = c.close();
-        release_held(live, &state);
+        let (_, mut state) = c.close();
+        release_held(live, &mut state, None);
     }
 }
 
-fn release_held(live: &LiveInput, state: &PortState) {
-    for (k, &h) in state.held.iter().enumerate() {
-        if h {
-            live.send(LiveNote::off(k as u8));
+/// Releases the keys held on `channel` (all channels for `None`) and lifts the pedal.
+fn release_held(live: &LiveInput, state: &mut PortState, channel: Option<u8>) {
+    for (c, keys) in state.held.iter_mut().enumerate() {
+        if channel.is_some_and(|ch| usize::from(ch) != c) {
+            continue;
         }
+        for (k, h) in keys.iter_mut().enumerate() {
+            if std::mem::take(h) {
+                live.send(LiveEvent::from_port(
+                    LiveKind::Note(LiveNote::off(k as u8)),
+                    state.number,
+                    c as u8,
+                ));
+            }
+        }
+        live.send(LiveEvent::from_port(
+            LiveKind::Sustain(false),
+            state.number,
+            c as u8,
+        ));
     }
 }
 
 fn connect(
     port: &midir::MidiInputPort,
+    number: u8,
     shared: &Arc<Shared>,
     live: &LiveInput,
     tx: &Sender<MidiCc>,
@@ -277,24 +346,28 @@ fn connect(
             &format!("{CLIENT_NAME} in"),
             move |_stamp, msg, state: &mut PortState| {
                 shared.activity.fetch_add(1, Ordering::Relaxed);
+                let to_ui = |cc| {
+                    if tx.send(cc).is_ok() {
+                        ctx.request_repaint();
+                    }
+                };
                 match decode(msg) {
-                    Some(MidiIn::Note(n)) => {
-                        state.held[usize::from(n.key)] = n.is_on();
-                        live.send(n);
-                    }
-                    Some(MidiIn::Cc(cc)) => {
-                        if tx.send(cc).is_ok() {
-                            ctx.request_repaint();
+                    Some(MidiIn::Live(kind, channel)) => {
+                        if let LiveKind::Note(n) = kind {
+                            state.held[usize::from(channel)][usize::from(n.key)] = n.is_on();
                         }
+                        live.send(LiveEvent::from_port(kind, state.number, channel));
                     }
-                    Some(MidiIn::AllOff) => {
-                        release_held(&live, state);
-                        state.held = [false; 128];
+                    Some(MidiIn::Cc(cc)) => to_ui(cc),
+                    Some(MidiIn::Both(kind, cc)) => {
+                        live.send(LiveEvent::from_port(kind, state.number, cc.channel));
+                        to_ui(cc);
                     }
+                    Some(MidiIn::AllOff(channel)) => release_held(&live, state, Some(channel)),
                     None => {}
                 }
             },
-            PortState { held: [false; 128] },
+            PortState::new(number),
         )
         .map_err(|e| e.to_string())
 }
@@ -304,20 +377,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn messages_decode_to_notes_and_controllers() {
-        assert_eq!(
-            decode(&[0x90, 60, 127]),
-            Some(MidiIn::Note(LiveNote::on(60, 1.0)))
-        );
+    fn messages_decode_to_notes_controllers_and_expression() {
+        let note = |n, ch| Some(MidiIn::Live(LiveKind::Note(n), ch));
+        assert_eq!(decode(&[0x90, 60, 127]), note(LiveNote::on(60, 1.0), 0));
         // Note-on with velocity 0 is a note-off (running-status keyboards send these).
-        assert_eq!(
-            decode(&[0x93, 60, 0]),
-            Some(MidiIn::Note(LiveNote::off(60)))
-        );
-        assert_eq!(
-            decode(&[0x80, 61, 40]),
-            Some(MidiIn::Note(LiveNote::off(61)))
-        );
+        assert_eq!(decode(&[0x93, 60, 0]), note(LiveNote::off(60), 3));
+        assert_eq!(decode(&[0x80, 61, 40]), note(LiveNote::off(61), 0));
         assert_eq!(
             decode(&[0xB2, 74, 100]),
             Some(MidiIn::Cc(MidiCc {
@@ -326,9 +391,47 @@ mod tests {
                 value: 100
             }))
         );
-        assert_eq!(decode(&[0xB0, 123, 0]), Some(MidiIn::AllOff));
-        // Pitch bend, program change, clock, short messages: ignored.
-        assert_eq!(decode(&[0xE0, 0, 64]), None);
+        assert_eq!(decode(&[0xB5, 123, 0]), Some(MidiIn::AllOff(5)));
+        // Pitch bend: centre, full up, full down.
+        assert_eq!(
+            decode(&[0xE1, 0, 64]),
+            Some(MidiIn::Live(LiveKind::Bend(0.0), 1))
+        );
+        assert_eq!(
+            decode(&[0xE0, 0x7F, 0x7F]),
+            Some(MidiIn::Live(LiveKind::Bend(1.0), 0))
+        );
+        assert_eq!(
+            decode(&[0xE0, 0, 0]),
+            Some(MidiIn::Live(LiveKind::Bend(-1.0), 0))
+        );
+        assert!(matches!(
+            decode(&[0xB0, 64, 127]),
+            Some(MidiIn::Both(LiveKind::Sustain(true), _))
+        ));
+        assert!(matches!(
+            decode(&[0xB0, 64, 10]),
+            Some(MidiIn::Both(LiveKind::Sustain(false), _))
+        ));
+        assert!(matches!(
+            decode(&[0xB0, 1, 127]),
+            Some(MidiIn::Both(LiveKind::ModWheel(v), _)) if v == 1.0
+        ));
+        assert_eq!(
+            decode(&[0xD4, 127]),
+            Some(MidiIn::Live(LiveKind::Pressure(1.0), 4))
+        );
+        assert_eq!(
+            decode(&[0xA0, 60, 0]),
+            Some(MidiIn::Live(
+                LiveKind::KeyPressure {
+                    key: 60,
+                    value: 0.0
+                },
+                0
+            ))
+        );
+        // Program change, clock, short messages: ignored.
         assert_eq!(decode(&[0xC0, 5]), None);
         assert_eq!(decode(&[0xF8]), None);
         assert_eq!(decode(&[0x90, 60]), None);
