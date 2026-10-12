@@ -27,6 +27,7 @@ fn rig(edited: bool) -> AudioProcessor {
                     curve: FadeCurve::SCurve,
                 },
                 reverse: true,
+                ..AudioEdit::default()
             }
         } else {
             AudioEdit::default()

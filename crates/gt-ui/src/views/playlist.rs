@@ -27,9 +27,9 @@ use egui::{
 };
 use gt_core::playlist::TRACK_COLORS;
 use gt_core::{
-    AutoPoint, Automation, ClipId, ClipKind, Curve, FadeCurve, ParamId, PatternId, Peaks, Project,
-    SampleSource, SigChange, StripKind, TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, TrackId,
-    FX_SLOTS, MASTER, PPQ, STRIPS,
+    AutoPoint, Automation, ClipId, ClipKind, ClipStretch, Curve, FadeCurve, ParamId, PatternId,
+    Peaks, Project, SampleSource, SigChange, StretchMode, StripKind, TempoMap, TempoPoint, Tick,
+    TimeSig, TimeSigMap, TrackId, FX_SLOTS, MASTER, PPQ, STRIPS,
 };
 
 use crate::GloomTheme;
@@ -128,6 +128,14 @@ impl PlaylistSnap {
 pub trait AudioLookup {
     /// Waveform peaks and sample rate of a loaded sound.
     fn peaks(&self, src: &SampleSource) -> Option<(&Peaks, u32)>;
+    /// Transients of a loaded sound, in seconds from its start.
+    fn onsets(&self, _src: &SampleSource) -> &[f64] {
+        &[]
+    }
+    /// Detected tempo of a loaded sound.
+    fn tempo(&self, _src: &SampleSource) -> Option<f64> {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -167,6 +175,11 @@ enum Drag {
     Fade {
         clip: ClipId,
         out: bool,
+    },
+    /// Dragging a warp marker of a tempo-follow audio clip to another beat.
+    Warp {
+        clip: ClipId,
+        index: usize,
     },
     Loop {
         from: i64,
@@ -442,7 +455,7 @@ pub fn playlist(
         view.inputs,
         &mut actions,
     );
-    let (popup_timing, popup_changed) = show_popup(ui, theme, st, project);
+    let (popup_timing, popup_changed) = show_popup(ui, theme, st, project, view.audio);
     let timing = timing | popup_timing;
     changed |= popup_changed;
     if popup_changed {
@@ -700,6 +713,8 @@ enum Zone {
     Point(usize),
     /// On the fade-in (false) or fade-out (true) handle of an audio clip.
     Fade(bool),
+    /// On a warp marker's handle (the bottom of the clip).
+    Warp(usize),
 }
 
 fn track_row(project: &Project, id: TrackId) -> Option<usize> {
@@ -729,6 +744,13 @@ fn hit_clip(geo: &Geo, project: &Project, p: Pos2) -> Option<(ClipId, Zone)> {
                     return Some((c.id, Zone::Fade(out)));
                 }
             }
+            if let Some(i) = warp_handles(geo, r, c, edit)
+                .into_iter()
+                .find(|&(_, q)| q.distance(p) <= POINT_R + 2.0)
+                .map(|(i, _)| i)
+            {
+                return Some((c.id, Zone::Warp(i)));
+            }
         }
         let grip = EDGE_PX.min(r.width() * 0.25);
         let zone = if p.x <= r.left() + grip {
@@ -757,6 +779,27 @@ fn fade_handles(
     let x_in = geo.x(start + edit.fade_in.len).min(r.right());
     let x_out = geo.x(end - edit.fade_out.len).max(r.left());
     [(false, pos2(x_in, y)), (true, pos2(x_out, y))]
+}
+
+/// Screen positions of a tempo-follow clip's warp marker handles, on the bottom edge.
+fn warp_handles(
+    geo: &Geo,
+    r: Rect,
+    c: &gt_core::Clip,
+    edit: &gt_core::AudioEdit,
+) -> Vec<(usize, Pos2)> {
+    if edit.stretch.mode != StretchMode::TempoFollow || edit.stretch.bpm <= 0.0 {
+        return Vec::new();
+    }
+    let origin = c.start - c.offset;
+    edit.stretch
+        .warps
+        .iter()
+        .enumerate()
+        .map(|(i, w)| (i, geo.xf(origin as f64 + w.beat * PPQ as f64)))
+        .filter(|&(_, x)| x >= r.left() && x <= r.right())
+        .map(|(i, x)| (i, pos2(x, r.bottom() - POINT_R)))
+        .collect()
 }
 
 /// Screen positions of an automation clip's points inside the clip window.
@@ -867,6 +910,9 @@ fn grid_input(
                 }
                 (_, Some((id, Zone::Fade(out)))) => {
                     st.drag = Some(Drag::Fade { clip: id, out });
+                }
+                (_, Some((id, Zone::Warp(index)))) => {
+                    st.drag = Some(Drag::Warp { clip: id, index });
                 }
                 (_, Some((id, Zone::Curve)))
                     if ctrl
@@ -1021,12 +1067,24 @@ fn grid_input(
                 }
                 st.drag = None;
             }
+            if let Some((id, Zone::Warp(i))) = hit {
+                // Right-click on a warp marker removes it.
+                if let Some(ClipKind::Audio { edit, .. }) =
+                    project.playlist.clip_mut(id).map(|c| &mut c.kind)
+                {
+                    if i < edit.stretch.warps.len() {
+                        edit.stretch.warps.remove(i);
+                        changed = true;
+                    }
+                }
+                st.drag = None;
+            }
         }
     }
     if matches!(st.drag, Some(Drag::Erase)) {
         if let Some(p) = pointer {
             if let Some((id, zone)) = hit_clip(geo, project, p) {
-                if !matches!(zone, Zone::Point(_) | Zone::Fade(_)) {
+                if !matches!(zone, Zone::Point(_) | Zone::Fade(_) | Zone::Warp(_)) {
                     project.playlist.remove_clips(&[id]);
                     st.selected.retain(|x| *x != id);
                     changed = true;
@@ -1233,6 +1291,31 @@ fn drag_update(
                 edit.fade_in.len = (tick - start).clamp(0, length - edit.fade_out.len);
             }
             before != (edit.fade_in.len, edit.fade_out.len)
+        }
+        Some(Drag::Warp { clip, index }) => {
+            let Some(c) = project.playlist.clip_mut(clip) else {
+                return false;
+            };
+            let origin = c.start - c.offset;
+            let ClipKind::Audio { edit, .. } = &mut c.kind else {
+                return false;
+            };
+            // The marker's audio moves to the snapped beat, between its neighbours.
+            let warps = &mut edit.stretch.warps;
+            let beat = (snap.round(tick, &sigs) - origin) as f64 / PPQ as f64;
+            let gap = 1.0 / 64.0;
+            let lo = index
+                .checked_sub(1)
+                .and_then(|k| warps.get(k))
+                .map_or(f64::NEG_INFINITY, |w| w.beat + gap);
+            let hi = warps.get(index + 1).map_or(f64::INFINITY, |w| w.beat - gap);
+            let Some(w) = warps.get_mut(index) else {
+                return false;
+            };
+            let beat = beat.clamp(lo, hi.max(lo));
+            let moved = w.beat != beat;
+            w.beat = beat;
+            moved
         }
         Some(Drag::Point { clip, index }) => {
             let Some(track) = project.playlist.clip(clip).map(|c| c.track) else {
@@ -1655,6 +1738,7 @@ fn show_popup(
     theme: &GloomTheme,
     st: &mut PlaylistState,
     project: &mut Project,
+    audio: &dyn AudioLookup,
 ) -> (bool, bool) {
     let Some((popup, pos, age)) = st.popup else {
         return (false, false);
@@ -1741,6 +1825,18 @@ fn show_popup(
                         }
                     }
                     Popup::Clip(id) => {
+                        let (seconds, analysis) = match project.playlist.clip(id).map(|c| &c.kind) {
+                            Some(ClipKind::Audio { source, .. }) => (
+                                audio
+                                    .peaks(source)
+                                    .map(|(p, r)| p.frames() as f64 / f64::from(r.max(1))),
+                                Analysis {
+                                    tempo: audio.tempo(source),
+                                    onsets: audio.onsets(source),
+                                },
+                            ),
+                            _ => (None, Analysis::default()),
+                        };
                         let Some(c) = project.playlist.clip_mut(id) else {
                             close = true;
                             return;
@@ -1761,6 +1857,7 @@ fn show_popup(
                             takes.iter().map(|t| t.source.display_name()).collect();
                         let mut pick = None;
                         let mut clear = false;
+                        let mut new_len = None;
                         ui.vertical(|ui| {
                             ui.label(RichText::new(current.clone()).color(theme.text_dim));
                             ui.horizontal(|ui| {
@@ -1802,6 +1899,20 @@ fn show_popup(
                                         });
                                 });
                             }
+                            ui.separator();
+                            let before = edit.stretch.clone();
+                            stretch_controls(ui, &mut edit.stretch, seconds, analysis);
+                            if edit.stretch != before {
+                                changed = true;
+                                // Resampling and manual stretch change the length: the clip
+                                // follows.
+                                if edit.stretch.mode != StretchMode::TempoFollow
+                                    && before.mode != StretchMode::TempoFollow
+                                    && before.ratio != edit.stretch.ratio
+                                {
+                                    new_len = Some(edit.stretch.ratio / before.ratio);
+                                }
+                            }
                             if !others.is_empty() {
                                 ui.separator();
                                 ui.label(RichText::new("Takes").color(theme.text_dim));
@@ -1817,6 +1928,9 @@ fn show_popup(
                                     .clicked();
                             }
                         });
+                        if let Some(f) = new_len {
+                            c.length = ((c.length as f64 * f).round() as i64).max(1);
+                        }
                         if let Some(i) = pick {
                             changed |= c.use_take(i);
                         }
@@ -2013,20 +2127,32 @@ fn paint(
                 ..
             } => {
                 if let Some((peaks, rate)) = view.audio.peaks(source) {
-                    paint_wave(
-                        &cp,
-                        geo,
-                        c,
-                        &project.tempo,
-                        peaks,
-                        rate,
-                        edit.reverse,
-                        body,
-                        ink,
-                    );
+                    let stretch = edit.stretch.sanitized();
+                    let look = WaveLook {
+                        reverse: edit.reverse,
+                        speed: stretch.speed(project.tempo.bpm_at(Tick(c.start - c.offset))),
+                        follow: (stretch.mode == StretchMode::TempoFollow && stretch.bpm > 0.0)
+                            .then_some(&stretch),
+                    };
+                    paint_wave(&cp, geo, c, &project.tempo, peaks, rate, look, body, ink);
                 }
                 paint_gaps(&cp, geo, c, &project.tempo, gaps, body, theme.warn);
                 paint_fades(&cp, geo, c, edit, r, body, ink);
+                for (_, q) in warp_handles(geo, r, c, edit) {
+                    cp.line_segment(
+                        [pos2(q.x, body.top()), pos2(q.x, r.bottom())],
+                        Stroke::new(1.0, theme.accent.gamma_multiply(0.7)),
+                    );
+                    cp.add(egui::Shape::convex_polygon(
+                        vec![
+                            pos2(q.x, q.y - POINT_R),
+                            pos2(q.x + POINT_R, q.y + POINT_R),
+                            pos2(q.x - POINT_R, q.y + POINT_R),
+                        ],
+                        theme.accent,
+                        Stroke::NONE,
+                    ));
+                }
                 if takes.is_empty() {
                     source.display_name()
                 } else {
@@ -2255,6 +2381,16 @@ fn paint_pattern(
     }
 }
 
+/// How a clip reads its audio, for drawing.
+#[derive(Debug, Clone, Copy)]
+struct WaveLook<'a> {
+    reverse: bool,
+    /// Source seconds per song second.
+    speed: f64,
+    /// Tempo follow: the audio follows the beats (and warp markers) instead.
+    follow: Option<&'a ClipStretch>,
+}
+
 /// Waveform of an audio clip from the peak cache, one column per pixel.
 #[allow(clippy::too_many_arguments)]
 fn paint_wave(
@@ -2264,10 +2400,15 @@ fn paint_wave(
     tempo: &TempoMap,
     peaks: &Peaks,
     rate: u32,
-    reverse: bool,
+    look: WaveLook<'_>,
     body: Rect,
     ink: Color32,
 ) {
+    let WaveLook {
+        reverse,
+        speed,
+        follow,
+    } = look;
     let vis = p.clip_rect().intersect(body);
     if vis.width() <= 0.0 {
         return;
@@ -2276,7 +2417,11 @@ fn paint_wave(
     let rate = f64::from(rate.max(1));
     let mid = body.center().y;
     let half = body.height() * 0.5 - 1.0;
-    let frame_at = |x: f32| (tempo.tick_to_seconds(geo.tick_f(x)) - origin) * rate;
+    let origin_tick = (c.start - c.offset) as f64;
+    let frame_at = |x: f32| match follow {
+        Some(st) => st.source_at((geo.tick_f(x) - origin_tick) / PPQ as f64) * rate,
+        None => (tempo.tick_to_seconds(geo.tick_f(x)) - origin) * rate * speed,
+    };
     let mut x = vis.left().floor();
     let mut f0 = frame_at(x);
     while x < vis.right() {
@@ -2336,6 +2481,141 @@ fn paint_fades(
     }
     for (_, q) in fade_handles(geo, r, c.start, c.end(), edit) {
         p.rect_filled(Rect::from_center_size(q, egui::vec2(6.0, 6.0)), 1.0, ink);
+    }
+}
+
+/// What the app detected in a clip's audio.
+#[derive(Debug, Clone, Copy, Default)]
+struct Analysis<'a> {
+    tempo: Option<f64>,
+    /// Transients in seconds.
+    onsets: &'a [f64],
+}
+
+/// Stretch mode, speed and pitch of an audio clip (the popup). `seconds` is the source's
+/// length, for guessing its tempo.
+fn stretch_controls(ui: &mut Ui, s: &mut ClipStretch, seconds: Option<f64>, found: Analysis<'_>) {
+    ui.horizontal(|ui| {
+        ui.label("Speed");
+        egui::ComboBox::from_id_salt("pl_stretch_mode")
+            .width(100.0)
+            .selected_text(s.mode.name())
+            .show_ui(ui, |ui| {
+                for m in StretchMode::ALL {
+                    ui.selectable_value(&mut s.mode, m, m.name());
+                }
+            })
+            .response
+            .on_hover_text(
+                "Resample: pitch follows speed. Tempo follow: keeps pitch and follows the \
+                 project tempo. Stretch: length and pitch set separately.",
+            );
+    });
+    match s.mode {
+        StretchMode::Off | StretchMode::Manual => {
+            ui.horizontal(|ui| {
+                ui.label("Length");
+                ui.add(
+                    egui::DragValue::new(&mut s.ratio)
+                        .range(ClipStretch::RATIO.0..=ClipStretch::RATIO.1)
+                        .speed(0.005)
+                        .fixed_decimals(3)
+                        .prefix("×"),
+                )
+                .on_hover_text("2 plays twice as long");
+            });
+        }
+        StretchMode::TempoFollow => {
+            ui.horizontal(|ui| {
+                ui.label("Original");
+                ui.add(
+                    egui::DragValue::new(&mut s.bpm)
+                        .range(0.0..=ClipStretch::BPM.1)
+                        .speed(0.05)
+                        .fixed_decimals(2)
+                        .suffix(" BPM"),
+                )
+                .on_hover_text("The tempo the audio was played at (0: unknown)");
+                if let Some(g) = seconds.and_then(ClipStretch::guess_bpm) {
+                    if ui
+                        .small_button("From length")
+                        .on_hover_text(format!(
+                            "{g:.2} BPM: the clip holds a whole number of beats"
+                        ))
+                        .clicked()
+                    {
+                        s.bpm = (g * 100.0).round() / 100.0;
+                    }
+                }
+                if let Some(t) = found.tempo {
+                    if ui
+                        .small_button("Detect")
+                        .on_hover_text(format!("{t:.2} BPM, from the transients"))
+                        .clicked()
+                    {
+                        s.bpm = (t * 100.0).round() / 100.0;
+                    }
+                }
+                if s.bpm > 0.0 {
+                    if ui.small_button("×2").clicked() {
+                        s.bpm = (s.bpm * 2.0).min(ClipStretch::BPM.1);
+                    }
+                    if ui.small_button("÷2").clicked() {
+                        s.bpm = (s.bpm / 2.0).max(ClipStretch::BPM.0);
+                    }
+                }
+            });
+            if s.bpm > 0.0 {
+                ui.horizontal(|ui| {
+                    ui.label(format!("Warp markers: {}", s.warps.len()));
+                    if !found.onsets.is_empty()
+                        && ui
+                            .small_button("At transients")
+                            .on_hover_text(
+                                "A marker on every transient, where it plays now; drag the \
+                                 triangles at the bottom of the clip onto the grid",
+                            )
+                            .clicked()
+                    {
+                        let st = s.clone();
+                        s.warps = found
+                            .onsets
+                            .iter()
+                            .map(|&t| gt_core::WarpMarker {
+                                source_s: t,
+                                beat: st.beat_at(t),
+                            })
+                            .collect();
+                    }
+                    if !s.warps.is_empty() && ui.small_button("Clear").clicked() {
+                        s.warps.clear();
+                    }
+                });
+            }
+        }
+    }
+    if s.mode == StretchMode::Manual {
+        ui.horizontal(|ui| {
+            ui.label("Pitch");
+            let mut semi = s.semitones.trunc();
+            let mut cents = ((s.semitones - semi) * 100.0).round();
+            let a = ui.add(
+                egui::DragValue::new(&mut semi)
+                    .range(-ClipStretch::SEMITONES..=ClipStretch::SEMITONES)
+                    .speed(0.05)
+                    .suffix(" st"),
+            );
+            let b = ui.add(
+                egui::DragValue::new(&mut cents)
+                    .range(-99.0..=99.0)
+                    .speed(0.2)
+                    .suffix(" ct"),
+            );
+            if a.changed() || b.changed() {
+                s.semitones =
+                    (semi + cents / 100.0).clamp(-ClipStretch::SEMITONES, ClipStretch::SEMITONES);
+            }
+        });
     }
 }
 
@@ -2968,5 +3248,74 @@ mod tests {
             st.popup.as_ref().map(|p| p.1)
         );
         assert_eq!(p.playlist.clips.len(), n, "the clip is not erased");
+    }
+
+    #[test]
+    fn dragging_a_warp_marker_puts_its_audio_on_the_grid_and_right_click_removes_it() {
+        let ctx = egui::Context::default();
+        let mut p = Project::empty();
+        let t = p.playlist.tracks[0].id;
+        let id = p.playlist.add_clip(
+            t,
+            0,
+            8 * 960,
+            ClipKind::Audio {
+                source: SampleSource::File("loop.wav".into()),
+                gain: 1.0,
+                gaps: Vec::new(),
+                takes: Vec::new(),
+                edit: gt_core::AudioEdit {
+                    stretch: ClipStretch {
+                        mode: StretchMode::TempoFollow,
+                        bpm: 100.0,
+                        warps: vec![gt_core::WarpMarker {
+                            source_s: 1.26,
+                            beat: 2.1,
+                        }],
+                        ..ClipStretch::default()
+                    },
+                    ..gt_core::AudioEdit::default()
+                },
+            },
+        );
+        let mut st = PlaylistState {
+            tool: PlaylistTool::Select,
+            snap: PlaylistSnap::Beat,
+            px_per_beat: 60.0,
+            ..Default::default()
+        };
+        frame(&ctx, &mut p, &mut st, vec![]);
+        let g = st.last_geo.unwrap();
+        let r = g.clip_rect(0, 0, 8 * 960);
+        let handle = pos2(g.xf(2.1 * 960.0), r.bottom() - POINT_R);
+        for ev in drag(handle, pos2(g.xf(3.05 * 960.0), handle.y)) {
+            frame(&ctx, &mut p, &mut st, ev);
+        }
+        let warps = |p: &Project| match &p.playlist.clip(id).unwrap().kind {
+            ClipKind::Audio { edit, .. } => edit.stretch.warps.clone(),
+            _ => unreachable!(),
+        };
+        let w = warps(&p);
+        assert_eq!(w.len(), 1);
+        assert_eq!((w[0].source_s, w[0].beat), (1.26, 3.0));
+        assert_eq!(p.playlist.clips.len(), 1, "the clip did not move or go");
+
+        let at = pos2(g.xf(3.0 * 960.0), handle.y);
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        for ev in [
+            vec![egui::Event::PointerMoved(at)],
+            vec![press(true)],
+            vec![press(false)],
+            vec![],
+        ] {
+            frame(&ctx, &mut p, &mut st, ev);
+        }
+        assert!(warps(&p).is_empty());
+        assert_eq!(p.playlist.clips.len(), 1, "the clip stays");
     }
 }

@@ -27,6 +27,7 @@ mod mixer;
 mod plugin;
 mod processor;
 pub mod song;
+pub mod stretch;
 pub mod transport;
 
 pub use atomic::AtomicF32;

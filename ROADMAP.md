@@ -457,7 +457,7 @@ sound identical; the golden export test stays.
   - Known limits: chase works in song mode only (pattern mode starts patterns from their
     start anyway); plugin instruments get held notes but not one-shot tails; looped sampler
     voices are chased only while held.
-- Part 2 delivered (2026-10-12), in review (D105). From a track's header menu:
+- Part 2 delivered and merged (2026-10-12, D105). From a track's header menu:
   - **Render to audio**: the selected clips of the track, or the loop region (the whole track
     without a loop), become one audio clip on a new track right below, with the release and
     effect tails; what it replaces is muted, not deleted.
@@ -476,6 +476,35 @@ sound identical; the golden export test stays.
     which leaves silence before a late track's first clip. Exporting a range that cuts a frozen
     track's clips renders its clips instead of the freeze.
 
+### Prompt 15: Time-stretch and pitch-shift
+- Split into three PRs: 1 the stretch engine, clip modes and the render cache; 2 real-time
+  stretching while a render builds; 3 transient detection, BPM detection and warp markers.
+- Part 1 delivered (2026-10-12), in review (D106):
+  - **Speed** in the audio clip popup: *Resample* (length ×0.25 to ×4, pitch follows),
+    *Tempo follow* (keeps pitch and follows the project tempo, including tempo changes, from
+    the clip's original BPM; "From length" guesses it from a whole number of beats) and
+    *Stretch* (length and pitch in semitones and cents, separately).
+  - Stretched clips play a render made by Signalsmith Stretch on a worker thread, cached by
+    everything that shapes it; the export makes the same renders first, so it matches
+    playback sample for sample (tested).
+  - CPU cost: a render costs about 16 ms per second of stereo audio (1.6 % of one core while
+    it builds; `cargo bench -p gt-dsp --bench stretch`); playing a render costs the same as any
+    audio clip.
+  - Known limits: pitch accuracy is within 5 cents (about 4 cents at some intervals). Renders
+    are kept in memory only.
+- Part 2 delivered (2026-10-12), in review (D107): a clip whose render is not ready yet
+  stretches live on the audio thread with look-ahead; from the clip's start it plays exactly
+  the render's samples, and after a locate it restarts the stream there. CPU: the same 1.6 %
+  of a core per live clip, only until its render arrives. Limit: a reversed clip plays
+  resampled until its render is ready.
+- Part 3 delivered (2026-10-12), in review (D108): transient detection (spectral flux with an
+  adaptive threshold) and tempo detection on every loaded sound; in the clip popup *Detect*
+  sets the original BPM, *×2*/*÷2* fix an octave, *At transients* adds warp markers, and the
+  markers drag onto the grid in the playlist (right-click removes one). CPU: about 25 ms per
+  10 s of audio for each analysis, on the loader thread. Limits: tempo detection can be an
+  octave off far from 120 BPM; markers only apply in tempo follow; no slicing to the channel
+  rack yet.
+
 ---
 
 ## v1.0 scope
@@ -485,7 +514,6 @@ Optional for v1.0: Step 11 (CLAP), delivered.
 Out (post-v1 backlog):
 
 - VST3 hosting.
-- Time-stretching and pitch-shifting of audio clips.
 - Tempo ramps (the tempo map currently has step changes only).
 - Out-of-process plugin sandbox (evaluated and deferred in Step 11, D74).
 - Additional built-in instruments (FM, wavetable, drum synth).

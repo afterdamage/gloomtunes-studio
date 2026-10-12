@@ -214,7 +214,20 @@ fn process_does_not_allocate() {
                     gain: 0.8,
                     gaps: Vec::new(),
                     takes: Vec::new(),
-                    edit: gt_core::AudioEdit::default(),
+                    // Every other clip stretches live (no render cache here).
+                    edit: gt_core::AudioEdit {
+                        stretch: gt_core::ClipStretch {
+                            mode: if k % 2 == 0 {
+                                gt_core::StretchMode::Manual
+                            } else {
+                                gt_core::StretchMode::Off
+                            },
+                            ratio: 1.3,
+                            semitones: -2.0,
+                            ..gt_core::ClipStretch::default()
+                        },
+                        ..gt_core::AudioEdit::default()
+                    },
                 },
             );
             song.playlist.clip_mut(c).unwrap().offset = 200;
@@ -296,6 +309,7 @@ fn process_does_not_allocate() {
         let snare = Arc::new(SampleData::mono(sr, gt_dsp::drums::snare(sr as f32)));
         let compiled = SongSnapshot::compile_song(&song, |_| Some(Arc::clone(&snare)));
         assert_eq!(compiled.audio.len(), tracks.len());
+        assert!(compiled.audio.iter().any(|a| a.live.is_some()));
         assert_eq!(compiled.automation.len(), 2 + targets.len());
         h.send(EngineCommand::SetTempoMap(Box::new(song.tempo.clone())))
             .unwrap();

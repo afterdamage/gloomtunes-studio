@@ -91,6 +91,12 @@ pub struct AudioPlay {
     /// A frozen track's render: joins its strip at the freeze point (after an insert's
     /// effects, D105) instead of at the strip's input.
     pub frozen: bool,
+    /// Source frames per output frame (resampling: 2 plays an octave up in half the time;
+    /// 1 for stretch renders, which already run at the right speed).
+    pub speed: f64,
+    /// Stretched live from `sample` while its render builds (Prompt 15 part 2); `speed` is
+    /// then 1.
+    pub live: Option<crate::stretch::LiveStretch>,
 }
 
 impl AudioPlay {
@@ -269,6 +275,16 @@ impl SongSnapshot {
         project: &Project,
         samples: impl Fn(&SampleSource) -> Option<Arc<SampleData>>,
     ) -> Self {
+        Self::compile_song_with(project, samples, |_| None)
+    }
+
+    /// [`Self::compile_song`] with the stretch renders `stretched` has ready, by cache key
+    /// ([`crate::stretch`]). A clip whose render is missing stretches live while it plays.
+    pub fn compile_song_with(
+        project: &Project,
+        samples: impl Fn(&SampleSource) -> Option<Arc<SampleData>>,
+        stretched: impl Fn(u64) -> Option<Arc<SampleData>>,
+    ) -> Self {
         let pl = &project.playlist;
         let swing = swing_ticks(project);
         let tempo = &project.tempo;
@@ -299,6 +315,8 @@ impl SongSnapshot {
                 fade_out_curve: FadeCurve::Linear,
                 reverse: false,
                 frozen: true,
+                speed: 1.0,
+                live: None,
                 sample,
                 gain: 1.0,
                 route: t.insert.min(gt_core::STRIPS - 1) as u8,
@@ -322,6 +340,25 @@ impl SongSnapshot {
                 } => {
                     let Some(sample) = samples(source) else {
                         continue;
+                    };
+                    let render = crate::stretch::key(project, clip, &sample).and_then(&stretched);
+                    // Without its render the clip stretches live (forwards only).
+                    let live = match (&render, edit.reverse) {
+                        (None, false) => crate::stretch::job(project, clip, &sample)
+                            .map(|j| j.live(sample.sample_rate)),
+                        _ => None,
+                    };
+                    let (sample, speed) = match render {
+                        Some(r) => (r, 1.0),
+                        None if live.is_some() => (sample, 1.0),
+                        None => (
+                            sample,
+                            crate::stretch::plain_speed(project, clip, &edit.stretch.sanitized()),
+                        ),
+                    };
+                    let audio_s = match &live {
+                        Some(l) => l.frames as f64 / f64::from(sample.sample_rate.max(1)),
+                        None => sample.seconds() / speed,
                     };
                     // Overlaps with the neighbours on this track crossfade (equal power)
                     // unless the clip's own fade is already longer.
@@ -351,7 +388,7 @@ impl SongSnapshot {
                         sec(clip.end()),
                         sec(clip.start - clip.offset),
                     );
-                    let cut_end = end_s < origin_s + sample.seconds();
+                    let cut_end = end_s < origin_s + audio_s;
                     audio.push(AudioPlay {
                         start_s,
                         end_s,
@@ -364,6 +401,8 @@ impl SongSnapshot {
                         fade_out_curve: fade_out.curve,
                         reverse: edit.reverse,
                         frozen: false,
+                        speed,
+                        live,
                         sample,
                         gain: gain.clamp(0.0, 4.0),
                         route: route as u8,

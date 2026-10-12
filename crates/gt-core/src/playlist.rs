@@ -349,7 +349,7 @@ pub struct Fade {
 }
 
 /// Non-destructive edits of an audio clip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct AudioEdit {
     /// Fade at the left edge.
     pub fade_in: Fade,
@@ -357,6 +357,210 @@ pub struct AudioEdit {
     pub fade_out: Fade,
     /// Play the audio backwards (the clip's offset counts from the audio's end).
     pub reverse: bool,
+    /// Speed and pitch (Prompt 15).
+    pub stretch: ClipStretch,
+}
+
+/// How an audio clip's speed and pitch are set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StretchMode {
+    /// Resample: the audio plays `ratio` times as long and the pitch follows the speed.
+    #[default]
+    Off,
+    /// Keep the pitch and follow the project tempo map from the clip's original BPM.
+    TempoFollow,
+    /// Stretch to `ratio` times the length and shift the pitch by `semitones`, independently.
+    Manual,
+}
+
+impl StretchMode {
+    /// Every mode, in menu order.
+    pub const ALL: [StretchMode; 3] = [Self::Off, Self::TempoFollow, Self::Manual];
+
+    /// Menu label.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "Resample",
+            Self::TempoFollow => "Tempo follow",
+            Self::Manual => "Stretch",
+        }
+    }
+
+    /// Project-file key.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::TempoFollow => "tempo",
+            Self::Manual => "manual",
+        }
+    }
+
+    /// The mode for a key; unknown keys give [`StretchMode::Off`].
+    pub fn from_key(key: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|m| m.key() == key)
+            .unwrap_or_default()
+    }
+}
+
+/// A warp marker: pins a point of the audio to a beat of the clip (Prompt 15 part 3).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WarpMarker {
+    /// Position in the audio, in seconds from its start.
+    pub source_s: f64,
+    /// Beat it plays on, counted from the clip's origin (where the audio's start sits).
+    pub beat: f64,
+}
+
+/// Speed and pitch of an audio clip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipStretch {
+    /// How speed and pitch are set.
+    pub mode: StretchMode,
+    /// Length multiplier (2 plays twice as long) for `Off` and `Manual`.
+    pub ratio: f64,
+    /// Pitch shift for `Manual`, in semitones (fractions are cents).
+    pub semitones: f32,
+    /// Tempo the audio was played at, for `TempoFollow`; 0 when unknown.
+    pub bpm: f64,
+    /// Warp markers for `TempoFollow`, by source position and beat (both rising). Between
+    /// markers the audio stretches evenly; outside them it runs at `bpm`.
+    pub warps: Vec<WarpMarker>,
+}
+
+impl Default for ClipStretch {
+    fn default() -> Self {
+        Self {
+            mode: StretchMode::Off,
+            ratio: 1.0,
+            semitones: 0.0,
+            bpm: 0.0,
+            warps: Vec::new(),
+        }
+    }
+}
+
+impl ClipStretch {
+    /// Shortest and longest length multiplier.
+    pub const RATIO: (f64, f64) = (0.25, 4.0);
+    /// Largest pitch shift either way, in semitones.
+    pub const SEMITONES: f32 = 24.0;
+    /// Original tempo range.
+    pub const BPM: (f64, f64) = (20.0, 400.0);
+
+    /// True when the stretch engine (not plain resampling) shapes the sound.
+    pub fn uses_engine(&self) -> bool {
+        match self.mode {
+            StretchMode::Off => false,
+            StretchMode::TempoFollow => self.bpm > 0.0,
+            StretchMode::Manual => self.ratio != 1.0 || self.semitones != 0.0,
+        }
+    }
+
+    /// Source seconds per song second, given the project tempo where the clip's audio starts:
+    /// exact for resampling and manual stretch, the starting speed for tempo follow.
+    pub fn speed(&self, bpm_at_origin: f64) -> f64 {
+        match self.mode {
+            StretchMode::Off | StretchMode::Manual => 1.0 / self.ratio.max(1e-3),
+            StretchMode::TempoFollow if self.bpm > 0.0 => bpm_at_origin / self.bpm,
+            StretchMode::TempoFollow => 1.0,
+        }
+    }
+
+    /// An original tempo for audio `seconds` long, assuming it holds a whole number of beats
+    /// (a power of two) at a tempo between 70 and 180 BPM; the one nearest 120 BPM wins.
+    pub fn guess_bpm(seconds: f64) -> Option<f64> {
+        if seconds.is_nan() || seconds <= 0.0 {
+            return None;
+        }
+        (0..10)
+            .map(|k| f64::from(1u32 << k) * 60.0 / seconds)
+            .filter(|b| (70.0..=180.0).contains(b))
+            .min_by(|a, b| (a - 120.0).abs().total_cmp(&(b - 120.0).abs()))
+    }
+
+    /// Beat (from the clip's origin) on which the audio at `source_s` plays in `TempoFollow`:
+    /// through the warp markers, at `bpm` outside them.
+    pub fn beat_at(&self, source_s: f64) -> f64 {
+        let bps = self.bpm.max(1e-6) / 60.0;
+        warp_lerp(&self.warps, source_s, bps, |w| (w.source_s, w.beat))
+    }
+
+    /// The inverse of [`ClipStretch::beat_at`]: the audio position that plays on `beat`.
+    pub fn source_at(&self, beat: f64) -> f64 {
+        let spb = 60.0 / self.bpm.max(1e-6);
+        warp_lerp(&self.warps, beat, spb, |w| (w.beat, w.source_s))
+    }
+
+    /// The same settings brought into range.
+    pub fn sanitized(&self) -> Self {
+        let ratio = if self.ratio.is_finite() {
+            self.ratio.clamp(Self::RATIO.0, Self::RATIO.1)
+        } else {
+            1.0
+        };
+        let semitones = if self.semitones.is_finite() {
+            self.semitones.clamp(-Self::SEMITONES, Self::SEMITONES)
+        } else {
+            0.0
+        };
+        let bpm = if self.bpm.is_finite() && self.bpm > 0.0 {
+            self.bpm.clamp(Self::BPM.0, Self::BPM.1)
+        } else {
+            0.0
+        };
+        // Markers sorted by audio position, each later in both the audio and the beats.
+        let mut warps: Vec<WarpMarker> = self
+            .warps
+            .iter()
+            .copied()
+            .filter(|w| w.source_s.is_finite() && w.beat.is_finite() && w.source_s >= 0.0)
+            .collect();
+        warps.sort_by(|a, b| a.source_s.total_cmp(&b.source_s));
+        let mut kept: Vec<WarpMarker> = Vec::with_capacity(warps.len());
+        for w in warps {
+            if kept
+                .last()
+                .is_none_or(|l| w.source_s > l.source_s + 1e-4 && w.beat > l.beat + 1e-4)
+            {
+                kept.push(w);
+            }
+        }
+        Self {
+            mode: self.mode,
+            ratio,
+            semitones,
+            bpm,
+            warps: kept,
+        }
+    }
+}
+
+/// Piecewise-linear map through the markers' `(x, y)` points (`x` and `y` rising), extended
+/// past the ends with `slope`; a straight line through 0 with `slope` without markers.
+fn warp_lerp(
+    warps: &[WarpMarker],
+    x: f64,
+    slope: f64,
+    xy: impl Fn(&WarpMarker) -> (f64, f64),
+) -> f64 {
+    let (Some(first), Some(last)) = (warps.first(), warps.last()) else {
+        return x * slope;
+    };
+    let (x0, y0) = xy(first);
+    if x <= x0 {
+        return y0 + (x - x0) * slope;
+    }
+    let (x1, y1) = xy(last);
+    if x >= x1 {
+        return y1 + (x - x1) * slope;
+    }
+    let k = warps
+        .partition_point(|w| xy(w).0 <= x)
+        .clamp(1, warps.len() - 1);
+    let ((a, fa), (b, fb)) = (xy(&warps[k - 1]), xy(&warps[k]));
+    fa + (fb - fa) * (x - a) / (b - a)
 }
 
 /// A take of an audio clip that is not playing.
@@ -704,6 +908,7 @@ impl Playlist {
                 let len = c.length.max(1);
                 edit.fade_in.len = edit.fade_in.len.clamp(0, len);
                 edit.fade_out.len = edit.fade_out.len.clamp(0, len - edit.fade_in.len);
+                edit.stretch = edit.stretch.sanitized();
                 for t in takes.iter_mut() {
                     t.length = t.length.max(1);
                     t.gaps.retain(|g| {
@@ -925,5 +1130,44 @@ mod tests {
         assert_eq!(p.clips[0].offset, 0);
         assert_eq!(p.tracks[0].insert, MASTER);
         assert_eq!(p.markers[0].name, "a");
+    }
+
+    #[test]
+    fn warp_markers_bend_the_beat_map_and_invert() {
+        let st = ClipStretch {
+            mode: StretchMode::TempoFollow,
+            bpm: 120.0,
+            warps: vec![
+                // Out of order, and one that would run backwards: sanitizing drops it.
+                WarpMarker {
+                    source_s: 2.0,
+                    beat: 4.0,
+                },
+                WarpMarker {
+                    source_s: 1.1,
+                    beat: 2.0,
+                },
+                WarpMarker {
+                    source_s: 1.5,
+                    beat: 1.5,
+                },
+            ],
+            ..ClipStretch::default()
+        }
+        .sanitized();
+        assert_eq!(st.warps.len(), 2);
+        // Before the first marker and after the last: 2 beats per second.
+        assert!((st.beat_at(0.1) - 0.0).abs() < 1e-12);
+        assert!((st.beat_at(3.0) - 6.0).abs() < 1e-12);
+        // Between them: 0.9 s of audio over 2 beats.
+        assert!((st.beat_at(1.55) - 3.0).abs() < 1e-12);
+        for b in [-1.0, 0.0, 1.3, 2.0, 2.7, 4.0, 9.0] {
+            assert!((st.beat_at(st.source_at(b)) - b).abs() < 1e-9, "beat {b}");
+        }
+        let plain = ClipStretch {
+            bpm: 90.0,
+            ..ClipStretch::default()
+        };
+        assert!((plain.beat_at(2.0) - 3.0).abs() < 1e-12);
     }
 }

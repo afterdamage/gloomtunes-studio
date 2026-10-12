@@ -190,9 +190,12 @@ impl GloomApp {
         list.sort_by_key(|n| (n.start, n.key));
         let song = if self.transport.song_mode {
             let lib = &self.library;
-            SongSnapshot::compile_song(&self.project, |src| {
-                lib.get(src).map(|l| std::sync::Arc::clone(&l.data))
-            })
+            let cache = &self.stretch;
+            SongSnapshot::compile_song_with(
+                &self.project,
+                |src| lib.get(src).map(|l| std::sync::Arc::clone(&l.data)),
+                |key| cache.get(key),
+            )
         } else {
             SongSnapshot::compile(&self.project)
         };
