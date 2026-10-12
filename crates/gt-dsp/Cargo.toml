@@ -14,9 +14,9 @@ workspace = true
 
 [dependencies]
 signalsmith-stretch.workspace = true
+rustfft.workspace = true
 
 [dev-dependencies]
-rustfft.workspace = true
 criterion.workspace = true
 insta.workspace = true
 
@@ -34,4 +34,8 @@ harness = false
 
 [[bench]]
 name = "stretch"
+harness = false
+
+[[bench]]
+name = "onsets"
 harness = false

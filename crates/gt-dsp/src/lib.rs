@@ -15,6 +15,7 @@ mod gain;
 mod ladder;
 pub mod latency;
 mod lfo;
+pub mod onsets;
 mod osc;
 mod ramp;
 mod sampler;

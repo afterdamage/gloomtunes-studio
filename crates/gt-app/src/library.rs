@@ -20,6 +20,9 @@ pub struct Loaded {
     pub data: Arc<SampleData>,
     pub overview: Vec<(f32, f32)>,
     pub peaks: Peaks,
+    /// Transients in seconds and the detected tempo (Prompt 15, D108).
+    pub onsets: Vec<f64>,
+    pub tempo: Option<f64>,
 }
 
 type LoadResult = (SampleSource, Result<Loaded, String>);
@@ -76,10 +79,15 @@ impl Library {
             .spawn({
                 let src = src.clone();
                 move || {
-                    let result = load(&src, rate).map(|data| Loaded {
-                        overview: data.overview(OVERVIEW_COLUMNS),
-                        peaks: Peaks::build(&data),
-                        data: Arc::new(data),
+                    let result = load(&src, rate).map(|data| {
+                        let (onsets, tempo) = analyse(&data);
+                        Loaded {
+                            overview: data.overview(OVERVIEW_COLUMNS),
+                            peaks: Peaks::build(&data),
+                            onsets,
+                            tempo,
+                            data: Arc::new(data),
+                        }
                     });
                     let _ = tx.send((src, result));
                 }
@@ -122,6 +130,36 @@ impl AudioLookup for Library {
     fn peaks(&self, src: &SampleSource) -> Option<(&Peaks, u32)> {
         self.cache.get(src).map(|l| (&l.peaks, l.data.sample_rate))
     }
+
+    fn onsets(&self, src: &SampleSource) -> &[f64] {
+        self.cache.get(src).map_or(&[], |l| &l.onsets)
+    }
+
+    fn tempo(&self, src: &SampleSource) -> Option<f64> {
+        self.cache.get(src).and_then(|l| l.tempo)
+    }
+}
+
+/// Longest audio analysed for transients and tempo (longer recordings get neither).
+const ANALYSE_MAX_S: f64 = 600.0;
+
+/// Transients (seconds) and tempo of a sound, on its mono mix.
+fn analyse(data: &SampleData) -> (Vec<f64>, Option<f64>) {
+    if data.seconds() > ANALYSE_MAX_S {
+        return (Vec::new(), None);
+    }
+    let mono: Vec<f32> = data
+        .left()
+        .iter()
+        .zip(data.right())
+        .map(|(l, r)| 0.5 * (l + r))
+        .collect();
+    let rate = data.sample_rate.max(1);
+    let onsets = gt_dsp::onsets::detect(&mono, rate, 0.5)
+        .into_iter()
+        .map(|f| f as f64 / f64::from(rate))
+        .collect();
+    (onsets, gt_dsp::onsets::tempo(&mono, rate))
 }
 
 /// Loads a sound the same way the export does, so playback and export use identical data.

@@ -224,7 +224,7 @@ fn process_does_not_allocate() {
                             },
                             ratio: 1.3,
                             semitones: -2.0,
-                            bpm: 0.0,
+                            ..gt_core::ClipStretch::default()
                         },
                         ..gt_core::AudioEdit::default()
                     },

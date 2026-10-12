@@ -497,6 +497,13 @@ sound identical; the golden export test stays.
   the render's samples, and after a locate it restarts the stream there. CPU: the same 1.6 %
   of a core per live clip, only until its render arrives. Limit: a reversed clip plays
   resampled until its render is ready.
+- Part 3 delivered (2026-10-12), in review (D108): transient detection (spectral flux with an
+  adaptive threshold) and tempo detection on every loaded sound; in the clip popup *Detect*
+  sets the original BPM, *×2*/*÷2* fix an octave, *At transients* adds warp markers, and the
+  markers drag onto the grid in the playlist (right-click removes one). CPU: about 25 ms per
+  10 s of audio for each analysis, on the loader thread. Limits: tempo detection can be an
+  octave off far from 120 BPM; markers only apply in tempo follow; no slicing to the channel
+  rack yet.
 
 ---
 

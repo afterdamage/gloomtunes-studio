@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use gt_core::{
     AudioEdit, ClipKind, ClipStretch, Project, SampleData, SampleSource, StretchMode, TempoMap,
-    TempoPoint, Tick,
+    TempoPoint, Tick, WarpMarker,
 };
 use gt_engine::{create, EngineCommand, EngineConfig, SongSnapshot};
 use gt_export::{render, BitDepth, ExportSettings, Progress, Range};
@@ -163,10 +163,10 @@ fn the_export_matches_playback() {
             mode: StretchMode::Manual,
             ratio: 1.3,
             semitones: -3.25,
-            bpm: 0.0,
+            ..ClipStretch::default()
         },
     ] {
-        let (p, src) = project(stretch, tempo.clone());
+        let (p, src) = project(stretch.clone(), tempo.clone());
         let sample = loop_100();
         let samples = HashMap::from([(src, Arc::clone(&sample))]);
         let offline = export(&p, &samples);
@@ -187,10 +187,10 @@ fn without_its_render_a_clip_stretches_live_with_the_same_result() {
             mode: StretchMode::Manual,
             ratio: 0.8,
             semitones: 5.0,
-            bpm: 0.0,
+            ..ClipStretch::default()
         },
     ] {
-        let (p, src) = project(stretch, tempo.clone());
+        let (p, src) = project(stretch.clone(), tempo.clone());
         let sample = loop_100();
         let samples = HashMap::from([(src, Arc::clone(&sample))]);
         let offline = export(&p, &samples);
@@ -217,6 +217,56 @@ fn started_inside_the_clip_the_live_stretch_keeps_the_beats() {
         let at = (b * 2 - 5) * SR as usize / 4;
         let off = onset_near(&out, at, 2400);
         assert!(off.abs() < 240, "beat {b} is {off} frames off");
+    }
+}
+
+#[test]
+fn a_warp_marker_pulls_a_late_hit_onto_its_beat() {
+    // Four 100 BPM beats, the third hit played 60 ms late.
+    let beat = SR as usize * 60 / 100;
+    let late = SR as usize * 60 / 1000;
+    let mut v = vec![0.0_f32; 4 * beat];
+    for b in 0..4 {
+        let at = b * beat + if b == 2 { late } else { 0 };
+        for i in 0..64 {
+            v[at + i] = if i % 2 == 0 { 0.8 } else { -0.8 };
+        }
+    }
+    let sample = Arc::new(SampleData::mono(SR, v));
+    let tempo = TempoMap::from_points_lossy(&[TempoPoint {
+        at: Tick(0),
+        bpm: 120.0,
+    }]);
+    let late_s = (2 * beat + late) as f64 / f64::from(SR);
+    for (warped, want_off) in [(false, 0.06 * 100.0 / 120.0), (true, 0.0)] {
+        let mut st = follow(100.0);
+        if warped {
+            // Pin beat 1 and drag the late hit's marker onto beat 2.
+            st.warps = vec![
+                WarpMarker {
+                    source_s: 0.6,
+                    beat: 1.0,
+                },
+                WarpMarker {
+                    source_s: late_s,
+                    beat: 2.0,
+                },
+                WarpMarker {
+                    source_s: 1.8,
+                    beat: 3.0,
+                },
+            ];
+        }
+        let (p, src) = project(st, tempo.clone());
+        let samples = HashMap::from([(src, Arc::clone(&sample))]);
+        let out = export(&p, &samples);
+        // Beat 2 of the project at 120 BPM is at 1.0 s.
+        let off = onset_near(&out, SR as usize, 4800) as f64 / f64::from(SR);
+        assert!(
+            (off - want_off).abs() < 0.004,
+            "warped {warped}: hit {:.1} ms from the beat",
+            off * 1000.0
+        );
     }
 }
 

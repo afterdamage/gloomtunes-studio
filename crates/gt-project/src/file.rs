@@ -36,7 +36,7 @@ use gt_core::{
     Gap, Instrument, LfoRate, LfoShape, LoopMode, Marker, ModSourceKind, Modulator, ModulatorId,
     Note, ParamId, Pattern, PatternId, PluginFormat, PluginInstanceId, PluginKind, PluginParamInfo,
     PluginRef, Project, SampleSource, SamplerSettings, SigChange, StretchMode, TempoMap,
-    TempoPoint, Tick, TimeSig, TimeSigMap, Track, TrackId, FX_SLOTS, SENDS,
+    TempoPoint, Tick, TimeSig, TimeSigMap, Track, TrackId, WarpMarker, FX_SLOTS, SENDS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -654,7 +654,7 @@ enum ClipContentDto {
         reverse: bool,
         /// Speed and pitch (schema 4, optional).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        stretch: Option<StretchDto>,
+        stretch: Option<Box<StretchDto>>,
     },
     Automation {
         target: String,
@@ -671,18 +671,22 @@ struct StretchDto {
     semitones: f32,
     #[serde(default)]
     bpm: f64,
+    /// Warp markers as (source seconds, beat).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    warps: Vec<(f64, f64)>,
 }
 
 fn one() -> f64 {
     1.0
 }
 
-fn stretch_dto(s: ClipStretch) -> Option<StretchDto> {
-    (s != ClipStretch::default()).then(|| StretchDto {
+fn stretch_dto(s: &ClipStretch) -> Option<StretchDto> {
+    (*s != ClipStretch::default()).then(|| StretchDto {
         mode: s.mode.key().to_owned(),
         ratio: s.ratio,
         semitones: s.semitones,
         bpm: s.bpm,
+        warps: s.warps.iter().map(|w| (w.source_s, w.beat)).collect(),
     })
 }
 
@@ -932,7 +936,7 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                         fade_in: fade_dto(edit.fade_in),
                         fade_out: fade_dto(edit.fade_out),
                         reverse: edit.reverse,
-                        stretch: stretch_dto(edit.stretch),
+                        stretch: stretch_dto(&edit.stretch).map(Box::new),
                     },
                     ClipKind::Automation(a) => ClipContentDto::Automation {
                         target: a.target.key(),
@@ -1316,6 +1320,11 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                         ratio: s.ratio,
                         semitones: s.semitones,
                         bpm: s.bpm,
+                        warps: s
+                            .warps
+                            .iter()
+                            .map(|&(source_s, beat)| WarpMarker { source_s, beat })
+                            .collect(),
                     }),
                 };
                 let to_gaps = |g: Vec<(f64, f64)>| {
@@ -1787,6 +1796,16 @@ mod tests {
                 ratio: 1.0,
                 semitones: -2.5,
                 bpm: 92.5,
+                warps: vec![
+                    WarpMarker {
+                        source_s: 0.25,
+                        beat: 0.5,
+                    },
+                    WarpMarker {
+                        source_s: 1.5,
+                        beat: 2.0,
+                    },
+                ],
             },
         };
         p.playlist.add_clip(
@@ -1802,7 +1821,7 @@ mod tests {
                     gaps: Vec::new(),
                     length: 4800,
                 }],
-                edit,
+                edit: edit.clone(),
             },
         );
         let path = dir.join("song/song.gloom");

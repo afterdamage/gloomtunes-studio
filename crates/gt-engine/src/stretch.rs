@@ -148,6 +148,10 @@ pub fn key(project: &Project, clip: &Clip, sample: &SampleData) -> Option<u64> {
         }
         StretchMode::TempoFollow => {
             st.bpm.to_bits().hash(&mut h);
+            for w in &st.warps {
+                w.source_s.to_bits().hash(&mut h);
+                w.beat.to_bits().hash(&mut h);
+            }
             // The render depends on where the origin is and on the tempo map.
             (clip.start - clip.offset).hash(&mut h);
             for p in project.tempo.points() {
@@ -183,13 +187,13 @@ pub fn job(project: &Project, clip: &Clip, sample: &SampleData) -> Option<Stretc
             )
         }
         StretchMode::TempoFollow => {
-            // Source beat b belongs at tick origin + b·PPQ.
-            let beats = src_frames / rate * st.bpm / 60.0;
+            // Source beat b (through the warp markers) belongs at tick origin + b·PPQ.
+            let beats = st.beat_at(src_frames / rate);
             let end_s = tempo.tick_to_seconds(origin_tick + beats * PPQ as f64);
             let frames = ((end_s - origin_s) * rate).ceil().max(1.0) as usize;
             let map = TimeMap::from_fn(frames, |o| {
                 let tick = tempo.seconds_to_tick(origin_s + o / rate);
-                (tick - origin_tick) / PPQ as f64 * 60.0 / st.bpm * rate
+                st.source_at((tick - origin_tick) / PPQ as f64) * rate
             });
             (map, frames, 0.0)
         }
