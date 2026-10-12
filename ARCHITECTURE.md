@@ -1179,7 +1179,7 @@ mode the engine writes every lane's frames, interleaved, for each played segment
 | `Start { take, tick }` | A take starts at `tick`, the first whole tick at or after the playhead; the writer skips the compensation plus the frames before that tick |
 | `Gap { at, frames, fill: true }` | The samples ring was full: the writer writes `frames` of silence at file frame `at` |
 | `Gap { at, frames, fill: false }` | The input ran dry: the silence is already in the samples (`frames > 0`), or the input was realigned (`frames == 0`) |
-| `End { frames }` | The take ends after `frames` file frames (stop, pause, a locate or a loop wrap) |
+| `End { frames }` | The take ends after `frames` file frames (stop, pause, or `D` frames after a locate, a loop wrap or the punch-out, D102) |
 
 The writer thread snapshots the samples available, then reads marks, then copies samples, so
 a mark is never applied before the samples it refers to. It writes one WAV per lane (32-bit
@@ -1326,6 +1326,7 @@ polled), and float determinism across compilers.
 | D99 | Latency compensation = output + input latency reported by the device callbacks + the input ring's fill + one quantum + a manual offset. A loopback measurement (eight bursts, cross-correlation, median) sets the offset to measured minus reported. Takes start on the first whole tick at or after the playhead | Reported latencies are often wrong by a few ms (converters, driver buffers); a measurement fixes that once per setup. Whole-tick starts keep clips on the grid without moving audio by more than a tick | A per-device offset table |
 | D100 | Schema 3: track and strip `input`, audio-clip `gaps`; the migration from 2 does nothing. Recordings go to `recordings/` next to the project file, or `recordings/` in the data folder for an unsaved project, named `<track> take N.wav` (never overwriting). A new take mutes the earlier clips of the same recording session it overlaps | Old projects open unchanged; recordings are ordinary file samples, so embedding, relinking and missing-file handling already work | Moving unsaved recordings next to the project on the first save (Prompt 13 part 2) |
 | D101 | macOS asks for microphone access: `NSMicrophoneUsageDescription` in Info.plist and the `audio-input` entitlement for the hardened runtime | Without them macOS silently delivers silence to a signed app | — |
+| D102 | Loop and punch recording (Prompt 13 part 2). A take ending by a jump or a punch-out keeps receiving input for `D` more frames (its tail) and the next take skips the same frames, so passes meet sample-exactly. Punch records only between the loop markers (`RecordSink.punch`). A pass that starts where a clip of the session starts stacks onto it: the clip plays the newest take and keeps the others as `takes` (schema 3, optional), any of which can be picked from the clip's name strip (right-click) as one undo step. Saving copies recordings from the data folder (or the previous project folder) next to the project and relinks them; the originals stay so older undo steps still find them | Takes behave like FL's loop recording without a second clip type; tails avoid the D-frame hole that ending at the wrap would leave | Comping (parts of several takes in one clip) |
 
 ---
 

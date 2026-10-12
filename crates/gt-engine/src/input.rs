@@ -10,8 +10,8 @@
 //!
 //! Recording ([`RecordSink`]) copies the inputs of the armed tracks into a second ring that a
 //! disk-writer thread empties, never touching a file here. A take starts at the first whole
-//! tick at or after the playhead and ends when playback stops or jumps (a locate or a loop
-//! wrap). Latency compensation is a number of frames `D`: the input read with engine frame
+//! tick at or after the playhead (or at the punch-in point) and ends when playback stops,
+//! jumps (a locate or a loop wrap) or reaches the punch-out point; each loop pass is a take. Latency compensation is a number of frames `D`: the input read with engine frame
 //! `F` is what the player did while hearing engine frame `F - D`, so the take's first written
 //! frame is the one read `D` frames after its start tick sounded. Gaps (input that did not
 //! arrive, or a full disk ring) are reported to the writer as [`RecMark::Gap`] with the take
@@ -101,6 +101,8 @@ pub struct RecordSink {
     pub lanes: Vec<AudioInput>,
     /// Latency compensation `D` in frames (see the module docs).
     pub compensation: u32,
+    /// Punch in and out: record only between these ticks (the loop markers).
+    pub punch: Option<(i64, i64)>,
 }
 
 impl RecordSink {
@@ -128,6 +130,16 @@ struct Take {
     frames: u64,
     /// Song time where the next quantum's playback should continue; anything else is a jump.
     expect_s: f64,
+    /// Frames still to write before the take ends (after a jump or a punch-out).
+    tail: Option<u64>,
+}
+
+/// A take that starts once the current one's tail is written.
+#[derive(Debug, Clone, Copy)]
+struct Next {
+    tick: i64,
+    /// Frames to skip, counted from now.
+    skip: u64,
 }
 
 /// What reading the input did this quantum.
@@ -152,6 +164,9 @@ pub(crate) struct InputEngine {
     routes: Option<Box<InputRoutes>>,
     sink: Option<Box<RecordSink>>,
     take: Option<Take>,
+    next: Option<Next>,
+    /// The quantum's input gap was already reported.
+    gap_reported: bool,
     takes: u32,
     /// An end mark that did not fit into the mark ring yet.
     end_pending: Option<u64>,
@@ -171,6 +186,8 @@ impl InputEngine {
             routes: None,
             sink: None,
             take: None,
+            next: None,
+            gap_reported: false,
             takes: 0,
             end_pending: None,
             calib: None,
@@ -191,6 +208,7 @@ impl InputEngine {
     /// Installs or removes the recorder. A take in progress ends first.
     pub(crate) fn set_sink(&mut self, sink: Option<Box<RecordSink>>) -> Option<Box<RecordSink>> {
         self.end_take();
+        self.next = None;
         self.flush_end();
         self.takes = 0;
         std::mem::replace(&mut self.sink, sink)
@@ -283,7 +301,7 @@ impl InputEngine {
         if self.live_channels == 0 {
             return;
         }
-        let recording = self.take.is_some();
+        let recording = self.sink.is_some();
         for r in &routes.routes {
             let on = match r.armed {
                 None => true,
@@ -309,8 +327,14 @@ impl InputEngine {
         }
     }
 
-    /// Records this quantum: starts a take on the first quantum of playback, writes the
-    /// frames that belong to it, and ends it when playback stopped or jumped.
+    /// Records this quantum: starts a take on the first quantum of playback (or where the
+    /// punch region begins), writes the frames that belong to it, and ends it when playback
+    /// stops, jumps or leaves the punch region.
+    ///
+    /// A take that ends by a jump or a punch-out keeps receiving input for `D` more frames (its
+    /// tail): that input is what the player did while hearing the take's last `D` frames. The
+    /// next take starts once the tail is written, skipping the same frames, so loop passes
+    /// meet without a hole or an overlap.
     pub(crate) fn record(
         &mut self,
         playing: bool,
@@ -321,81 +345,151 @@ impl InputEngine {
     ) {
         use std::sync::atomic::Ordering::Relaxed;
         self.flush_end();
-        if self.sink.is_none() {
+        let Some(sink) = self.sink.as_deref() else {
             return;
-        }
+        };
+        let (comp, punch) = (u64::from(sink.compensation), sink.punch);
         if !playing || segments.is_empty() {
             self.end_take();
+            self.next = None;
             telemetry.recording.store(false, Relaxed);
             return;
         }
-        let status = self.status;
+        self.gap_reported = false;
         for seg in segments {
-            let jumped = self
-                .take
-                .is_some_and(|t| (seg.seconds - t.expect_s).abs() * sample_rate > 0.5);
+            let jumped = self.take.is_some_and(|t| {
+                t.tail.is_none() && (seg.seconds - t.expect_s).abs() * sample_rate > 0.5
+            });
             if jumped {
-                self.end_take();
+                self.begin_tail(comp);
             }
-            if self.take.is_none() && !self.start_take(seg, transport, sample_rate) {
-                continue;
-            }
-            let Some(mut take) = self.take else { continue };
-            let mut from = seg.offset as usize;
-            let to = (seg.offset + seg.frames) as usize;
-            take.expect_s = seg.seconds + f64::from(seg.frames) / sample_rate;
-            let skip = take.skip.min((to - from) as u64) as usize;
-            take.skip -= skip as u64;
-            from += skip;
-            if from < to {
-                let frames = (to - from) as u32;
-                if status.missing > 0 || status.dropped > 0 {
-                    // Missing input was read as silence; dropped input leaves no hole, only a
-                    // jump (0 frames).
-                    self.mark(RecMark::Gap {
-                        at: take.frames,
-                        frames: status.missing.min(frames),
-                        fill: false,
-                    });
+            let seg_end_s = seg.seconds + f64::from(seg.frames) / sample_rate;
+            let frame_of = |tick: f64| {
+                let s = transport.seconds_at_tick(tick);
+                (((s - seg.seconds) * sample_rate) - 1e-6).ceil().max(0.0) as u64
+            };
+            // Punch-out frame within this segment (if the region ends inside it).
+            let out_at = punch
+                .map(|(_, end)| end as f64)
+                .filter(|&end| {
+                    let s = transport.seconds_at_tick(end);
+                    s >= seg.seconds && s <= seg_end_s
+                })
+                .map(frame_of);
+            let len = u64::from(seg.frames);
+            let mut pos = 0_u64;
+            while pos < len {
+                let recording = self.take.is_some_and(|t| t.tail.is_none());
+                if self.take.is_none() || (!recording && self.next.is_none()) {
+                    // Find where a new take starts in this segment, if anywhere.
+                    let at_s = seg.seconds + pos as f64 / sample_rate;
+                    let mut tick = (transport.tick_at_seconds(at_s) - 1e-6).ceil();
+                    if let Some((start, _)) = punch {
+                        tick = tick.max(start as f64);
+                    }
+                    let first = frame_of(tick).max(pos);
+                    let inside = punch.is_none_or(|(_, end)| tick < end as f64);
+                    if inside && first < len {
+                        let skip = first - pos + comp;
+                        if self.take.is_some() {
+                            // The previous take's tail is still being written.
+                            self.next = Some(Next {
+                                tick: tick as i64,
+                                skip,
+                            });
+                        } else {
+                            self.start_take(tick as i64, skip, at_s);
+                        }
+                    }
                 }
-                if !self.write(from, to) {
-                    self.mark(RecMark::Gap {
-                        at: take.frames,
-                        frames,
-                        fill: true,
-                    });
-                    telemetry.record_gaps.fetch_add(1, Relaxed);
+                let Some(mut take) = self.take else {
+                    break;
+                };
+                let mut n = len - pos;
+                if let Some(t) = take.tail {
+                    n = n.min(t);
                 }
-                take.frames += u64::from(frames);
+                if let Some(o) = out_at.filter(|&o| take.tail.is_none() && o > pos) {
+                    n = n.min(o - pos);
+                }
+                let skip = take.skip.min(n);
+                take.skip -= skip;
+                let written = n - skip;
+                if written > 0 {
+                    let from = (u64::from(seg.offset) + pos + skip) as usize;
+                    let frames = written as u32;
+                    let status = self.status;
+                    if !self.gap_reported && (status.missing > 0 || status.dropped > 0) {
+                        // Missing input was read as silence; dropped input leaves no hole,
+                        // only a jump (0 frames).
+                        self.gap_reported = true;
+                        self.mark(RecMark::Gap {
+                            at: take.frames,
+                            frames: status.missing.min(frames),
+                            fill: false,
+                        });
+                    }
+                    if !self.write(from, from + frames as usize) {
+                        self.mark(RecMark::Gap {
+                            at: take.frames,
+                            frames,
+                            fill: true,
+                        });
+                        telemetry.record_gaps.fetch_add(1, Relaxed);
+                    }
+                    take.frames += written;
+                }
+                take.expect_s = seg.seconds + (pos + n) as f64 / sample_rate;
+                if let Some(next) = self.next.as_mut() {
+                    next.skip = next.skip.saturating_sub(n);
+                }
+                pos += n;
+                take.tail = take.tail.map(|t| t - n);
+                self.take = Some(take);
+                if take.tail == Some(0) {
+                    self.end_take();
+                    if let Some(next) = self.next.take() {
+                        let at_s = seg.seconds + pos as f64 / sample_rate;
+                        self.start_take(next.tick, next.skip, at_s);
+                    }
+                } else if take.tail.is_none() && out_at == Some(pos) {
+                    self.begin_tail(comp);
+                }
             }
-            self.take = Some(take);
         }
         let frames = self.take.map_or(0, |t| t.frames);
         telemetry.record_frames.store(frames, Relaxed);
         telemetry.recording.store(self.take.is_some(), Relaxed);
     }
 
-    /// Starts a take at the first whole tick at or after `seg`'s start. False if the marks
-    /// ring is full (tried again next quantum).
-    fn start_take(&mut self, seg: &PlaySegment, transport: &Transport, sr: f64) -> bool {
+    /// Ends the current take after `comp` more frames (at once when `comp` is 0).
+    fn begin_tail(&mut self, comp: u64) {
+        match self.take.as_mut() {
+            Some(t) if comp > 0 && t.tail.is_none() => t.tail = Some(comp),
+            Some(t) if t.tail.is_some() => {}
+            _ => self.end_take(),
+        }
+    }
+
+    /// Starts take `tick`, skipping `skip` frames first. False if the marks ring is full
+    /// (tried again next quantum).
+    fn start_take(&mut self, tick: i64, skip: u64, at_s: f64) -> bool {
         let Some(sink) = self.sink.as_deref_mut() else {
             return false;
         };
         if self.end_pending.is_some() || sink.marks.slots() < 2 {
             return false;
         }
-        let tick = (transport.tick_at_seconds(seg.seconds) - 1e-6).ceil();
-        let start_s = transport.seconds_at_tick(tick);
-        let lead = ((start_s - seg.seconds) * sr - 1e-6).ceil().max(0.0) as u64;
         let _ = sink.marks.push(RecMark::Start {
             take: self.takes,
-            tick: tick as i64,
+            tick,
         });
         self.takes += 1;
         self.take = Some(Take {
-            skip: lead + u64::from(sink.compensation),
+            skip,
             frames: 0,
-            expect_s: seg.seconds,
+            expect_s: at_s,
+            tail: None,
         });
         true
     }

@@ -37,6 +37,8 @@ pub struct TransportModel {
     pub loop_start: Tick,
     /// First tick after the loop.
     pub loop_end: Tick,
+    /// Audio recording punches in and out at the loop markers.
+    pub punch: bool,
     /// Metronome on/off.
     pub metronome: bool,
     /// False when no audio stream is open (controls still edit settings).
@@ -62,6 +64,7 @@ impl Default for TransportModel {
             loop_enabled: false,
             loop_start: Tick(0),
             loop_end: Tick(4 * 3840),
+            punch: false,
             // Off by default now that the rack plays a beat; one click turns it on.
             metronome: false,
             audio_online: false,
@@ -222,6 +225,16 @@ pub fn transport_bar(
             m.loop_start = Tick(sigs.bar_start(start_bar - 1));
             m.loop_end = Tick(sigs.bar_start(start_bar - 1 + bars));
             actions.push(TransportAction::LoopChanged);
+        }
+        if ui
+            .add(egui::Button::selectable(m.punch, "Punch"))
+            .on_hover_text(
+                "Audio recording starts at the loop's start and stops at its end; with Loop on, \
+                 each pass is a new take",
+            )
+            .clicked()
+        {
+            m.punch = !m.punch;
         }
 
         ui.separator();

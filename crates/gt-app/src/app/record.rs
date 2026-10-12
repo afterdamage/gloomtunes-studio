@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use gt_core::{AudioInput, ClipId, ClipKind, SampleSource, TrackId};
+use gt_core::{AudioInput, AudioTake, ClipId, ClipKind, SampleSource, TrackId};
 use gt_engine::{CalibrationSink, EngineCommand, InputRoute, InputRoutes};
 use gt_ui::views::{input_panel, InputAction, InputPanelModel};
 
@@ -20,7 +20,7 @@ pub(super) struct AudioRec {
     tracks: Vec<TrackId>,
     /// Start tick of the take being recorded (from the writer's start report).
     take_start: Option<i64>,
-    /// Clips this session made (a later pass over the same place mutes the earlier one).
+    /// Clips this session made (later passes over the same place stack onto them).
     made: Vec<ClipId>,
 }
 
@@ -145,7 +145,10 @@ impl GloomApp {
         let rate = engine.config().sample_rate;
         let dir = recording::folder(self.doc_path.as_deref(), &data_folder());
         let tracks = lanes.iter().map(|l| l.track).collect();
-        match recording::start(&dir, lanes, rate, self.audio.compensation()) {
+        let t = &self.transport;
+        let punch =
+            (t.punch && t.loop_end > t.loop_start).then_some((t.loop_start.0, t.loop_end.0));
+        match recording::start(&dir, lanes, rate, self.audio.compensation(), punch) {
             Ok((sink, session)) => {
                 if !self.try_send(EngineCommand::SetRecorder(Some(Box::new(sink)))) {
                     return false;
@@ -199,8 +202,10 @@ impl GloomApp {
         }
     }
 
-    /// Places a finished take: one audio clip per track at the recorded tick, as long as the
-    /// audio. An earlier clip of this session at the same place (a loop pass) is muted.
+    /// Places a finished take, one per track. A take that starts where a clip of this session
+    /// starts (the next loop pass) stacks onto that clip and plays instead; the earlier passes
+    /// stay as its other takes. Otherwise it becomes a new clip, and earlier clips of this
+    /// session under it are cut where it starts (or muted when they start at the same place).
     fn add_take(&mut self, take: recording::TakeDone) {
         let rate = f64::from(self.rate());
         let tempo = &self.project.tempo;
@@ -209,36 +214,66 @@ impl GloomApp {
             .seconds_to_tick(start_s + take.frames as f64 / rate)
             .ceil() as i64;
         let length = (end - take.tick).max(1);
+        let made_before = self
+            .record
+            .rec
+            .as_ref()
+            .map(|r| r.made.clone())
+            .unwrap_or_default();
         let mut made = Vec::new();
+        let mut stacked = 0;
         for (track, path) in take.files {
             let source = SampleSource::File(path);
-            let id = self.project.playlist.add_clip(
-                track,
-                take.tick,
-                length,
-                ClipKind::Audio {
-                    source: source.clone(),
-                    gain: 1.0,
-                    gaps: take.gaps.clone(),
-                },
-            );
-            made.push((track, id));
             self.library.request(&source, self.rate());
-        }
-        if let Some(rec) = self.record.rec.as_mut() {
-            rec.take_start = None;
             let pl = &mut self.project.playlist;
-            for &(track, id) in &made {
-                let (s, e) = (take.tick, take.tick + length);
-                for old in &rec.made {
-                    if let Some(c) = pl.clip_mut(*old) {
-                        if c.track == track && c.start < e && s < c.end() {
+            let pass = made_before.iter().copied().find(|&id| {
+                pl.clip(id)
+                    .is_some_and(|c| c.track == track && c.start == take.tick)
+            });
+            if let Some(clip) = pass.and_then(|id| pl.clip_mut(id)) {
+                clip.stack_take(AudioTake {
+                    source,
+                    gaps: take.gaps.clone(),
+                    length,
+                });
+                clip.muted = false;
+                stacked += 1;
+                continue;
+            }
+            let (s, e) = (take.tick, take.tick + length);
+            for &old in &made_before {
+                if let Some(c) = pl.clip_mut(old) {
+                    if c.track == track && c.start < e && s < c.end() {
+                        if c.start < s {
+                            c.length = s - c.start;
+                        } else {
                             c.muted = true;
                         }
                     }
                 }
-                rec.made.push(id);
             }
+            let id = pl.add_clip(
+                track,
+                take.tick,
+                length,
+                ClipKind::Audio {
+                    source,
+                    gain: 1.0,
+                    gaps: take.gaps.clone(),
+                    takes: Vec::new(),
+                },
+            );
+            made.push(id);
+        }
+        if let Some(rec) = self.record.rec.as_mut() {
+            rec.take_start = None;
+            rec.made.extend(made);
+        }
+        if stacked > 0 {
+            self.toast(format!(
+                "Take {} recorded; right-click the clip to pick another take",
+                take.take + 1
+            ));
         }
         if !take.gaps.is_empty() {
             self.toast(format!(
@@ -367,6 +402,26 @@ impl GloomApp {
         }
         if let Some(a) = input_panel(ui, theme, &model) {
             self.on_input(a);
+        }
+    }
+
+    /// Before saving to `path`: copies recordings made while the project had no file (or
+    /// another one) next to it, so the project folder holds everything it plays.
+    pub(super) fn adopt_recordings(&mut self, path: &std::path::Path) {
+        if self.record.rec.is_some() {
+            return;
+        }
+        let from = recording::folder(self.doc_path.as_deref(), &data_folder());
+        let to = recording::folder(Some(path), &data_folder());
+        match recording::adopt(&mut self.project, &from, &to) {
+            Ok(0) => {}
+            Ok(_) => {
+                self.request_clip_audio();
+                self.push_song();
+            }
+            Err(e) => self.toast(format!(
+                "Could not copy the recordings next to the project: {e}"
+            )),
         }
     }
 

@@ -233,6 +233,9 @@ pub enum ClipKind {
         gain: f32,
         /// Where a recording lost input (empty for imported audio).
         gaps: Vec<Gap>,
+        /// The other takes recorded here (loop passes), not playing; empty for ordinary
+        /// audio. [`Clip::use_take`] swaps one in.
+        takes: Vec<AudioTake>,
     },
     /// Automation of one parameter.
     Automation(Automation),
@@ -257,10 +260,75 @@ pub struct Clip {
     pub kind: ClipKind,
 }
 
+/// A take of an audio clip that is not playing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioTake {
+    /// The recording.
+    pub source: SampleSource,
+    /// Its gaps.
+    pub gaps: Vec<Gap>,
+    /// Clip length while it plays, in ticks.
+    pub length: i64,
+}
+
 impl Clip {
     /// Timeline position of the right edge.
     pub fn end(&self) -> i64 {
         self.start + self.length
+    }
+
+    /// Makes `take` the one that plays and keeps the current one as an inactive take, last.
+    /// False (nothing changed) for clips that are not audio.
+    pub fn stack_take(&mut self, take: AudioTake) -> bool {
+        let length = take.length;
+        let ClipKind::Audio {
+            source,
+            gaps,
+            takes,
+            ..
+        } = &mut self.kind
+        else {
+            return false;
+        };
+        let old = AudioTake {
+            source: std::mem::replace(source, take.source),
+            gaps: std::mem::replace(gaps, take.gaps),
+            length: self.length,
+        };
+        takes.push(old);
+        self.length = length.max(1);
+        self.offset = 0;
+        true
+    }
+
+    /// Plays inactive take `i` instead of the current one, which takes its place in the list.
+    /// False if there is no such take.
+    pub fn use_take(&mut self, i: usize) -> bool {
+        let ClipKind::Audio {
+            source,
+            gaps,
+            takes,
+            ..
+        } = &mut self.kind
+        else {
+            return false;
+        };
+        let Some(t) = takes.get_mut(i) else {
+            return false;
+        };
+        std::mem::swap(source, &mut t.source);
+        std::mem::swap(gaps, &mut t.gaps);
+        std::mem::swap(&mut self.length, &mut t.length);
+        self.length = self.length.max(1);
+        true
+    }
+
+    /// Drops the inactive takes; returns how many there were.
+    pub fn clear_takes(&mut self) -> usize {
+        match &mut self.kind {
+            ClipKind::Audio { takes, .. } => std::mem::take(takes).len(),
+            _ => 0,
+        }
     }
 }
 
@@ -525,6 +593,14 @@ impl Playlist {
                     g.len_s = g.len_s.max(0.0);
                 }
                 gaps.sort_by(|a, b| a.at_s.total_cmp(&b.at_s));
+            }
+            if let ClipKind::Audio { takes, .. } = &mut c.kind {
+                for t in takes.iter_mut() {
+                    t.length = t.length.max(1);
+                    t.gaps.retain(|g| {
+                        g.at_s.is_finite() && g.len_s.is_finite() && g.at_s >= 0.0 && g.len_s >= 0.0
+                    });
+                }
             }
         }
         for t in &mut self.tracks {
