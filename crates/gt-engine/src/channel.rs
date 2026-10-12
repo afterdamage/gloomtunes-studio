@@ -285,6 +285,50 @@ impl ChannelSlot {
         self.voices[idx].trigger(key, gain, step, region, self.env, age);
     }
 
+    /// Starts a note that has been under way for `into_s` seconds (playback started or
+    /// jumped into it). The synth starts the note fresh while it is `held`; the sampler starts
+    /// its voice that far into the sample, if the sample is still sounding there.
+    pub(crate) fn chase(&mut self, key: u8, velocity: f32, into_s: f32, held: bool, age: u64) {
+        if self.params.kind == InstrumentKind::Synth {
+            if held {
+                self.synth.note_on(key, velocity, age);
+            }
+            return;
+        }
+        if self.params.kind == InstrumentKind::Plugin {
+            return;
+        }
+        let Some(sample) = &self.sample else {
+            return;
+        };
+        let p = self.effective();
+        // A looped voice stops at its note-off, so it only sounds while held.
+        if p.looped && !held {
+            return;
+        }
+        let frames = sample.frames();
+        let semis = p.pitch + f32::from(key) - f32::from(ROOT_KEY);
+        let step =
+            f64::from((semis / 12.0).exp2()) * f64::from(sample.sample_rate) / f64::from(self.sr);
+        let region = VoiceRegion::from_fractions(frames, p.start, p.end, p.looped);
+        let mut pos = region.start + f64::from(into_s.max(0.0)) * f64::from(self.sr) * step;
+        if pos >= region.end {
+            if !p.looped {
+                return;
+            }
+            let span = (region.end - region.start).max(1.0);
+            pos = region.start + (pos - region.start) % span;
+        }
+        self.note_on(key, velocity, age);
+        if let Some(v) = self
+            .voices
+            .iter_mut()
+            .find(|v| v.is_active() && v.age == age)
+        {
+            v.seek(pos);
+        }
+    }
+
     /// Releases held voices playing `key` (one-shot voices ignore it).
     pub(crate) fn note_off(&mut self, key: u8) {
         self.synth.note_off(key);

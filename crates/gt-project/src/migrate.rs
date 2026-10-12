@@ -15,20 +15,24 @@
 //! - 3 (Prompt 13): audio recording. Tracks and mixer inserts can name a device input
 //!   (`"input": "1-2"`) and audio clips can list the gaps of a recording. Older builds would
 //!   open such a file and silently drop the inputs, so the version is bumped. The upgrade from
-//!   2 changes nothing: version 2 files have no inputs and no recordings.
+//!   2 changes nothing: version 2 files have no inputs and no recordings. (Prompt 13 part 2
+//!   added optional `takes` to audio clips within version 3, before any release.)
+//! - 4 (Prompt 14): audio clips gain `fade_in`, `fade_out` and `reverse`. Older builds would
+//!   play such clips without their fades or forwards, so the version is bumped. The upgrade
+//!   from 3 changes nothing: version 3 clips have no fades and play forwards.
 
 use serde_json::Value;
 
 use crate::file::{FileError, FORMAT};
 
 /// The schema version this build writes.
-pub const CURRENT: u32 = 3;
+pub const CURRENT: u32 = 4;
 
 /// One upgrade: rewrites a tree of version `from` into version `from + 1`.
 pub type Migration = fn(&mut Value) -> Result<(), String>;
 
 /// Upgrades by version: entry `i` turns version `i + 1` into `i + 2`.
-pub const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3];
+pub const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3, v3_to_v4];
 
 /// Version 2 added plugins; a version 1 tree is already a valid version 2 tree.
 fn v1_to_v2(_v: &mut Value) -> Result<(), String> {
@@ -38,6 +42,12 @@ fn v1_to_v2(_v: &mut Value) -> Result<(), String> {
 /// Version 3 added device inputs and recording gaps, all optional; a version 2 tree is
 /// already a valid version 3 tree.
 fn v2_to_v3(_v: &mut Value) -> Result<(), String> {
+    Ok(())
+}
+
+/// Version 4 added clip fades and reverse, all optional; a version 3 tree is already a valid
+/// version 4 tree.
+fn v3_to_v4(_v: &mut Value) -> Result<(), String> {
     Ok(())
 }
 

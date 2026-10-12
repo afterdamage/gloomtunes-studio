@@ -673,6 +673,7 @@ mod tests {
                     gaps: Vec::new(),
                     length: 960,
                 }],
+                edit: gt_core::AudioEdit::default(),
             },
         );
         assert_eq!(adopt(&mut p, &data, &song).unwrap(), 2);

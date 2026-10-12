@@ -261,6 +261,7 @@ impl GloomApp {
                     gain: 1.0,
                     gaps: take.gaps.clone(),
                     takes: Vec::new(),
+                    edit: gt_core::AudioEdit::default(),
                 },
             );
             made.push(id);

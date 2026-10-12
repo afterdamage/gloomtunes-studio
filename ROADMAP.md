@@ -425,7 +425,7 @@ sound identical; the golden export test stays.
     needs song mode (pressing Record with armed tracks switches to it). Takes start on the
     first whole tick at or after the playhead. Part 2 lifted part 1's limits on loop passes
     and unsaved projects.
-- Part 2 delivered (2026-10-12), in review (D102):
+- Part 2 delivered and merged (2026-10-12, D102):
   - **Loop recording**: each pass is a take; passes stack into one clip that plays the
     newest, and right-clicking the clip's name strip picks another take or keeps only one.
     Every pass is complete to the sample (no hole at the loop point).
@@ -434,6 +434,29 @@ sound identical; the golden export test stays.
     before the project had a file into its `recordings` folder.
   - Known limits: no comping (one take plays per clip); the first pass of a loop recording
     that starts before the loop is a separate clip, cut where the loop starts.
+
+### Prompt 14: Audio clip editing basics
+- Split into two PRs: part 1 edits clips, part 2 renders (render to audio clip,
+  consolidate, freeze track) through the offline export renderer.
+- Part 1 delivered (2026-10-12), in review (D103, D104):
+  - **Fades**: drag the square handles on an audio clip's top corners; pick the shape
+    (linear, equal power, exponential, S-curve) from the clip popup (right-click the name
+    strip), which also has the clip's gain in dB, **Reverse** and the takes.
+  - **Crossfades**: where two clips on a track overlap, the overlap fades at equal power on
+    its own; a longer fade drawn by hand wins.
+  - **No clicks**: besides the 2 ms fade at cut clip edges, starting or jumping into the middle
+    of a clip fades in over 2 ms.
+  - **Reverse** plays the clip backwards and draws its waveform mirrored; the file is untouched.
+  - **Chase**: starting playback, jumping or wrapping the loop mid-song starts held notes and
+    one-shots that are still sounding at the right offset.
+  - Project schema 4 (fades, reverse); older projects open unchanged and sound identical when
+    played from the start. The golden export changed on purpose: it starts at bar 3, and the
+    snare hit just before it now rings on.
+  - CPU cost: fades, crossfades and reverse add no measurable cost (eight overlapping clips,
+    about 1.3 % of one core either way; `cargo bench -p gt-engine --bench clips`).
+  - Known limits: chase works in song mode only (pattern mode starts patterns from their
+    start anyway); plugin instruments get held notes but not one-shot tails; looped sampler
+    voices are chased only while held.
 
 ---
 

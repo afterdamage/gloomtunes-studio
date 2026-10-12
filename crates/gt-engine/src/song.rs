@@ -10,8 +10,8 @@ use gt_core::synth::{
     ModDest as DocDest, ModSlot as DocModSlot, ModSource as DocSource, SynthParam as P,
 };
 use gt_core::{
-    Adsr, AutoPoint, Channel, ClipKind, Instrument, LoopMode, ParamId, ParamInfo, Pattern, Project,
-    SampleData, SampleSource, SynthPatch, STEP_TICKS,
+    Adsr, AutoPoint, Channel, ClipKind, Fade, FadeCurve, Instrument, LoopMode, ParamId, ParamInfo,
+    Pattern, Project, SampleData, SampleSource, SynthPatch, STEP_TICKS,
 };
 
 use crate::control::ParamDest;
@@ -78,6 +78,33 @@ pub struct AudioPlay {
     pub fade_in: bool,
     /// Fade out at the right edge (the clip ends before the audio does).
     pub fade_out: bool,
+    /// User fade (or crossfade) at the left edge: its end in song seconds and shape.
+    /// `fade_in_end_s <= start_s` means none.
+    pub fade_in_end_s: f64,
+    pub fade_in_curve: FadeCurve,
+    /// User fade (or crossfade) at the right edge: its start in song seconds and shape.
+    /// `fade_out_start_s >= end_s` means none.
+    pub fade_out_start_s: f64,
+    pub fade_out_curve: FadeCurve,
+    /// Play the sample backwards.
+    pub reverse: bool,
+}
+
+impl AudioPlay {
+    /// Gain of the user fades at song time `t` (1 outside them).
+    #[inline]
+    pub fn fade_gain(&self, t: f64) -> f64 {
+        let mut g = 1.0;
+        if t < self.fade_in_end_s {
+            let x = (t - self.start_s) / (self.fade_in_end_s - self.start_s);
+            g *= self.fade_in_curve.gain(x);
+        }
+        if t > self.fade_out_start_s {
+            let x = (t - self.fade_out_start_s) / (self.end_s - self.fade_out_start_s);
+            g *= self.fade_out_curve.gain(1.0 - x);
+        }
+        g
+    }
 }
 
 /// One automated parameter over the whole timeline: absolute (tick, normalized value) points
@@ -113,6 +140,52 @@ pub struct SongSnapshot {
     pub audio: Vec<AudioPlay>,
     /// Automation lanes (song mode).
     pub automation: Vec<AutoLane>,
+    /// Every note as one span, sorted by start (song mode), for chasing.
+    pub notes: Vec<NoteSpan>,
+}
+
+/// A note from its note-on to its note-off.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NoteSpan {
+    /// Tick of the note-on.
+    pub on: i64,
+    /// Tick of the note-off.
+    pub off: i64,
+    /// Channel slot.
+    pub slot: u16,
+    /// MIDI key.
+    pub key: u8,
+    /// Velocity.
+    pub velocity: f32,
+}
+
+/// Pairs sorted note events into spans (each note-off ends the earliest open note of its
+/// slot and key), sorted by start.
+fn note_spans(events: &[SongEvent]) -> Vec<NoteSpan> {
+    let mut open: Vec<(u16, u8, i64, f32)> = Vec::new();
+    let mut out = Vec::new();
+    for e in events {
+        match e.kind {
+            NoteKind::On { velocity } => open.push((e.slot, e.key, e.tick, velocity)),
+            NoteKind::Off => {
+                if let Some(i) = open
+                    .iter()
+                    .position(|&(s, k, _, _)| s == e.slot && k == e.key)
+                {
+                    let (slot, key, on, velocity) = open.remove(i);
+                    out.push(NoteSpan {
+                        on,
+                        off: e.tick,
+                        slot,
+                        key,
+                        velocity,
+                    });
+                }
+            }
+        }
+    }
+    out.sort_by_key(|n| n.on);
+    out
 }
 
 impl SongSnapshot {
@@ -209,9 +282,30 @@ impl SongSnapshot {
                         expand_pattern(project, pat, clip, swing, &mut events);
                     }
                 }
-                ClipKind::Audio { source, gain, .. } => {
+                ClipKind::Audio {
+                    source, gain, edit, ..
+                } => {
                     let Some(sample) = samples(source) else {
                         continue;
+                    };
+                    // Overlaps with the neighbours on this track crossfade (equal power)
+                    // unless the clip's own fade is already longer.
+                    let (xin, xout) = crossfades(pl, clip);
+                    let fade_in = if edit.fade_in.len >= xin {
+                        edit.fade_in
+                    } else {
+                        Fade {
+                            len: xin,
+                            curve: FadeCurve::EqualPower,
+                        }
+                    };
+                    let fade_out = if edit.fade_out.len >= xout {
+                        edit.fade_out
+                    } else {
+                        Fade {
+                            len: xout,
+                            curve: FadeCurve::EqualPower,
+                        }
                     };
                     let route = pl
                         .track(clip.track)
@@ -222,13 +316,18 @@ impl SongSnapshot {
                         sec(clip.end()),
                         sec(clip.start - clip.offset),
                     );
-                    let fade_out = end_s < origin_s + sample.seconds();
+                    let cut_end = end_s < origin_s + sample.seconds();
                     audio.push(AudioPlay {
                         start_s,
                         end_s,
                         origin_s,
                         fade_in: clip.offset > 0,
-                        fade_out,
+                        fade_out: cut_end,
+                        fade_in_end_s: sec(clip.start + fade_in.len),
+                        fade_in_curve: fade_in.curve,
+                        fade_out_start_s: sec(clip.end() - fade_out.len),
+                        fade_out_curve: fade_out.curve,
+                        reverse: edit.reverse,
                         sample,
                         gain: gain.clamp(0.0, 4.0),
                         route: route as u8,
@@ -259,13 +358,23 @@ impl SongSnapshot {
                 })
             })
             .collect();
+        let notes = note_spans(&events);
         Self {
             length: pl.song_end(),
             repeat: false,
             events,
             audio,
             automation,
+            notes,
         }
+    }
+
+    /// Notes (song mode) that started before tick `pos`, at most `window` ticks before it
+    /// (`f64::INFINITY` for all): the candidates for chasing when playback jumps to `pos`.
+    pub fn notes_before(&self, pos: f64, window: f64) -> &[NoteSpan] {
+        let a = self.notes.partition_point(|n| (n.on as f64) < pos - window);
+        let b = self.notes.partition_point(|n| (n.on as f64) < pos);
+        &self.notes[a..b.max(a)]
     }
 
     /// Events with `lo <= tick <= hi`.
@@ -274,6 +383,30 @@ impl SongSnapshot {
         let b = self.events.partition_point(|e| e.tick <= hi);
         &self.events[a..b.max(a)]
     }
+}
+
+/// Ticks of overlap with the previous and the next clip on the same track that plays (an
+/// automatic crossfade at each edge). Only partial overlaps count: a clip lying wholly inside
+/// another is not crossfaded.
+fn crossfades(pl: &gt_core::Playlist, clip: &gt_core::Clip) -> (i64, i64) {
+    let mut xin = 0;
+    let mut xout = 0;
+    for o in &pl.clips {
+        if o.id == clip.id
+            || o.track != clip.track
+            || o.muted
+            || !matches!(o.kind, ClipKind::Audio { .. })
+        {
+            continue;
+        }
+        if o.start < clip.start && o.end() > clip.start && o.end() < clip.end() {
+            xin = xin.max(o.end() - clip.start);
+        }
+        if o.start > clip.start && o.start < clip.end() && o.end() > clip.end() {
+            xout = xout.max(clip.end() - o.start);
+        }
+    }
+    (xin.min(clip.length), xout.min(clip.length))
 }
 
 /// An automation clip on the timeline: start, end, source offset and its points.
@@ -837,6 +970,7 @@ mod tests {
                 gain: 0.5,
                 gaps: Vec::new(),
                 takes: Vec::new(),
+                edit: gt_core::AudioEdit::default(),
             },
         );
         p.playlist.clip_mut(c).unwrap().offset = 960;

@@ -25,6 +25,10 @@ pub const MIN_LOOP_TICKS: i64 = PPQ / 4;
 pub const MAX_EVENTS_PER_QUANTUM: usize = 256;
 /// Upper bound on loop wraps inside one quantum (protects against pathological input).
 pub const MAX_SEGMENTS: usize = 64;
+/// Ended notes this recent are still chased (a one-shot sample may still be sounding).
+pub const CHASE_WINDOW_S: f64 = 30.0;
+/// Notes looked at, newest first, before a chase gives up on older ones.
+const MAX_CHASE_SCAN: usize = 4096;
 
 /// What happens at a scheduled event.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -47,6 +51,21 @@ pub enum EventKind {
         /// Velocity, 0 to 1.
         velocity: f32,
     },
+    /// Playback started, located or wrapped while this song note was already under way: it
+    /// starts now, `into_s` seconds into the note. `held` is false when the note itself has
+    /// ended (only one-shot samples are still sounding then).
+    Chase {
+        /// Channel slot.
+        slot: u16,
+        /// MIDI key.
+        key: u8,
+        /// Velocity, 0 to 1.
+        velocity: f32,
+        /// Seconds since the note's start.
+        into_s: f32,
+        /// The note is still held.
+        held: bool,
+    },
     /// A metronome beat. `downbeat` is the first beat of a bar.
     Beat {
         /// True on beat 1.
@@ -60,7 +79,7 @@ impl EventKind {
         match self {
             Self::Wrap => 0,
             Self::NoteOff { .. } => 1,
-            Self::NoteOn { .. } => 2,
+            Self::NoteOn { .. } | Self::Chase { .. } => 2,
             Self::Beat { .. } => 3,
         }
     }
@@ -68,7 +87,9 @@ impl EventKind {
     /// The channel slot a note event targets.
     pub fn slot(&self) -> Option<u16> {
         match *self {
-            Self::NoteOff { slot, .. } | Self::NoteOn { slot, .. } => Some(slot),
+            Self::NoteOff { slot, .. } | Self::NoteOn { slot, .. } | Self::Chase { slot, .. } => {
+                Some(slot)
+            }
             _ => None,
         }
     }
@@ -185,6 +206,8 @@ pub struct Transport {
     held: f64,
     /// Where the last Play started, for Stop.
     play_start: f64,
+    /// Playback started or jumped: notes under way are chased at the next segment.
+    chase: bool,
 }
 
 impl Transport {
@@ -200,6 +223,7 @@ impl Transport {
             anchor_seconds: 0.0,
             held: 0.0,
             play_start: 0.0,
+            chase: false,
         }
     }
 
@@ -253,6 +277,7 @@ impl Transport {
         let pos = self.held;
         self.state = TransportState::Playing;
         self.anchor(pos, now);
+        self.chase = true;
     }
 
     /// Stops at frame `now`, holding the position.
@@ -281,6 +306,7 @@ impl Transport {
         self.held = pos;
         if self.state == TransportState::Playing {
             self.anchor(pos, now);
+            self.chase = true;
         }
     }
 
@@ -350,9 +376,15 @@ impl Transport {
                 frames: (seg_end - seg_start) as u32,
                 seconds: self.seconds_at_frame(seg_start as f64),
             });
+            if std::mem::take(&mut self.chase) {
+                if let Some(song) = song.filter(|s| !s.repeat) {
+                    self.chase_notes(song, seg_start, q_start, out);
+                }
+            }
             self.collect(seg_start, seg_end, limit, q_start, song, out);
             if wrap {
                 self.anchor(self.looping.start.0 as f64, seg_end);
+                self.chase = true;
                 out.push(ScheduledEvent {
                     offset: (seg_end - q_start) as u32,
                     tick: self.looping.start,
@@ -396,6 +428,42 @@ impl Transport {
         });
         if let Some(song) = song.filter(|s| s.length > 0) {
             self.collect_notes(song, a, b, t_lo, t_hi, limit, q_start, out);
+        }
+    }
+
+    /// Adds a [`EventKind::Chase`] at frame `at` for each song note that started before it and
+    /// is still held, or started at most [`CHASE_WINDOW_S`] earlier (one-shot samples).
+    fn chase_notes(&self, song: &SongSnapshot, at: u64, q_start: u64, out: &mut EventBuf) {
+        let now_s = self.seconds_at_frame(at as f64);
+        let pos = self.tempo.seconds_to_tick(now_s);
+        let window = pos - self.tempo.seconds_to_tick(now_s - CHASE_WINDOW_S);
+        let mut held_scan = 0;
+        // Held notes can start long before the window; scan those first, from the start.
+        for n in song.notes_before(pos, f64::INFINITY).iter().rev() {
+            held_scan += 1;
+            let on_frame = self.frame_of_tick(n.on as f64);
+            if on_frame >= at as i64 {
+                continue;
+            }
+            let held = self.frame_of_tick(n.off as f64) > at as i64;
+            let recent = (n.on as f64) >= pos - window;
+            if !held && !recent {
+                if held_scan > MAX_CHASE_SCAN {
+                    break;
+                }
+                continue;
+            }
+            out.push(ScheduledEvent {
+                offset: (at - q_start) as u32,
+                tick: Tick(n.on),
+                kind: EventKind::Chase {
+                    slot: n.slot,
+                    key: n.key,
+                    velocity: n.velocity,
+                    into_s: (now_s - self.tempo.tick_to_seconds(n.on as f64)) as f32,
+                    held,
+                },
+            });
         }
     }
 
@@ -712,6 +780,99 @@ mod tests {
         }
         assert_eq!(buf.dropped(), 0);
         out
+    }
+
+    #[test]
+    fn notes_under_way_are_chased_when_playback_starts_or_jumps() {
+        use crate::song::{NoteSpan, SongEvent};
+        // 120 BPM: 960 ticks = 0.5 s. A long held note, a short one that already ended, one
+        // that starts exactly where playback starts, and one that ended long ago.
+        let spans = [(0, 3840, 60), (480, 600, 61), (960, 1200, 62)];
+        let mut notes: Vec<NoteSpan> = spans
+            .iter()
+            .map(|&(on, off, key)| NoteSpan {
+                on,
+                off,
+                slot: 0,
+                key,
+                velocity: 0.8,
+            })
+            .collect();
+        notes.insert(
+            0,
+            NoteSpan {
+                on: -200_000,
+                off: -199_000,
+                slot: 0,
+                key: 50,
+                velocity: 0.8,
+            },
+        );
+        let mut events: Vec<SongEvent> = Vec::new();
+        for n in &notes {
+            events.push(SongEvent {
+                tick: n.on,
+                slot: 0,
+                key: n.key,
+                kind: NoteKind::On {
+                    velocity: n.velocity,
+                },
+            });
+            events.push(SongEvent {
+                tick: n.off,
+                slot: 0,
+                key: n.key,
+                kind: NoteKind::Off,
+            });
+        }
+        events.sort_by_key(|e| e.tick);
+        let song = SongSnapshot {
+            length: 3840,
+            repeat: false,
+            events,
+            notes,
+            ..SongSnapshot::default()
+        };
+        let mut t = Transport::new(48_000, Box::new(TempoMap::constant(120.0)));
+        t.locate(Tick(960), 0);
+        t.play(0);
+        let got = run_song(&mut t, &song, 48_000, 0.01, 64);
+        let chased: Vec<(u8, f32, bool)> = got
+            .iter()
+            .filter_map(|e| match e.2 {
+                EventKind::Chase {
+                    key, into_s, held, ..
+                } => {
+                    assert_eq!(e.0, 0, "chased at the first frame");
+                    Some((key, into_s, held))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(chased, vec![(61, 0.25, false), (60, 0.5, true)]);
+        assert!(
+            got.iter()
+                .any(|e| e.0 == 0 && matches!(e.2, EventKind::NoteOn { key: 62, .. })),
+            "a note starting right there plays normally"
+        );
+        // Locating while playing chases again; playing on does not.
+        let mut buf = EventBuf::default();
+        t.schedule(4800, 64, Some(&song), &mut buf);
+        assert!(!buf
+            .as_slice()
+            .iter()
+            .any(|e| matches!(e.kind, EventKind::Chase { .. })));
+        t.locate(Tick(1920), 4864);
+        t.schedule(4864, 64, Some(&song), &mut buf);
+        let keys: Vec<u8> = buf
+            .as_slice()
+            .iter()
+            .filter_map(|e| match e.kind {
+                EventKind::Chase { key, .. } => Some(key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, vec![62, 61, 60], "newest first");
     }
 
     fn demo_song() -> SongSnapshot {
