@@ -157,8 +157,12 @@ pub struct GloomApp {
     midi: crate::midi_io::MidiIo,
     keyboard: crate::live::TypingKeyboard,
     recorder: crate::live::Recorder,
-    /// The take's channel and the pattern length when it started.
-    take: Option<(gt_core::ChannelId, i64)>,
+    /// The take under way.
+    take: Option<midi::Take>,
+    /// Step recording.
+    step: crate::live::StepRecorder,
+    /// Playhead last seen while step recording (a jump moves the cursor).
+    step_seen: Tick,
     /// MIDI and recording settings (shown in the Audio and MIDI window).
     midi_model: MidiPanelModel,
     /// Live channel slot last sent to the engine (outer none: send it).
@@ -303,11 +307,15 @@ impl GloomApp {
             keyboard: crate::live::TypingKeyboard::default(),
             recorder: crate::live::Recorder::default(),
             take: None,
+            step: crate::live::StepRecorder::default(),
+            step_seen: Tick::ZERO,
             midi_model: MidiPanelModel {
                 count_in_bars: settings.midi.count_in_bars,
                 record_click: settings.midi.record_click,
                 extra_ms: settings.midi.extra_ms,
                 octave: settings.midi.octave,
+                mode: gt_ui::views::RecordMode::from_key(&settings.midi.record_mode),
+                passes: gt_ui::views::LoopPasses::from_key(&settings.midi.loop_passes),
                 ..MidiPanelModel::default()
             },
             sent_live_slot: None,
@@ -655,6 +663,20 @@ impl GloomApp {
             }),
             PianoRollAction::AuditionOff { key } => {
                 self.send(EngineCommand::NoteOff { slot, key });
+            }
+            PianoRollAction::ClearControls(kind) => {
+                let Some(id) = self.project.channels.get(self.rack.selected).map(|c| c.id) else {
+                    return;
+                };
+                let pat = self.project.current_pattern_mut();
+                if let Some(v) = pat.controls.get_mut(&id) {
+                    v.retain(|c| kind.is_some_and(|k| c.kind != k));
+                    if v.is_empty() {
+                        pat.controls.remove(&id);
+                    }
+                }
+                self.push_song();
+                self.pending_edit = Some("Clear controller data");
             }
             PianoRollAction::Quantize | PianoRollAction::Humanize => {
                 let Some(id) = self.project.channels.get(self.rack.selected).map(|c| c.id) else {
@@ -1023,6 +1045,7 @@ impl GloomApp {
         // Take the edited list out so the other channels can be borrowed as ghosts.
         let mut notes = pat.notes.remove(&id).unwrap_or_default();
         let ghosts: Vec<&[gt_core::Note]> = pat.notes.values().map(Vec::as_slice).collect();
+        let controls = pat.controls.get(&id).map_or(&[][..], Vec::as_slice);
         let actions = piano_roll(
             ui,
             theme,
@@ -1034,6 +1057,7 @@ impl GloomApp {
                 bar_ticks,
                 playhead,
                 channel_name: &name,
+                controls,
             },
         );
         if !notes.is_empty() {
@@ -1155,6 +1179,8 @@ impl GloomApp {
                 self.end_take();
             }
             TransportAction::ToggleRecord => self.toggle_record(),
+            TransportAction::ToggleStepRecord => self.toggle_step_record(),
+            TransportAction::CaptureTake => self.capture_take(),
             TransportAction::ToggleTypingKeyboard => self.keyboard.on = !self.keyboard.on,
             TransportAction::SetBpm(bpm) => self.set_bpm_at_playhead(bpm),
             TransportAction::SetTimeSig(sig) => self.set_sig_at_playhead(sig),
@@ -1212,6 +1238,7 @@ impl GloomApp {
         self.send(EngineCommand::Locate(Tick(0)));
         self.recorder = crate::live::Recorder::default();
         self.take = None;
+        self.step.on = false;
         self.learning = None;
         self.cancel_roll_gesture();
         self.playlist.cancel();
@@ -2040,7 +2067,7 @@ impl eframe::App for GloomApp {
         let pattern_pos = if playing {
             self.pattern_position()
         } else {
-            None
+            self.step_cursor()
         };
         if self.main_view == MainView::Mixer {
             self.read_meters(dt);

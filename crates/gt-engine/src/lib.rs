@@ -40,8 +40,8 @@ pub use input::{
     CalibrationSink, InputFeed, InputRoute, InputRoutes, RecMark, RecordSink, MAX_RECORD_LANES,
 };
 pub use live::{
-    clock_ns, LiveEvent, LiveInput, LiveKind, LiveNote, LiveRoutes, KEYBOARD, LIVE_CAPACITY,
-    ROUTE_PORTS,
+    clock_ns, control_kind, LiveEvent, LiveInput, LiveKind, LiveNote, LiveRoutes, RetroBuffer,
+    KEYBOARD, LIVE_CAPACITY, RETRO_CAPACITY, ROUTE_PORTS,
 };
 pub use load::LoadMeter;
 pub use mixer::{create_effect, EffectBox, MixerParams, StripParams, MAX_PDC_FRAMES};
@@ -49,8 +49,8 @@ pub use mixer::{freeze_post_fx, Tap};
 pub use plugin::{PluginBox, PluginContext, PluginProcessor, MAX_PLUGINS};
 pub use processor::{AudioProcessor, PREVIEW_GAIN, TEST_TONE_DBFS, TEST_TONE_HZ};
 pub use song::{
-    synth_settings, AudioPlay, AutoLane, ChannelParams, InstrumentKind, NoteKind, NoteSpan,
-    PatchValues, SongEvent, SongSnapshot,
+    synth_settings, AudioPlay, AutoLane, ChannelParams, ControlEvent, InstrumentKind, NoteKind,
+    NoteSpan, PatchValues, SongEvent, SongSnapshot,
 };
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};

@@ -10,8 +10,8 @@ use gt_core::synth::{
     ModDest as DocDest, ModSlot as DocModSlot, ModSource as DocSource, SynthParam as P,
 };
 use gt_core::{
-    Adsr, AutoPoint, Channel, ClipKind, Fade, FadeCurve, Instrument, LoopMode, ParamId, ParamInfo,
-    Pattern, Project, SampleData, SampleSource, SynthPatch, STEP_TICKS,
+    Adsr, AutoPoint, Channel, ClipKind, ControlKind, Fade, FadeCurve, Instrument, LoopMode,
+    ParamId, ParamInfo, Pattern, Project, SampleData, SampleSource, SynthPatch, STEP_TICKS,
 };
 
 use crate::control::ParamDest;
@@ -56,6 +56,22 @@ impl SongEvent {
         (self.tick, k)
     }
 }
+
+/// A recorded controller value for a channel slot from a tick on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ControlEvent {
+    /// Tick, as for [`SongEvent::tick`].
+    pub tick: i64,
+    /// Channel slot.
+    pub slot: u16,
+    /// Which controller.
+    pub kind: ControlKind,
+    /// Its value.
+    pub value: f32,
+}
+
+/// Controller events looked at, at most, when finding the value at a jump.
+const MAX_CONTROL_SCAN: usize = 16_384;
 
 /// An audio clip as the engine plays it. Times are song seconds (from tick 0 through the
 /// tempo map), so the audio keeps its own speed across tempo changes.
@@ -151,6 +167,19 @@ pub struct SongSnapshot {
     pub automation: Vec<AutoLane>,
     /// Every note as one span, sorted by start (song mode), for chasing.
     pub notes: Vec<NoteSpan>,
+    /// Recorded controller data, sorted by tick (ticks as for `events`).
+    pub controls: Vec<ControlEvent>,
+    /// Every slot and controller that `controls` moves, sorted.
+    pub control_slots: Vec<(u16, ControlKind)>,
+}
+
+/// Sorts controller events and lists the slots and controllers they move.
+fn finish_controls(controls: &mut [ControlEvent]) -> Vec<(u16, ControlKind)> {
+    controls.sort_by_key(|c| c.tick);
+    let mut used: Vec<_> = controls.iter().map(|c| (c.slot, c.kind)).collect();
+    used.sort_unstable();
+    used.dedup();
+    used
 }
 
 /// A note from its note-on to its note-off.
@@ -207,7 +236,18 @@ impl SongSnapshot {
         let length = pattern.length_ticks();
         let swing = swing_ticks(project);
         let mut events = Vec::new();
+        let mut controls = Vec::new();
         for (slot, ch) in project.channels.iter().enumerate() {
+            for c in pattern.channel_controls(ch.id) {
+                if (0..length).contains(&c.tick) {
+                    controls.push(ControlEvent {
+                        tick: c.tick,
+                        slot: slot as u16,
+                        kind: c.kind,
+                        value: c.value,
+                    });
+                }
+            }
             for n in pattern.channel_notes(ch.id) {
                 if n.start < 0 || n.start >= length {
                     continue;
@@ -225,10 +265,13 @@ impl SongSnapshot {
             }
         }
         events.sort_by_key(SongEvent::order);
+        let control_slots = finish_controls(&mut controls);
         Self {
             length,
             repeat: true,
             events,
+            controls,
+            control_slots,
             ..Self::default()
         }
     }
@@ -289,6 +332,7 @@ impl SongSnapshot {
         let swing = swing_ticks(project);
         let tempo = &project.tempo;
         let mut events = Vec::new();
+        let mut controls = Vec::new();
         let mut audio: Vec<AudioPlay> = Vec::new();
         let mut lanes: Vec<(ParamId, Vec<Span<'_>>)> = Vec::new();
         // Frozen tracks whose render is loaded play it instead of their pattern and audio clips.
@@ -332,7 +376,7 @@ impl SongSnapshot {
             match &clip.kind {
                 ClipKind::Pattern(id) => {
                     if let Some(pat) = project.pattern(*id) {
-                        expand_pattern(project, pat, clip, swing, &mut events);
+                        expand_pattern(project, pat, clip, swing, &mut events, &mut controls);
                     }
                 }
                 ClipKind::Audio {
@@ -434,6 +478,7 @@ impl SongSnapshot {
             })
             .collect();
         let notes = note_spans(&events);
+        let control_slots = finish_controls(&mut controls);
         Self {
             length: pl.song_end(),
             repeat: false,
@@ -441,6 +486,8 @@ impl SongSnapshot {
             audio,
             automation,
             notes,
+            controls,
+            control_slots,
         }
     }
 
@@ -450,6 +497,30 @@ impl SongSnapshot {
         let a = self.notes.partition_point(|n| (n.on as f64) < pos - window);
         let b = self.notes.partition_point(|n| (n.on as f64) < pos);
         &self.notes[a..b.max(a)]
+    }
+
+    /// Controller events with `lo <= tick <= hi`.
+    pub fn controls_in(&self, lo: i64, hi: i64) -> &[ControlEvent] {
+        let a = self.controls.partition_point(|e| e.tick < lo);
+        let b = self.controls.partition_point(|e| e.tick <= hi);
+        &self.controls[a..b.max(a)]
+    }
+
+    /// The value controller `kind` of `slot` has just before tick `pos` (within the pattern in
+    /// pattern mode), or its resting value when nothing set it earlier.
+    pub fn control_at(&self, slot: u16, kind: ControlKind, pos: i64) -> f32 {
+        let pos = if self.repeat && self.length > 0 {
+            pos.rem_euclid(self.length)
+        } else {
+            pos
+        };
+        let end = self.controls.partition_point(|e| e.tick < pos);
+        self.controls[..end]
+            .iter()
+            .rev()
+            .take(MAX_CONTROL_SCAN)
+            .find(|e| e.slot == slot && e.kind == kind)
+            .map_or(0.0, |e| e.value)
     }
 
     /// Events with `lo <= tick <= hi`.
@@ -525,6 +596,7 @@ fn expand_pattern(
     clip: &gt_core::Clip,
     swing: i64,
     events: &mut Vec<SongEvent>,
+    controls: &mut Vec<ControlEvent>,
 ) {
     let len = pat.length_ticks();
     if len <= 0 {
@@ -534,6 +606,22 @@ fn expand_pattern(
     let first = src_lo.div_euclid(len) - 1; // swing can push a note into the next repetition
     let last = (src_hi - 1).div_euclid(len);
     for (slot, ch) in project.channels.iter().enumerate() {
+        for c in pat.channel_controls(ch.id) {
+            if !(0..len).contains(&c.tick) {
+                continue;
+            }
+            for k in first..=last {
+                let src = k * len + c.tick;
+                if src >= src_lo && src < src_hi {
+                    controls.push(ControlEvent {
+                        tick: clip.start + (src - src_lo),
+                        slot: slot as u16,
+                        kind: c.kind,
+                        value: c.value,
+                    });
+                }
+            }
+        }
         for n in pat.channel_notes(ch.id) {
             if n.start < 0 || n.start >= len {
                 continue;

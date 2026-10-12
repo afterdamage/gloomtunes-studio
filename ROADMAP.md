@@ -520,6 +520,24 @@ sound identical; the golden export test stays.
   - CPU: no measurable change (a few compares per live event).
   - Limits: hardware MIDI cannot be tested in CI (decoding, timing and routing are tested
     with synthetic events); plugins use their own bend range.
+- Part 2 delivered (2026-10-12), in review (D110):
+  - Recording modes in MIDI settings: *Overdub* or *Replace* (clears what the recording
+    channels had where the playhead passes), and loop passes *Merge* or *Stack* (each pass
+    kept as its own "… take N" pattern).
+  - Notes record into the channel they played, so routed controllers record into their own
+    channels in one take.
+  - Pitch bend, sustain, mod wheel and aftertouch record as per-pattern controller data,
+    play back, and are set right when playback starts or jumps; the piano roll draws them in
+    the velocity lane and can clear them.
+  - *Step* (Ctrl+Shift+R): with the transport stopped, each note or chord goes in at the
+    cursor and moves it on by the snap.
+  - *Capture* (Ctrl+Shift+T): the last take of the past 5 minutes (after an 8 s pause)
+    becomes a new pattern, even with Record off; the buffer is lock-free and always on.
+  - CPU: none measurable on the audio thread (controller events are a few per quantum at
+    most); capture costs a copy of up to 2 MiB on the UI thread when used.
+  - Limits: controller data cannot be drawn or edited point by point yet (only cleared), is
+    not written to MIDI files, and polyphonic aftertouch is played but not recorded.
+    Captured takes start at their first note rather than on the beat grid.
 
 ---
 

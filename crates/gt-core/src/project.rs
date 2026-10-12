@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::effects::{EffectKind, EffectSlot};
+use crate::midi::ControlPoint;
 use crate::mixer::{Mixer, StripKind, FIRST_SEND, FX_SLOTS, INSERTS, MASTER};
 use crate::modulation::{ModSourceKind, Modulator, ModulatorId, MAX_MODULATORS};
 use crate::params::ParamId;
@@ -272,6 +273,9 @@ pub struct Pattern {
     pub steps: u16,
     /// Notes per channel, each list sorted by start.
     pub notes: BTreeMap<ChannelId, Vec<Note>>,
+    /// Recorded controller data (bend, sustain, mod wheel, aftertouch) per channel, each list
+    /// sorted by tick.
+    pub controls: BTreeMap<ChannelId, Vec<ControlPoint>>,
 }
 
 impl Pattern {
@@ -292,6 +296,28 @@ impl Pattern {
             .max()
             .unwrap_or(0);
         grid.max((end + BAR - 1).div_euclid(BAR) * BAR)
+    }
+
+    /// The controller data of `channel`, sorted by tick.
+    pub fn channel_controls(&self, channel: ChannelId) -> &[ControlPoint] {
+        self.controls.get(&channel).map_or(&[], Vec::as_slice)
+    }
+
+    /// Removes the notes of `channel` that start in `[lo, hi)` and its controller data in
+    /// that range (recording in replace mode). True when anything went.
+    pub fn clear_range(&mut self, channel: ChannelId, lo: i64, hi: i64) -> bool {
+        let mut gone = false;
+        if let Some(v) = self.notes.get_mut(&channel) {
+            let n = v.len();
+            v.retain(|x| x.start < lo || x.start >= hi);
+            gone |= v.len() != n;
+        }
+        if let Some(v) = self.controls.get_mut(&channel) {
+            let n = v.len();
+            v.retain(|x| x.tick < lo || x.tick >= hi);
+            gone |= v.len() != n;
+        }
+        gone
     }
 
     /// The note that the step sequencer shows at `step` for `channel`, if any.
@@ -747,6 +773,16 @@ impl Project {
                 }
                 v.sort_by_key(|n| n.start);
             }
+            p.controls
+                .retain(|ch, v| channels.contains(ch) && !v.is_empty());
+            for v in p.controls.values_mut() {
+                v.retain(|c| c.value.is_finite());
+                for c in v.iter_mut() {
+                    c.tick = c.tick.max(0);
+                    c.value = c.value.clamp(c.kind.min(), 1.0);
+                }
+                v.sort_by_key(|c| c.tick);
+            }
         }
         if self.patterns.is_empty() {
             let id = self.new_pattern();
@@ -920,6 +956,7 @@ impl Project {
         self.midi_routes.retain(|r| r.target != id);
         for p in &mut self.patterns {
             p.notes.remove(&id);
+            p.controls.remove(&id);
         }
     }
 
@@ -947,6 +984,7 @@ impl Project {
             name,
             steps: 16,
             notes: BTreeMap::new(),
+            controls: BTreeMap::new(),
         });
         id
     }
@@ -1001,7 +1039,8 @@ impl Project {
         &mut self.patterns[i]
     }
 
-    fn unique_pattern_name(&self, base: &str) -> String {
+    /// `base`, or `base 2`, `base 3` … whichever no pattern has yet.
+    pub fn unique_pattern_name(&self, base: &str) -> String {
         let taken = |n: &str| self.patterns.iter().any(|p| p.name == n);
         if base == "Pattern" {
             return (1..)

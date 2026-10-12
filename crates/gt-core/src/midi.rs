@@ -1,4 +1,5 @@
-//! MIDI learn: controller (CC) messages bound to parameters.
+//! MIDI learn (controller messages bound to parameters), input routes and the controller data
+//! patterns record.
 
 use crate::{ParamId, Project};
 
@@ -14,6 +15,64 @@ pub struct MidiBinding {
     pub cc: u8,
     /// The parameter it moves.
     pub param: ParamId,
+}
+
+/// A performance controller a pattern can record and play back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ControlKind {
+    /// Pitch bend, -1 to 1 (times the channel's bend range).
+    Bend,
+    /// Sustain pedal: 0 up, 1 down.
+    Sustain,
+    /// Mod wheel, 0 to 1.
+    ModWheel,
+    /// Channel aftertouch, 0 to 1.
+    Pressure,
+}
+
+impl ControlKind {
+    /// Every kind, in display order.
+    pub const ALL: [Self; 4] = [Self::Bend, Self::Sustain, Self::ModWheel, Self::Pressure];
+
+    /// Display name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bend => "Pitch bend",
+            Self::Sustain => "Sustain",
+            Self::ModWheel => "Mod wheel",
+            Self::Pressure => "Aftertouch",
+        }
+    }
+
+    /// Lowest value.
+    pub fn min(self) -> f32 {
+        if self == Self::Bend {
+            -1.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Code in project files.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+
+    /// The kind with file code `c`.
+    pub fn from_code(c: u8) -> Option<Self> {
+        Self::ALL.get(usize::from(c)).copied()
+    }
+}
+
+/// A controller value from a tick on (until the next point of the same kind).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ControlPoint {
+    /// Tick from the pattern start.
+    pub tick: i64,
+    /// Which controller.
+    pub kind: ControlKind,
+    /// Its value ([`ControlKind::min`] to 1).
+    pub value: f32,
 }
 
 /// Live input from one MIDI port (and channel) that plays a fixed rack channel instead of the

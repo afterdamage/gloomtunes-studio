@@ -320,6 +320,17 @@ impl AudioProcessor {
             &mut self.scheduled,
         );
         self.apply_live();
+        // Recorded controllers, at once for built-in instruments (within a quantum).
+        for i in 0..self.scheduled.as_slice().len() {
+            if let EventKind::Control { slot, kind, value } = self.scheduled.as_slice()[i].kind {
+                let offset = self.scheduled.as_slice()[i].offset;
+                self.slot_expression(
+                    usize::from(slot),
+                    crate::live::control_kind(kind, value),
+                    offset,
+                );
+            }
+        }
 
         // Metronome, sample-accurate: render up to each beat, trigger, continue.
         let mut cursor = 0;
@@ -570,7 +581,7 @@ impl AudioProcessor {
                 }
                 EventKind::NoteOff { key, .. } => ch.note_off(key),
                 EventKind::Wrap => ch.release_all(),
-                EventKind::Beat { .. } => {}
+                EventKind::Beat { .. } | EventKind::Control { .. } => {}
             }
         }
         ch.render_voices(&mut sl[cursor..], &mut sr[cursor..]);
@@ -1091,6 +1102,12 @@ impl AudioProcessor {
         let after = self.transport.state();
         if before == TransportState::Playing && after != TransportState::Playing {
             self.release_all_channels();
+            // Recorded bends and pedals end with playback.
+            let n = self.song.as_ref().map_or(0, |s| s.control_slots.len());
+            for i in 0..n {
+                let slot = self.song.as_ref().map_or(0, |s| s.control_slots[i].0);
+                self.reset_expression(usize::from(slot));
+            }
         }
         if before == TransportState::Stopped && after == TransportState::Playing {
             // Effects start from silence at play, so a capture from a stopped transport matches
@@ -1226,6 +1243,23 @@ impl AudioProcessor {
             kind => {
                 if let Some(slot) = slot {
                     self.slot_expression(usize::from(slot), kind, offset);
+                    let control = match kind {
+                        LiveKind::Bend(v) => Some((gt_core::ControlKind::Bend, v)),
+                        LiveKind::Sustain(d) => {
+                            Some((gt_core::ControlKind::Sustain, if d { 1.0 } else { 0.0 }))
+                        }
+                        LiveKind::ModWheel(v) => Some((gt_core::ControlKind::ModWheel, v)),
+                        LiveKind::Pressure(v) => Some((gt_core::ControlKind::Pressure, v)),
+                        _ => None,
+                    };
+                    if let Some((kind, value)) = control.filter(|_| playing) {
+                        self.post(EngineEvent::LiveControl {
+                            slot,
+                            kind,
+                            value,
+                            tick,
+                        });
+                    }
                 }
                 return;
             }
@@ -1242,6 +1276,7 @@ impl AudioProcessor {
             tick: at,
             kind,
         };
+        let mut played = None;
         if n.is_on() {
             // A key struck again before its release ends the old note first.
             if let Some(old) = self.live_held[h].checked_sub(1) {
@@ -1258,6 +1293,7 @@ impl AudioProcessor {
                     velocity: n.velocity,
                 }));
                 self.live_held[h] = slot + 1;
+                played = Some(slot);
             }
         } else if let Some(old) = self.live_held[h].checked_sub(1) {
             self.scheduled.insert(ev(EventKind::NoteOff {
@@ -1265,12 +1301,15 @@ impl AudioProcessor {
                 key: n.key,
             }));
             self.live_held[h] = 0;
+            played = Some(old);
         }
-        if playing {
+        if let Some(slot) = played {
             self.post(EngineEvent::LiveNote {
+                slot,
                 key: n.key,
                 velocity: n.velocity,
                 tick,
+                playing,
             });
         }
     }
@@ -1755,10 +1794,22 @@ mod tests {
         assert!(live.send(crate::LiveNote::on(64, 0.8)));
         p.process(&mut buf);
         assert!(buf.iter().any(|&s| s.abs() > 0.01));
-        // Stopped: played but not reported.
+        // Stopped: reported as not playing (for step recording).
         let mut events = Vec::new();
         h.poll_events(|e| events.push(e));
-        assert!(events.is_empty(), "{events:?}");
+        assert!(
+            matches!(
+                events[..],
+                [crate::EngineEvent::LiveNote {
+                    slot: 2,
+                    key: 64,
+                    playing: false,
+                    ..
+                }]
+            ),
+            "{events:?}"
+        );
+        events.clear();
 
         h.send(EngineCommand::Play).unwrap();
         p.process(&mut buf);
@@ -1772,6 +1823,8 @@ mod tests {
                     key,
                     velocity,
                     tick,
+                    playing: true,
+                    slot: 2,
                 } => Some((key, velocity, tick)),
                 _ => None,
             })

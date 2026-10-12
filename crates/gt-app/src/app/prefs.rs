@@ -175,6 +175,8 @@ impl GloomApp {
             }
             Command::ToggleTypingKeyboard => self.keyboard.on = !self.keyboard.on,
             Command::ToggleRecord => self.toggle_record(),
+            Command::ToggleStepRecord => self.toggle_step_record(),
+            Command::CaptureTake => self.capture_take(),
             Command::ToggleMetronome => {
                 self.transport.metronome = !self.transport.metronome;
                 self.send(EngineCommand::SetMetronome(self.transport.metronome));
@@ -446,6 +448,8 @@ impl GloomApp {
             record_click: m.record_click,
             extra_ms: m.extra_ms,
             octave: m.octave,
+            record_mode: m.mode.key().to_owned(),
+            loop_passes: m.passes.key().to_owned(),
         };
         s.set_keymap(&self.keymap);
         s.theme = ThemePrefs::from_theme(&self.theme);

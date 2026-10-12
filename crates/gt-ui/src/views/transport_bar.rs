@@ -45,6 +45,8 @@ pub struct TransportModel {
     pub audio_online: bool,
     /// Recording is armed.
     pub recording: bool,
+    /// Step recording is on.
+    pub step_record: bool,
     /// Count-in beats still to come (0: not counting in).
     pub count_in: u32,
     /// The computer keyboard plays notes.
@@ -69,6 +71,7 @@ impl Default for TransportModel {
             metronome: false,
             audio_online: false,
             recording: false,
+            step_record: false,
             count_in: 0,
             typing_keyboard: false,
             midi_light: 0.0,
@@ -95,6 +98,10 @@ pub enum TransportAction {
     SetMetronome(bool),
     /// Arm or disarm recording (starts playback with a count-in when stopped).
     ToggleRecord,
+    /// Step recording on/off.
+    ToggleStepRecord,
+    /// Turn what was just played into a pattern.
+    CaptureTake,
     /// Computer keyboard as a piano on/off.
     ToggleTypingKeyboard,
 }
@@ -132,6 +139,28 @@ pub fn transport_bar(
             .clicked()
         {
             actions.push(TransportAction::ToggleRecord);
+        }
+        if ui
+            .add(egui::Button::selectable(m.step_record, "Step"))
+            .on_hover_text(format!(
+                "Step record ({}+Shift+R): with the transport stopped, each note or chord you \
+                 play goes in at the piano roll cursor, which moves on by the snap",
+                crate::keymap::COMMAND_KEY
+            ))
+            .clicked()
+        {
+            actions.push(TransportAction::ToggleStepRecord);
+        }
+        if ui
+            .button("Capture")
+            .on_hover_text(format!(
+                "Capture last take ({}+Shift+T): turn what you just played into a new \
+                 pattern, even with Record off",
+                crate::keymap::COMMAND_KEY
+            ))
+            .clicked()
+        {
+            actions.push(TransportAction::CaptureTake);
         }
 
         for (song, label, tip) in [

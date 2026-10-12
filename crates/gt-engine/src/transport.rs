@@ -66,6 +66,15 @@ pub enum EventKind {
         /// The note is still held.
         held: bool,
     },
+    /// A recorded controller of a channel slot takes a value.
+    Control {
+        /// Channel slot.
+        slot: u16,
+        /// Which controller.
+        kind: gt_core::ControlKind,
+        /// Its value.
+        value: f32,
+    },
     /// A metronome beat. `downbeat` is the first beat of a bar.
     Beat {
         /// True on beat 1.
@@ -78,7 +87,7 @@ impl EventKind {
     fn rank(&self) -> u8 {
         match self {
             Self::Wrap => 0,
-            Self::NoteOff { .. } => 1,
+            Self::NoteOff { .. } | Self::Control { .. } => 1,
             Self::NoteOn { .. } | Self::Chase { .. } => 2,
             Self::Beat { .. } => 3,
         }
@@ -383,8 +392,11 @@ impl Transport {
                 seconds: self.seconds_at_frame(seg_start as f64),
             });
             if std::mem::take(&mut self.chase) {
-                if let Some(song) = song.filter(|s| !s.repeat) {
-                    self.chase_notes(song, seg_start, q_start, out);
+                if let Some(song) = song {
+                    if !song.repeat {
+                        self.chase_notes(song, seg_start, q_start, out);
+                    }
+                    self.chase_controls(song, seg_start, q_start, out);
                 }
             }
             self.collect(seg_start, seg_end, limit, q_start, song, out);
@@ -434,6 +446,23 @@ impl Transport {
         });
         if let Some(song) = song.filter(|s| s.length > 0) {
             self.collect_notes(song, a, b, t_lo, t_hi, limit, q_start, out);
+        }
+    }
+
+    /// Sets every recorded controller to its value at frame `at` (where playback started,
+    /// jumped or wrapped).
+    fn chase_controls(&self, song: &SongSnapshot, at: u64, q_start: u64, out: &mut EventBuf) {
+        let pos = self.tick_at_frame(at as f64).floor() as i64;
+        for &(slot, kind) in &song.control_slots {
+            out.push(ScheduledEvent {
+                offset: (at - q_start) as u32,
+                tick: Tick(pos),
+                kind: EventKind::Control {
+                    slot,
+                    kind,
+                    value: song.control_at(slot, kind, pos),
+                },
+            });
         }
     }
 
@@ -522,6 +551,24 @@ impl Transport {
                         offset: (f - q_start as i64) as u32,
                         tick: Tick(tick),
                         kind,
+                    });
+                }
+            }
+            for c in song.controls_in(t_lo - base, t_hi - base) {
+                let tick = base + c.tick;
+                if limit.is_some_and(|l| tick >= l) {
+                    continue;
+                }
+                let f = self.frame_of_tick(tick as f64);
+                if f >= a as i64 && f < b as i64 {
+                    out.push(ScheduledEvent {
+                        offset: (f - q_start as i64) as u32,
+                        tick: Tick(tick),
+                        kind: EventKind::Control {
+                            slot: c.slot,
+                            kind: c.kind,
+                            value: c.value,
+                        },
                     });
                 }
             }
@@ -786,6 +833,53 @@ mod tests {
         }
         assert_eq!(buf.dropped(), 0);
         out
+    }
+
+    #[test]
+    fn recorded_controllers_play_at_their_ticks_and_chase_on_play_and_locate() {
+        use gt_core::{ControlKind, ControlPoint};
+        let mut p = gt_core::Project::demo();
+        let ch = p.channels[1].id;
+        let bend = |tick, value| ControlPoint {
+            tick,
+            kind: ControlKind::Bend,
+            value,
+        };
+        p.current_pattern_mut()
+            .controls
+            .insert(ch, vec![bend(960, 0.5), bend(1920, -0.25)]);
+        let song = SongSnapshot::compile(&p);
+        assert_eq!(song.length, 3840);
+        assert_eq!(song.control_slots, vec![(1, ControlKind::Bend)]);
+        let controls = |got: Vec<(u64, i64, EventKind)>| -> Vec<(u64, f32)> {
+            got.into_iter()
+                .filter_map(|(f, _, k)| match k {
+                    EventKind::Control {
+                        slot: 1,
+                        kind: ControlKind::Bend,
+                        value,
+                    } => Some((f, value)),
+                    _ => None,
+                })
+                .collect()
+        };
+        // 120 BPM at 48 kHz: 25 frames per tick, 96 000 per pattern. Play sets the value at the start (rest),
+        // then each point plays on its frame, every repetition.
+        let mut t = Transport::new(48_000, Box::new(TempoMap::constant(120.0)));
+        t.play(0);
+        let got = controls(run_song(&mut t, &song, 48_000, 2.6, 64));
+        assert_eq!(
+            got,
+            vec![(0, 0.0), (24_000, 0.5), (48_000, -0.25), (120_000, 0.5)]
+        );
+        // Starting inside the pattern (tick 1500, its third repetition) takes the last value.
+        let mut t = Transport::new(48_000, Box::new(TempoMap::constant(120.0)));
+        t.locate(Tick(2 * 3840 + 1500), 0);
+        t.play(0);
+        let got = controls(run_song(&mut t, &song, 48_000, 0.1, 64));
+        assert_eq!(got, vec![(0, 0.5)]);
+        assert_eq!(song.control_at(1, ControlKind::Bend, 3840 + 2000), -0.25);
+        assert_eq!(song.control_at(1, ControlKind::ModWheel, 2000), 0.0);
     }
 
     #[test]
