@@ -57,6 +57,7 @@ fn rig(recording: bool) -> Rig {
             marks,
             lanes: pairs,
             compensation: 256,
+            punch: None,
         }))))
         .unwrap();
         rec = Some(consumer);

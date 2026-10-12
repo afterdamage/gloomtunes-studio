@@ -1,11 +1,12 @@
 //! Audio input in the engine (Prompt 13): latency calibration through a simulated loopback
 //! cable, latency-compensated recording that lands sample-exactly on the song, monitoring,
-//! and the gap reports when the input or the disk writer falls behind.
+//! loop passes and punch-ins as takes, and the gap reports when the input or the disk writer
+//! falls behind.
 
 use gt_core::{AudioInput, MonitorMode, TempoMap, Tick};
 use gt_engine::{
     create, AudioProcessor, CalibrationSink, EngineCommand, EngineConfig, EngineHandle, InputFeed,
-    InputRoute, InputRoutes, RecMark, RecordSink,
+    InputRoute, InputRoutes, LoopRegion, RecMark, RecordSink,
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 
@@ -127,6 +128,7 @@ fn a_recorded_click_lands_on_its_beat_after_compensation() {
             marks,
             lanes: vec![AudioInput::mono(0)],
             compensation: d,
+            punch: None,
         }))))
         .unwrap();
         // Start from an odd position: the take begins on the first whole tick after it.
@@ -214,6 +216,7 @@ fn gaps_are_reported_and_keep_the_timing() {
         marks,
         lanes: vec![AudioInput::mono(0), AudioInput::stereo(0)],
         compensation: 0,
+        punch: None,
     }))))
     .unwrap();
     lb.h.send(EngineCommand::Play).unwrap();
@@ -253,4 +256,89 @@ fn gaps_are_reported_and_keep_the_timing() {
     assert!(filled > 0, "the full ring was reported");
     assert!(silent > 0, "the input xrun was reported");
     assert_eq!(audio.len(), SR as usize / 4 / 3 * 3);
+}
+
+/// Records with a measured compensation; returns (frame where playback started, marks, audio).
+fn record_with(
+    lb: &mut Loopback,
+    punch: Option<(i64, i64)>,
+    from: Tick,
+    seconds: f64,
+) -> (usize, Vec<RecMark>, Vec<f32>) {
+    lb.h.send(EngineCommand::SetTempoMap(Box::new(TempoMap::constant(
+        120.0,
+    ))))
+    .unwrap();
+    lb.run(8 * BLOCK);
+    let d = calibrate(lb);
+    let (samples, mut rec) = RingBuffer::new(1 << 21);
+    let (marks, mut rec_marks) = RingBuffer::new(256);
+    lb.h.send(EngineCommand::SetRecorder(Some(Box::new(RecordSink {
+        samples,
+        marks,
+        lanes: vec![AudioInput::mono(0)],
+        compensation: d,
+        punch,
+    }))))
+    .unwrap();
+    lb.h.send(EngineCommand::Locate(from)).unwrap();
+    lb.h.send(EngineCommand::SetMetronome(true)).unwrap();
+    lb.run(BLOCK);
+    let start = lb.out.len().next_multiple_of(gt_engine::RENDER_QUANTUM);
+    lb.h.send(EngineCommand::Play).unwrap();
+    lb.run((f64::from(SR) * seconds) as usize);
+    lb.h.send(EngineCommand::Stop).unwrap();
+    lb.run(4 * BLOCK);
+    (start, drain(&mut rec_marks), drain(&mut rec))
+}
+
+/// (tick, frames) of each take.
+fn takes(marks: &[RecMark]) -> Vec<(i64, u64)> {
+    let mut out = Vec::new();
+    let mut tick = None;
+    for m in marks {
+        match *m {
+            RecMark::Start { tick: t, .. } => tick = Some(t),
+            RecMark::End { frames } => out.push((tick.take().expect("start before end"), frames)),
+            RecMark::Gap { .. } => panic!("no gaps expected: {marks:?}"),
+        }
+    }
+    out
+}
+
+#[test]
+fn loop_passes_become_takes_that_meet_exactly() {
+    let mut lb = Loopback::new(333);
+    // Loop beats 4 to 8 (2 s at 120 BPM); start two beats before it.
+    lb.h.send(EngineCommand::SetLoop(LoopRegion {
+        start: Tick(3840),
+        end: Tick(7680),
+        enabled: true,
+    }))
+    .unwrap();
+    let (start, marks, audio) = record_with(&mut lb, None, Tick(1920), 6.5);
+    let takes = takes(&marks);
+    let pass = u64::from(SR) * 2;
+    assert_eq!(
+        takes,
+        vec![
+            (1920, u64::from(SR) + pass),
+            (3840, pass),
+            (3840, takes[2].1),
+        ],
+    );
+    assert!(takes[2].1 > pass / 2 && takes[2].1 < pass);
+    // With each take's tail, the passes cover what the player heard without a hole or an
+    // overlap: laid end to end they are the performance, sample for sample.
+    assert_eq!(audio, &lb.out[start..start + audio.len()]);
+}
+
+#[test]
+fn punch_records_only_between_the_markers() {
+    let mut lb = Loopback::new(2048);
+    // Punch in at beat 4, out at beat 6 (1 s), playing straight through from bar 1.
+    let (start, marks, audio) = record_with(&mut lb, Some((3840, 5760)), Tick(0), 4.0);
+    assert_eq!(takes(&marks), vec![(3840, u64::from(SR))]);
+    let at = start + 2 * SR as usize;
+    assert_eq!(audio, &lb.out[at..at + SR as usize]);
 }

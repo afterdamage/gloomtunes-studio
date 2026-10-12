@@ -186,6 +186,8 @@ enum Popup {
         index: usize,
     },
     Sig(usize),
+    /// Pick which take of a loop recording plays.
+    Takes(ClipId),
 }
 
 /// View and editing state of the playlist that is not part of the document.
@@ -405,6 +407,16 @@ pub fn playlist(
     let (popup_timing, popup_changed) = show_popup(ui, theme, st, project);
     let timing = timing | popup_timing;
     changed |= popup_changed;
+    if popup_changed {
+        // A take picked in the popup may not be loaded yet.
+        for c in &project.playlist.clips {
+            if let ClipKind::Audio { source, .. } = &c.kind {
+                if view.audio.peaks(source).is_none() {
+                    actions.push(PlaylistAction::Load(source.clone()));
+                }
+            }
+        }
+    }
     if changed {
         actions.push(PlaylistAction::Changed);
     }
@@ -920,6 +932,19 @@ fn grid_input(
                     st.popup = Some((Popup::Segment { clip: id, index }, p, 0));
                 }
             }
+            if let Some((id, Zone::Body)) = hit {
+                // Right-click on the name strip of a clip with takes: pick a take.
+                let label = project.playlist.clip(id).is_some_and(|c| {
+                    matches!(&c.kind, ClipKind::Audio { takes, .. } if !takes.is_empty())
+                        && track_row(project, c.track).is_some_and(|row| {
+                            p.y <= geo.clip_rect(row, c.start, c.end()).top() + LABEL_H
+                        })
+                });
+                if label {
+                    st.drag = None;
+                    st.popup = Some((Popup::Takes(id), p, 0));
+                }
+            }
             if let Some((id, Zone::Point(i))) = hit {
                 if let Some(ClipKind::Automation(a)) =
                     project.playlist.clip_mut(id).map(|c| &mut c.kind)
@@ -1195,6 +1220,7 @@ fn drop_audio(
             source: (*src).clone(),
             gain: 1.0,
             gaps: Vec::new(),
+            takes: Vec::new(),
         },
     );
     st.selected = vec![id];
@@ -1631,6 +1657,42 @@ fn show_popup(
                             }
                         }
                     }
+                    Popup::Takes(id) => {
+                        let Some(c) = project.playlist.clip_mut(id) else {
+                            close = true;
+                            return;
+                        };
+                        let ClipKind::Audio { source, takes, .. } = &c.kind else {
+                            close = true;
+                            return;
+                        };
+                        let current = source.display_name();
+                        let others: Vec<String> =
+                            takes.iter().map(|t| t.source.display_name()).collect();
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new("Takes").color(theme.text_dim));
+                            let _ = ui.selectable_label(true, current);
+                            let mut pick = None;
+                            for (i, name) in others.iter().enumerate() {
+                                if ui.selectable_label(false, name).clicked() {
+                                    pick = Some(i);
+                                }
+                            }
+                            let clear = !others.is_empty()
+                                && ui
+                                    .button("Keep only this take")
+                                    .on_hover_text("Remove the other takes from the clip")
+                                    .clicked();
+                            if let Some(i) = pick {
+                                changed |= c.use_take(i);
+                            }
+                            if clear {
+                                c.clear_takes();
+                                changed = true;
+                                close = true;
+                            }
+                        });
+                    }
                     Popup::Sig(i) => {
                         let mut ch: Vec<SigChange> = project.signatures.changes().collect();
                         let Some(c) = ch.get_mut(i) else {
@@ -1810,12 +1872,21 @@ fn paint(
                 }
                 pat.map_or_else(|| "(missing)".to_owned(), |p| p.name.clone())
             }
-            ClipKind::Audio { source, gaps, .. } => {
+            ClipKind::Audio {
+                source,
+                gaps,
+                takes,
+                ..
+            } => {
                 if let Some((peaks, rate)) = view.audio.peaks(source) {
                     paint_wave(&cp, geo, c, &project.tempo, peaks, rate, body, ink);
                 }
                 paint_gaps(&cp, geo, c, &project.tempo, gaps, body, theme.warn);
-                source.display_name()
+                if takes.is_empty() {
+                    source.display_name()
+                } else {
+                    format!("{} [{} takes]", source.display_name(), takes.len() + 1)
+                }
             }
             ClipKind::Automation(a) => {
                 paint_curve(&cp, geo, c, a, r, ink, theme.accent);

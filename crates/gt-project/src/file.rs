@@ -31,8 +31,8 @@ use gt_core::effects::EffectKind;
 use gt_core::modulation::SYNC_RATES;
 use gt_core::synth::{ModDest, ModSlot, ModSource, SynthParam, SynthPatch, MOD_SLOTS};
 use gt_core::{
-    Adsr, AudioInput, AutoPoint, Automation, BuiltInSample, Channel, ChannelId, Clip, ClipId,
-    ClipKind, Curve, EffectSlot, Gap, Instrument, LfoRate, LfoShape, LoopMode, Marker,
+    Adsr, AudioInput, AudioTake, AutoPoint, Automation, BuiltInSample, Channel, ChannelId, Clip,
+    ClipId, ClipKind, Curve, EffectSlot, Gap, Instrument, LfoRate, LfoShape, LoopMode, Marker,
     ModSourceKind, Modulator, ModulatorId, Note, ParamId, Pattern, PatternId, PluginFormat,
     PluginInstanceId, PluginKind, PluginParamInfo, PluginRef, Project, SampleSource,
     SamplerSettings, SigChange, TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, Track, TrackId,
@@ -278,15 +278,20 @@ pub fn load(path: &Path, extract_dir: &Path) -> Result<Loaded, FileError> {
     })
 }
 
-/// Every audio file the project references (channels and audio clips), without duplicates.
+/// Every audio file the project references (channels, audio clips and their takes), without
+/// duplicates.
 pub fn sample_files(project: &Project) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = project
         .channels
         .iter()
         .filter_map(|c| c.sample())
-        .chain(project.playlist.clips.iter().filter_map(|c| match &c.kind {
-            ClipKind::Audio { source, .. } => Some(source),
-            _ => None,
+        .chain(project.playlist.clips.iter().flat_map(|c| {
+            match &c.kind {
+                ClipKind::Audio { source, takes, .. } => std::iter::once(source)
+                    .chain(takes.iter().map(|t| &t.source))
+                    .collect(),
+                _ => Vec::new(),
+            }
         }))
         .filter_map(|s| match s {
             SampleSource::File(p) => Some(p.clone()),
@@ -298,7 +303,7 @@ pub fn sample_files(project: &Project) -> Vec<PathBuf> {
     out
 }
 
-/// Points every use of the audio file `from` (channels and audio clips) at `to`. Returns how
+/// Points every use of the audio file `from` (channels, audio clips and takes) at `to`. Returns how
 /// many references changed.
 pub fn relink(project: &mut Project, from: &Path, to: &Path) -> usize {
     let mut n = 0;
@@ -314,8 +319,11 @@ pub fn relink(project: &mut Project, from: &Path, to: &Path) -> usize {
         }
     }
     for c in &mut project.playlist.clips {
-        if let ClipKind::Audio { source, .. } = &mut c.kind {
+        if let ClipKind::Audio { source, takes, .. } = &mut c.kind {
             fix(source);
+            for t in takes {
+                fix(&mut t.source);
+            }
         }
     }
     n
@@ -612,11 +620,22 @@ enum ClipContentDto {
         /// (schema 3).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         gaps: Vec<(f64, f64)>,
+        /// Inactive takes of a loop recording (schema 3).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        takes: Vec<TakeDto>,
     },
     Automation {
         target: String,
         points: Vec<PointDto>,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+struct TakeDto {
+    source: SampleDto,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    gaps: Vec<(f64, f64)>,
+    length: i64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -828,10 +847,23 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                 muted: c.muted,
                 content: match &c.kind {
                     ClipKind::Pattern(id) => ClipContentDto::Pattern { pattern: id.0 },
-                    ClipKind::Audio { source, gain, gaps } => ClipContentDto::Audio {
+                    ClipKind::Audio {
+                        source,
+                        gain,
+                        gaps,
+                        takes,
+                    } => ClipContentDto::Audio {
                         source: sample_dto(source, dir, embedded),
                         gain: *gain,
                         gaps: gaps.iter().map(|g| (g.at_s, g.len_s)).collect(),
+                        takes: takes
+                            .iter()
+                            .map(|t| TakeDto {
+                                source: sample_dto(&t.source, dir, embedded),
+                                gaps: t.gaps.iter().map(|g| (g.at_s, g.len_s)).collect(),
+                                length: t.length,
+                            })
+                            .collect(),
                     },
                     ClipKind::Automation(a) => ClipContentDto::Automation {
                         target: a.target.key(),
@@ -1184,14 +1216,33 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
     for c in d.playlist.clips {
         let kind = match c.content {
             ClipContentDto::Pattern { pattern } => Some(ClipKind::Pattern(PatternId(pattern))),
-            ClipContentDto::Audio { source, gain, gaps } => {
+            ClipContentDto::Audio {
+                source,
+                gain,
+                gaps,
+                takes,
+            } => {
+                let to_gaps = |g: Vec<(f64, f64)>| {
+                    g.into_iter()
+                        .map(|(at_s, len_s)| Gap { at_s, len_s })
+                        .collect::<Vec<_>>()
+                };
+                let takes = takes
+                    .into_iter()
+                    .filter_map(|t| {
+                        let source = sample(t.source, &mut warnings)?;
+                        Some(AudioTake {
+                            source,
+                            gaps: to_gaps(t.gaps),
+                            length: t.length,
+                        })
+                    })
+                    .collect();
                 sample(source, &mut warnings).map(|source| ClipKind::Audio {
                     source,
                     gain,
-                    gaps: gaps
-                        .into_iter()
-                        .map(|(at_s, len_s)| Gap { at_s, len_s })
-                        .collect(),
+                    gaps: to_gaps(gaps),
+                    takes,
                 })
             }
             ClipContentDto::Automation { target, points } => match ParamId::parse(&target) {
@@ -1601,6 +1652,8 @@ mod tests {
         std::fs::create_dir_all(dir.join("song/recordings")).unwrap();
         let take = dir.join("song/recordings/Vox take 1.wav");
         std::fs::write(&take, b"RIFF....take").unwrap();
+        let other = dir.join("song/recordings/Vox take 2.wav");
+        std::fs::write(&other, b"RIFF....other").unwrap();
         let mut p = Project::empty();
         let t = p.playlist.tracks[0].id;
         p.playlist.tracks[0].input = Some(AudioInput::stereo(2));
@@ -1624,6 +1677,11 @@ mod tests {
                 source: SampleSource::File(take.clone()),
                 gain: 1.0,
                 gaps: gaps.clone(),
+                takes: vec![AudioTake {
+                    source: SampleSource::File(other.clone()),
+                    gaps: Vec::new(),
+                    length: 4800,
+                }],
             },
         );
         let path = dir.join("song/song.gloom");
@@ -1635,7 +1693,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(report.embedded, 1, "the recording is embedded");
+        assert_eq!(report.embedded, 2, "both takes are embedded");
         let json = to_value(&p, Some(&dir.join("song")), &HashMap::new());
         let track = &json["project"]["playlist"]["tracks"][0];
         assert_eq!(track["input"], "3-4");
@@ -1647,9 +1705,10 @@ mod tests {
 
         // The project folder moves to another machine without the recordings folder.
         std::fs::remove_file(&take).unwrap();
+        std::fs::remove_file(&other).unwrap();
         let loaded = load(&path, &dir.join("extracted")).unwrap();
         assert!(loaded.missing.is_empty());
-        assert_eq!(loaded.extracted, 1);
+        assert_eq!(loaded.extracted, 2);
         let q = &loaded.project;
         assert_eq!(q.playlist.tracks[0].input, Some(AudioInput::stereo(2)));
         assert_eq!(q.playlist.tracks[1].input, Some(AudioInput::mono(0)));
@@ -1658,6 +1717,7 @@ mod tests {
         let ClipKind::Audio {
             source: SampleSource::File(got),
             gaps: back,
+            takes,
             ..
         } = &q.playlist.clips[0].kind
         else {
@@ -1665,11 +1725,26 @@ mod tests {
         };
         assert_eq!(back, &gaps);
         assert_eq!(std::fs::read(got).unwrap(), b"RIFF....take");
+        let [AudioTake {
+            source: SampleSource::File(got_other),
+            length: 4800,
+            ..
+        }] = takes.as_slice()
+        else {
+            panic!("one inactive take: {takes:?}")
+        };
+        assert_eq!(std::fs::read(got_other).unwrap(), b"RIFF....other");
+        assert_eq!(sample_files(q).len(), 2);
 
         // Relinking finds a recording like any other audio file.
         let mut q = q.clone();
         let moved = dir.join("elsewhere.wav");
         assert_eq!(relink(&mut q, got, &moved), 1);
+        assert_eq!(
+            relink(&mut q, got_other, &moved),
+            1,
+            "inactive takes relink too"
+        );
         assert_eq!(sample_files(&q), vec![moved]);
     }
 

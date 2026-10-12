@@ -54,6 +54,7 @@ fn audio_clip(p: &mut Project, start: i64, length: i64, offset: i64) {
             source: SampleSource::BuiltIn(gt_core::BuiltInSample::Kick),
             gain: 1.0,
             gaps: Vec::new(),
+            takes: Vec::new(),
         },
     );
     p.playlist.clip_mut(c).unwrap().offset = offset;

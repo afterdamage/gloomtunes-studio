@@ -1254,6 +1254,7 @@ impl GloomApp {
             }
         }
         self.plugins.store_states(&mut self.project);
+        self.adopt_recordings(&path);
         match gt_project::file::save(
             &self.project,
             &path,

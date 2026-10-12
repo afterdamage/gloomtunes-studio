@@ -25,7 +25,7 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 11 | CLAP plugin hosting | Done (2026-10-09) |
 | 12 | Performance, polish, packaging | Done (2026-10-09, v1.0) |
 | 12m | macOS port and packaging | Done (2026-10-09) |
-| 13 | Parity: audio recording | **In review** (part 1 of 2) |
+| 13 | Parity: audio recording | **In review** (part 2 of 2; part 1 done 2026-10-12) |
 
 ## Phases at a glance
 
@@ -400,7 +400,7 @@ sound identical; the golden export test stays.
 
 ### Prompt 13: Audio recording
 - Split into two PRs. Part 1 is the core; part 2 adds takes, loop and punch recording.
-- Part 1 delivered (2026-10-12), in review:
+- Part 1 delivered and merged (2026-10-12):
   - **Input device** in Settings > Audio and MIDI, with each channel pair offered as two monos,
     a stereo pair, both, or off; level meters per channel (D96).
   - **Arm any playlist track** (the R button) and give it an input from the menu under its
@@ -423,12 +423,17 @@ sound identical; the golden export test stays.
     accuracy on real hardware, the Windows and macOS input paths and the macOS microphone
     prompt need a manual check. The input must run at the output's sample rate. Recording
     needs song mode (pressing Record with armed tracks switches to it). Takes start on the
-    first whole tick at or after the playhead. Until part 2, each loop pass becomes a separate
-    clip and earlier passes of the session are muted; recordings of an unsaved project stay in
-    the data folder's `recordings` after Save as.
-- Part 2 (next): loop recording stacks takes in one clip, pick and promote the active take
-  with undo, punch in and out on the loop region, takes kept when embedding and relinking,
-  unsaved recordings moved next to the project on the first save.
+    first whole tick at or after the playhead. Part 2 lifted part 1's limits on loop passes
+    and unsaved projects.
+- Part 2 delivered (2026-10-12), in review (D102):
+  - **Loop recording**: each pass is a take; passes stack into one clip that plays the
+    newest, and right-clicking the clip's name strip picks another take or keeps only one.
+    Every pass is complete to the sample (no hole at the loop point).
+  - **Punch in and out** at the loop markers (Punch button next to Loop).
+  - Takes are saved, embedded and relinked like any sample; saving copies recordings made
+    before the project had a file into its `recordings` folder.
+  - Known limits: no comping (one take plays per clip); the first pass of a loop recording
+    that starts before the loop is a separate clip, cut where the loop starts.
 
 ---
 

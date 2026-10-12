@@ -836,6 +836,7 @@ mod tests {
                 source: src.clone(),
                 gain: 0.5,
                 gaps: Vec::new(),
+                takes: Vec::new(),
             },
         );
         p.playlist.clip_mut(c).unwrap().offset = 960;

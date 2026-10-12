@@ -213,6 +213,7 @@ fn process_does_not_allocate() {
                     source: SampleSource::BuiltIn(gt_core::BuiltInSample::Snare),
                     gain: 0.8,
                     gaps: Vec::new(),
+                    takes: Vec::new(),
                 },
             );
             song.playlist.clip_mut(c).unwrap().offset = 200;
@@ -364,6 +365,7 @@ fn process_does_not_allocate() {
             marks,
             lanes: vec![AudioInput::stereo(0), AudioInput::mono(1)],
             compensation: 300,
+            punch: None,
         }))))
         .unwrap();
         run(&mut p, 5 * sr as usize / block);

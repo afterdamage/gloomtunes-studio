@@ -92,6 +92,7 @@ pub fn start(
     lanes: Vec<Lane>,
     sample_rate: u32,
     compensation: u32,
+    punch: Option<(i64, i64)>,
 ) -> std::io::Result<(RecordSink, Session)> {
     std::fs::create_dir_all(dir)?;
     let width: usize = lanes.iter().map(|l| l.input.channels()).sum();
@@ -103,6 +104,7 @@ pub fn start(
         marks,
         lanes: lanes.iter().map(|l| l.input).collect(),
         compensation,
+        punch,
     };
     let (tx, events) = channel();
     let writer = Writer {
@@ -360,6 +362,37 @@ pub fn folder(project_path: Option<&Path>, data: &Path) -> PathBuf {
     }
 }
 
+/// Copies the recordings `project` uses from `from` (the data folder's recordings, where an
+/// unsaved project records) into `to` (next to the project file) and points the project at
+/// the copies. The originals stay, so undo steps from before the save still find their files.
+/// Returns how many files were copied.
+pub fn adopt(project: &mut gt_core::Project, from: &Path, to: &Path) -> std::io::Result<usize> {
+    if from == to {
+        return Ok(0);
+    }
+    let mine: Vec<PathBuf> = gt_project::file::sample_files(project)
+        .into_iter()
+        .filter(|p| p.parent() == Some(from))
+        .collect();
+    if mine.is_empty() {
+        return Ok(0);
+    }
+    std::fs::create_dir_all(to)?;
+    for old in &mine {
+        let name = old.file_name().unwrap_or_default().to_string_lossy();
+        let (stem, ext) = name.rsplit_once('.').unwrap_or((&name, "wav"));
+        let mut new = to.join(&*name);
+        let mut n = 2;
+        while new.exists() {
+            new = to.join(format!("{stem} ({n}).{ext}"));
+            n += 1;
+        }
+        std::fs::copy(old, &new)?;
+        gt_project::file::relink(project, old, &new);
+    }
+    Ok(mine.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,7 +503,7 @@ mod tests {
     #[test]
     fn writes_every_frame_in_order_while_the_engine_keeps_pushing() {
         let dir = temp_dir("load");
-        let (mut sink, session) = start(&dir, lanes(), 48_000, 0).unwrap();
+        let (mut sink, session) = start(&dir, lanes(), 48_000, 0, None).unwrap();
         assert_eq!(sink.frame_width(), 3);
         // Like real time but 50 times faster: 2 minutes of three channels in a few seconds,
         // in 32-frame quanta, from another thread. Two takes.
@@ -513,7 +546,7 @@ mod tests {
     #[test]
     fn a_stalled_disk_becomes_silence_at_the_right_place() {
         let dir = temp_dir("stall");
-        let (sink, session) = start(&dir, lanes(), 48_000, 0).unwrap();
+        let (sink, session) = start(&dir, lanes(), 48_000, 0, None).unwrap();
         // Replace the sink's rings with tiny ones so the writer falls behind at once.
         let (mut samples, rx) = RingBuffer::new(32 * 3 * 4);
         let (mut marks, rx_marks) = RingBuffer::new(4096);
@@ -576,5 +609,50 @@ mod tests {
         );
         assert_eq!(folder(None, data), Path::new("/data/recordings"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn saving_copies_the_recordings_next_to_the_project() {
+        use gt_core::{AudioTake, ClipKind, Project, SampleSource};
+        let dir = temp_dir("adopt");
+        let data = dir.join("data/recordings");
+        let song = dir.join("song/recordings");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&song).unwrap();
+        let (a, b) = (data.join("Vox take 1.wav"), data.join("Vox take 2.wav"));
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        std::fs::write(song.join("Vox take 1.wav"), b"older").unwrap();
+        let mut p = Project::empty();
+        let t = p.playlist.tracks[0].id;
+        p.playlist.add_clip(
+            t,
+            0,
+            960,
+            ClipKind::Audio {
+                source: SampleSource::File(a.clone()),
+                gain: 1.0,
+                gaps: Vec::new(),
+                takes: vec![AudioTake {
+                    source: SampleSource::File(b.clone()),
+                    gaps: Vec::new(),
+                    length: 960,
+                }],
+            },
+        );
+        assert_eq!(adopt(&mut p, &data, &song).unwrap(), 2);
+        let files = gt_project::file::sample_files(&p);
+        assert_eq!(
+            files,
+            vec![song.join("Vox take 1 (2).wav"), song.join("Vox take 2.wav")],
+            "an existing file is never overwritten"
+        );
+        assert_eq!(std::fs::read(&files[0]).unwrap(), b"a");
+        assert!(a.exists(), "the originals stay for undo");
+        assert_eq!(
+            adopt(&mut p, &data, &song).unwrap(),
+            0,
+            "nothing left to copy"
+        );
     }
 }
