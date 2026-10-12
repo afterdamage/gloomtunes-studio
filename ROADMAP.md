@@ -438,7 +438,7 @@ sound identical; the golden export test stays.
 ### Prompt 14: Audio clip editing basics
 - Split into two PRs: part 1 edits clips, part 2 renders (render to audio clip,
   consolidate, freeze track) through the offline export renderer.
-- Part 1 delivered (2026-10-12), in review (D103, D104):
+- Part 1 delivered and merged (2026-10-12, D103, D104):
   - **Fades**: drag the square handles on an audio clip's top corners; pick the shape
     (linear, equal power, exponential, S-curve) from the clip popup (right-click the name
     strip), which also has the clip's gain in dB, **Reverse** and the takes.
