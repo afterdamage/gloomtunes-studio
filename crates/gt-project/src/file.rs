@@ -32,7 +32,7 @@ use gt_core::modulation::SYNC_RATES;
 use gt_core::synth::{ModDest, ModSlot, ModSource, SynthParam, SynthPatch, MOD_SLOTS};
 use gt_core::{
     Adsr, AudioEdit, AudioInput, AudioTake, AutoPoint, Automation, BuiltInSample, Channel,
-    ChannelId, Clip, ClipId, ClipKind, Curve, EffectSlot, Fade, FadeCurve, Gap, Instrument,
+    ChannelId, Clip, ClipId, ClipKind, Curve, EffectSlot, Fade, FadeCurve, Frozen, Gap, Instrument,
     LfoRate, LfoShape, LoopMode, Marker, ModSourceKind, Modulator, ModulatorId, Note, ParamId,
     Pattern, PatternId, PluginFormat, PluginInstanceId, PluginKind, PluginParamInfo, PluginRef,
     Project, SampleSource, SamplerSettings, SigChange, TempoMap, TempoPoint, Tick, TimeSig,
@@ -293,6 +293,13 @@ pub fn sample_files(project: &Project) -> Vec<PathBuf> {
                 _ => Vec::new(),
             }
         }))
+        .chain(
+            project
+                .playlist
+                .tracks
+                .iter()
+                .filter_map(|t| t.frozen.as_ref().map(|f| &f.source)),
+        )
         .filter_map(|s| match s {
             SampleSource::File(p) => Some(p.clone()),
             SampleSource::BuiltIn(_) => None,
@@ -324,6 +331,11 @@ pub fn relink(project: &mut Project, from: &Path, to: &Path) -> usize {
             for t in takes {
                 fix(&mut t.source);
             }
+        }
+    }
+    for t in &mut project.playlist.tracks {
+        if let Some(f) = &mut t.frozen {
+            fix(&mut f.source);
         }
     }
     n
@@ -592,6 +604,15 @@ struct TrackDto {
     /// Recording input ("1", "1-2"; schema 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     input: Option<String>,
+    /// Freeze render (schema 4, optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    frozen: Option<FrozenDto>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrozenDto {
+    source: SampleDto,
+    start: i64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -845,6 +866,10 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                 solo: t.solo,
                 insert: t.insert,
                 input: t.input.map(AudioInput::key),
+                frozen: t.frozen.as_ref().map(|f| FrozenDto {
+                    source: sample_dto(&f.source, dir, embedded),
+                    start: f.start,
+                }),
             })
             .collect(),
         clips: pl
@@ -1227,6 +1252,12 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
             solo: t.solo,
             insert: t.insert,
             input: t.input.as_deref().and_then(AudioInput::from_key),
+            frozen: t.frozen.and_then(|f| {
+                Some(Frozen {
+                    source: sample(f.source, &mut warnings)?,
+                    start: f.start,
+                })
+            }),
         });
     }
     for c in d.playlist.clips {
@@ -1685,8 +1716,14 @@ mod tests {
         std::fs::write(&take, b"RIFF....take").unwrap();
         let other = dir.join("song/recordings/Vox take 2.wav");
         std::fs::write(&other, b"RIFF....other").unwrap();
+        let frozen = dir.join("song/recordings/Drums freeze 1.wav");
+        std::fs::write(&frozen, b"RIFF....frozen").unwrap();
         let mut p = Project::empty();
         let t = p.playlist.tracks[0].id;
+        p.playlist.tracks[2].frozen = Some(Frozen {
+            source: SampleSource::File(frozen.clone()),
+            start: 0,
+        });
         p.playlist.tracks[0].input = Some(AudioInput::stereo(2));
         p.playlist.tracks[1].input = Some(AudioInput::mono(0));
         p.mixer.strips[4].input = Some(AudioInput::mono(7));
@@ -1736,7 +1773,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(report.embedded, 2, "both takes are embedded");
+        assert_eq!(report.embedded, 3, "both takes and the freeze are embedded");
         let json = to_value(&p, Some(&dir.join("song")), &HashMap::new());
         let track = &json["project"]["playlist"]["tracks"][0];
         assert_eq!(track["input"], "3-4");
@@ -1749,13 +1786,23 @@ mod tests {
         // The project folder moves to another machine without the recordings folder.
         std::fs::remove_file(&take).unwrap();
         std::fs::remove_file(&other).unwrap();
+        std::fs::remove_file(&frozen).unwrap();
         let loaded = load(&path, &dir.join("extracted")).unwrap();
         assert!(loaded.missing.is_empty());
-        assert_eq!(loaded.extracted, 2);
+        assert_eq!(loaded.extracted, 3);
         let q = &loaded.project;
         assert_eq!(q.playlist.tracks[0].input, Some(AudioInput::stereo(2)));
         assert_eq!(q.playlist.tracks[1].input, Some(AudioInput::mono(0)));
         assert_eq!(q.playlist.tracks[2].input, None);
+        let Some(Frozen {
+            source: SampleSource::File(f),
+            start: 0,
+        }) = &q.playlist.tracks[2].frozen
+        else {
+            panic!("the track stays frozen")
+        };
+        assert_eq!(std::fs::read(f).unwrap(), b"RIFF....frozen");
+        assert_eq!(q.playlist.tracks[0].frozen, None);
         assert_eq!(q.mixer.strips[4].input, Some(AudioInput::mono(7)));
         let ClipKind::Audio {
             source: SampleSource::File(got),
@@ -1779,7 +1826,7 @@ mod tests {
             panic!("one inactive take: {takes:?}")
         };
         assert_eq!(std::fs::read(got_other).unwrap(), b"RIFF....other");
-        assert_eq!(sample_files(q).len(), 2);
+        assert_eq!(sample_files(q).len(), 3);
 
         // Relinking finds a recording like any other audio file.
         let mut q = q.clone();
@@ -1790,6 +1837,17 @@ mod tests {
             1,
             "inactive takes relink too"
         );
+        let Some(f) = q.playlist.tracks[2]
+            .frozen
+            .as_ref()
+            .map(|f| f.source.clone())
+        else {
+            panic!("frozen")
+        };
+        let SampleSource::File(f) = f else {
+            panic!("a file")
+        };
+        assert_eq!(relink(&mut q, &f, &moved), 1, "freezes relink too");
         assert_eq!(sample_files(&q), vec![moved]);
     }
 

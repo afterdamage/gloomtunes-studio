@@ -88,6 +88,9 @@ pub struct AudioPlay {
     pub fade_out_curve: FadeCurve,
     /// Play the sample backwards.
     pub reverse: bool,
+    /// A frozen track's render: joins its strip at the freeze point (after an insert's
+    /// effects, D105) instead of at the strip's input.
+    pub frozen: bool,
 }
 
 impl AudioPlay {
@@ -272,8 +275,40 @@ impl SongSnapshot {
         let mut events = Vec::new();
         let mut audio: Vec<AudioPlay> = Vec::new();
         let mut lanes: Vec<(ParamId, Vec<Span<'_>>)> = Vec::new();
+        // Frozen tracks whose render is loaded play it instead of their pattern and audio clips.
+        let mut frozen = Vec::new();
+        for t in &pl.tracks {
+            let Some(f) = &t.frozen else { continue };
+            let Some(sample) = samples(&f.source) else {
+                continue;
+            };
+            frozen.push(t.id);
+            if !pl.is_track_audible(t.id) {
+                continue;
+            }
+            let start_s = tempo.tick_to_seconds(f.start as f64);
+            audio.push(AudioPlay {
+                start_s,
+                end_s: start_s + sample.seconds(),
+                origin_s: start_s,
+                fade_in: false,
+                fade_out: false,
+                fade_in_end_s: start_s,
+                fade_in_curve: FadeCurve::Linear,
+                fade_out_start_s: f64::INFINITY,
+                fade_out_curve: FadeCurve::Linear,
+                reverse: false,
+                frozen: true,
+                sample,
+                gain: 1.0,
+                route: t.insert.min(gt_core::STRIPS - 1) as u8,
+            });
+        }
         for clip in &pl.clips {
             if clip.muted || !pl.is_track_audible(clip.track) {
+                continue;
+            }
+            if frozen.contains(&clip.track) && !matches!(clip.kind, ClipKind::Automation(_)) {
                 continue;
             }
             match &clip.kind {
@@ -328,6 +363,7 @@ impl SongSnapshot {
                         fade_out_start_s: sec(clip.end() - fade_out.len),
                         fade_out_curve: fade_out.curve,
                         reverse: edit.reverse,
+                        frozen: false,
                         sample,
                         gain: gain.clamp(0.0, 4.0),
                         route: route as u8,

@@ -91,6 +91,8 @@ pub struct AudioProcessor {
     clip_resume_s: f64,
     /// Song time of the last jump (start, locate, wrap) for the clips' de-click.
     clip_jump_s: f64,
+    /// Offline render of one strip (`set_tap`): the strip replaces the output.
+    tapped: bool,
     /// Modulators, grouped by parameter.
     mods: Option<Box<ModPlan>>,
     /// `MAX_CHANNELS` slots, allocated once in `new`.
@@ -172,6 +174,7 @@ impl AudioProcessor {
             control_tick: f64::NAN,
             clip_resume_s: f64::NEG_INFINITY,
             clip_jump_s: f64::NEG_INFINITY,
+            tapped: false,
             mods: None,
             channels: (0..MAX_CHANNELS).map(|_| ChannelSlot::new(sr)).collect(),
             preview,
@@ -202,6 +205,20 @@ impl AudioProcessor {
         (0..crate::MAX_PLUGINS)
             .filter_map(|i| self.plugins.set(i, None, &telemetry))
             .collect()
+    }
+
+    /// Offline renders: outputs the signal of strip `strip` at `point` instead of the master
+    /// (render to audio, consolidate, freeze; D105). `None` restores the master output. Not
+    /// for a running device stream: call it before or between offline passes.
+    pub fn set_tap(&mut self, tap: Option<(u8, crate::Tap)>) {
+        self.tapped = tap.is_some();
+        self.mixer.set_tap(tap.map(|(s, p)| (usize::from(s), p)));
+    }
+
+    /// Frames by which delay compensation holds back what clips and channels send into
+    /// `strip` (so a render taken at its [`crate::Tap::Input`] lags the timeline by this much).
+    pub fn strip_input_delay(&self, strip: u8) -> usize {
+        self.mixer.input_delay(usize::from(strip))
     }
 
     /// The telemetry this processor publishes (also visible through the `EngineHandle`).
@@ -329,6 +346,12 @@ impl AudioProcessor {
         );
         self.quantum_l.copy_from_slice(&self.scratch_l);
         self.quantum_r.copy_from_slice(&self.scratch_r);
+        if self.tapped {
+            // Offline render of one strip: nothing else joins the output.
+            self.frame_clock += Q as u64;
+            self.publish();
+            return;
+        }
         if self.preview.is_active() {
             self.scratch_l.fill(0.0);
             self.scratch_r.fill(0.0);
@@ -565,7 +588,11 @@ impl AudioProcessor {
                 let (src_l, src_r) = (clip.sample.left(), clip.sample.right());
                 let len = src_l.len().min(src_r.len());
                 let declick_jump = clip.start_s < jump;
-                let (dl, dr) = self.mixer.direct_mut(usize::from(clip.route));
+                let (dl, dr) = if clip.frozen {
+                    self.mixer.frozen_mut(usize::from(clip.route))
+                } else {
+                    self.mixer.direct_mut(usize::from(clip.route))
+                };
                 for i in i0..i1.min(n) {
                     let t = a + i as f64 / sr;
                     let mut pos = (t - clip.origin_s) * rate;

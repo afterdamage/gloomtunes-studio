@@ -20,6 +20,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bounce;
 pub mod smf;
 
 use std::collections::HashMap;
@@ -270,6 +271,7 @@ pub fn render(
             progress,
             (k as u32, n),
             plugins,
+            None,
         )?;
         out.push(Rendered { name, audio });
     }
@@ -404,11 +406,18 @@ impl Tpdf {
 }
 
 /// A copy of `project` with every clip cut at `end`, so nothing past the range plays during
-/// the tail.
+/// the tail. Frozen tracks with clips past `end` play their clips (a freeze render cannot be
+/// cut there).
 fn trimmed(project: &Project, end: i64) -> Project {
     let mut p = project.clone();
-    p.playlist.clips.retain(|c| c.start < end);
-    for c in &mut p.playlist.clips {
+    let pl = &mut p.playlist;
+    for t in &mut pl.tracks {
+        if pl.clips.iter().any(|c| c.track == t.id && c.end() > end) {
+            t.frozen = None;
+        }
+    }
+    pl.clips.retain(|c| c.start < end);
+    for c in &mut pl.clips {
         c.length = c.length.min(end - c.start);
     }
     p
@@ -560,6 +569,7 @@ fn render_one(
     progress: &Progress,
     (job, jobs): (u32, u32),
     plugins: &mut Vec<Box<PluginBox>>,
+    tap: Option<(u8, gt_engine::Tap)>,
 ) -> Result<Vec<f32>, ExportError> {
     let rate = settings.sample_rate;
     let (mut h, mut p) = create(EngineConfig {
@@ -567,6 +577,7 @@ fn render_one(
         out_channels: 2,
     });
     load_engine(&mut h, &mut p, project, samples, rate, plugins);
+    p.set_tap(tap);
     // The plugins come back for the next pass however this one ends.
     let audio = render_pass(
         &mut h,
@@ -579,6 +590,14 @@ fn render_one(
         (job, jobs),
     );
     plugins.extend(p.take_plugins());
+    // What reaches a strip's input is held back by its delay compensation; a clip made from it
+    // must start on time.
+    if let (Ok(a), Some((strip, gt_engine::Tap::Input))) = (&audio, tap) {
+        let d = 2 * p.strip_input_delay(strip);
+        let mut a = a.clone();
+        a.drain(..d.min(a.len()));
+        return Ok(a);
+    }
     audio
 }
 

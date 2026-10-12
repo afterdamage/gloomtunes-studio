@@ -245,6 +245,9 @@ struct Strip {
     /// Signal from channels.
     direct_l: [f32; Q],
     direct_r: [f32; Q],
+    /// Frozen track audio, joining at the strip's freeze point (see [`freeze_post_fx`]).
+    frozen_l: [f32; Q],
+    frozen_r: [f32; Q],
     has_input: bool,
     /// This quantum's post-fader output (kept for sidechain keys).
     out_l: [f32; Q],
@@ -273,6 +276,8 @@ impl Strip {
             in_r: [0.0; Q],
             direct_l: [0.0; Q],
             direct_r: [0.0; Q],
+            frozen_l: [0.0; Q],
+            frozen_r: [0.0; Q],
             has_input: false,
             out_l: [0.0; Q],
             out_r: [0.0; Q],
@@ -342,6 +347,27 @@ pub(crate) struct MixerEngine {
     tmp_r: [f32; Q],
     /// Total latency from a channel to the device, in frames.
     latency: usize,
+    /// Offline renders: the strip and point whose signal replaces the master output.
+    tap: Option<(usize, Tap)>,
+    tap_l: [f32; Q],
+    tap_r: [f32; Q],
+}
+
+/// Where an offline render listens to a strip instead of the master output (render to
+/// audio, consolidate and freeze, D105).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tap {
+    /// What reaches the strip, before its effects.
+    Input,
+    /// The strip's freeze point: after the effects of an insert, before the master's effects
+    /// (those belong to the whole mix). Frozen audio joins here.
+    Freeze,
+}
+
+/// True when frozen audio on `strip` joins after the strip's effects (every insert) rather
+/// than before them (the master).
+pub fn freeze_post_fx(strip: usize) -> bool {
+    strip != MASTER
 }
 
 impl MixerEngine {
@@ -360,6 +386,9 @@ impl MixerEngine {
             tmp_l: [0.0; Q],
             tmp_r: [0.0; Q],
             latency: 0,
+            tap: None,
+            tap_l: [0.0; Q],
+            tap_r: [0.0; Q],
         }
     }
 
@@ -533,6 +562,24 @@ impl MixerEngine {
         (&mut st.direct_l, &mut st.direct_r)
     }
 
+    /// The frozen-audio input of strip `strip` (the master if out of range).
+    pub(crate) fn frozen_mut(&mut self, strip: usize) -> (&mut [f32; Q], &mut [f32; Q]) {
+        let s = if strip < STRIPS { strip } else { MASTER };
+        let st = &mut self.strips[s];
+        st.has_input = true;
+        (&mut st.frozen_l, &mut st.frozen_r)
+    }
+
+    /// Delay compensation applied to what channels send into `strip`, in frames.
+    pub(crate) fn input_delay(&self, strip: usize) -> usize {
+        self.strips.get(strip).map_or(0, |s| s.pdc_direct.delay)
+    }
+
+    /// Makes [`Self::process`] output a strip's signal instead of the master (offline only).
+    pub(crate) fn set_tap(&mut self, tap: Option<(usize, Tap)>) {
+        self.tap = tap.map(|(s, t)| (s.min(STRIPS - 1), t));
+    }
+
     /// Computes delay compensation: each strip's input latency is the largest output latency
     /// of anything feeding it, and every edge is delayed by the difference, so all paths into
     /// a strip arrive aligned.
@@ -600,6 +647,8 @@ impl MixerEngine {
             st.has_input = false;
             st.direct_l.fill(0.0);
             st.direct_r.fill(0.0);
+            st.frozen_l.fill(0.0);
+            st.frozen_r.fill(0.0);
             st.in_l.fill(0.0);
             st.in_r.fill(0.0);
             if s == MASTER {
@@ -637,6 +686,11 @@ impl MixerEngine {
                 t.has_input = true;
             }
         }
+        if self.tap.is_some() {
+            *out_l = self.tap_l;
+            *out_r = self.tap_r;
+            return;
+        }
         let m = &self.strips[MASTER];
         *out_l = m.out_l;
         *out_r = m.out_r;
@@ -650,6 +704,14 @@ impl MixerEngine {
         pctx: &PluginContext,
         telemetry: &Telemetry,
     ) {
+        let tap = match self.tap {
+            Some((t, point)) if t == s => {
+                self.tap_l = [0.0; Q];
+                self.tap_r = [0.0; Q];
+                Some(point)
+            }
+            _ => None,
+        };
         if !self.strips[s].needs_processing() {
             let st = &mut self.strips[s];
             st.out_l = [0.0; Q];
@@ -676,6 +738,19 @@ impl MixerEngine {
         st.pdc_direct.process(&mut l, &mut r);
         add(&mut l, &st.in_l);
         add(&mut r, &st.in_r);
+        if tap == Some(Tap::Input) {
+            self.tap_l = l;
+            self.tap_r = r;
+        }
+        let post = freeze_post_fx(s);
+        if !post {
+            add(&mut l, &st.frozen_l);
+            add(&mut r, &st.frozen_r);
+            if tap == Some(Tap::Freeze) {
+                self.tap_l = l;
+                self.tap_r = r;
+            }
+        }
         let ctx = FxContext {
             bpm,
             sidechain: has_key.then_some((&self.key_l[..], &self.key_r[..])),
@@ -707,6 +782,14 @@ impl MixerEngine {
                 }
             }
             telemetry.fx_meters[s][k].store(meter, Ordering::Relaxed);
+        }
+        if post {
+            add(&mut l, &st.frozen_l);
+            add(&mut r, &st.frozen_r);
+            if tap == Some(Tap::Freeze) {
+                self.tap_l = l;
+                self.tap_r = r;
+            }
         }
         let (mut peak_l, mut peak_r, mut sq_l, mut sq_r) = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
         for i in 0..Q {

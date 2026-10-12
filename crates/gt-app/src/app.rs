@@ -31,6 +31,7 @@ use gt_ui::views::{FirstRunState, SettingsPage, ShortcutEditorState};
 use gt_ui::widgets::MeterBallistics;
 use gt_ui::{Command, GloomTheme, Keymap};
 
+mod bounce;
 mod midi;
 mod plugins;
 mod prefs;
@@ -140,6 +141,8 @@ pub struct GloomApp {
     /// Remembered export settings.
     export_form: Option<ExportForm>,
     export_job: Option<std::thread::JoinHandle<Result<Vec<PathBuf>, gt_export::ExportError>>>,
+    /// Render to audio, consolidate or freeze in progress.
+    bounce_job: Option<bounce::BounceJob>,
     /// A short message shown at the bottom right, and when it appeared.
     toast: Option<(String, Instant)>,
     /// The user confirmed quitting (or there was nothing to save).
@@ -285,6 +288,7 @@ impl GloomApp {
             dialog: None,
             export_form: None,
             export_job: None,
+            bounce_job: None,
             toast: None,
             quit_confirmed: false,
             window_title: String::new(),
@@ -367,6 +371,11 @@ impl GloomApp {
         for c in &self.project.playlist.clips {
             if let ClipKind::Audio { source, .. } = &c.kind {
                 self.library.request(source, rate);
+            }
+        }
+        for t in &self.project.playlist.tracks {
+            if let Some(f) = &t.frozen {
+                self.library.request(&f.source, rate);
             }
         }
     }
@@ -465,6 +474,12 @@ impl GloomApp {
                     .clips
                     .iter()
                     .any(|c| matches!(&c.kind, ClipKind::Audio { source, .. } if source == src))
+                    || self
+                        .project
+                        .playlist
+                        .tracks
+                        .iter()
+                        .any(|t| t.frozen.as_ref().is_some_and(|f| f.source == *src))
             });
         if clips_waiting {
             self.push_song();
@@ -1087,6 +1102,7 @@ impl GloomApp {
                 self.main_view = MainView::PianoRoll;
                 self.push_song();
             }
+            PlaylistAction::Bounce { kind, track, clips } => self.on_bounce(kind, track, clips),
         }
     }
 
@@ -1675,8 +1691,8 @@ impl GloomApp {
     }
 
     fn file_cmd(&mut self, cmd: FileCmd) {
-        if self.export_job.is_some() {
-            self.toast("Wait for the export to finish");
+        if self.export_job.is_some() || self.bounce_job.is_some() {
+            self.toast("Wait for the render to finish");
             return;
         }
         match cmd {
@@ -1692,6 +1708,7 @@ impl GloomApp {
     /// Dialogs, the export job, autosave, the window title, closing and the toast.
     fn document_frame(&mut self, ctx: &egui::Context, theme: &GloomTheme) {
         self.poll_export();
+        self.poll_bounce();
         if let Some(mut d) = self.dialog.take() {
             let action = files::show(ctx, theme, &mut d);
             self.dialog = Some(d);
@@ -1699,7 +1716,7 @@ impl GloomApp {
                 self.on_dialog(a);
             }
         }
-        if self.export_job.is_some() {
+        if self.export_job.is_some() || self.bounce_job.is_some() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
         self.autosave();

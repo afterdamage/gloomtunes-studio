@@ -33,7 +33,7 @@ pub use params::{ChannelParam, ParamId, StripParam, MASTER_VOLUME};
 pub use peaks::Peaks;
 pub use playlist::{
     AudioEdit, AudioTake, AutoPoint, Automation, Clip, ClipId, ClipKind, Curve, Fade, FadeCurve,
-    Marker, Playlist, Track, TrackId,
+    Frozen, Marker, Playlist, Track, TrackId,
 };
 pub use plugin::{
     PluginFormat, PluginInstanceId, PluginKind, PluginOwner, PluginParamInfo, PluginRef,

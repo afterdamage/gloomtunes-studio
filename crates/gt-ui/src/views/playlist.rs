@@ -298,6 +298,28 @@ pub enum PlaylistAction {
     Load(SampleSource),
     /// Open a pattern for editing.
     EditPattern(PatternId),
+    /// Render, consolidate, freeze or unfreeze a track (D105).
+    Bounce {
+        /// Which.
+        kind: BounceKind,
+        /// The track.
+        track: TrackId,
+        /// The selected clips on the track (none: the loop region, or the whole track).
+        clips: Vec<ClipId>,
+    },
+}
+
+/// Offline renders of a track, from its header menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BounceKind {
+    /// Render the selected clips (or the loop region) to a new audio clip on a new track.
+    Render,
+    /// Merge the selected clips into one rendered clip.
+    Consolidate,
+    /// Render the track through its insert and play that instead of its clips.
+    Freeze,
+    /// Play the clips again.
+    Unfreeze,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -410,7 +432,16 @@ pub fn playlist(
     }
 
     paint(ui, theme, st, &geo, area, ruler, project, &view);
-    changed |= track_headers(ui, theme, st, headers, &geo, project, view.inputs);
+    changed |= track_headers(
+        ui,
+        theme,
+        st,
+        headers,
+        &geo,
+        project,
+        view.inputs,
+        &mut actions,
+    );
     let (popup_timing, popup_changed) = show_popup(ui, theme, st, project);
     let timing = timing | popup_timing;
     changed |= popup_changed;
@@ -2380,6 +2411,7 @@ fn paint_curve(
 
 /// Track headers: colour, name, mute, solo and the strip audio clips play into. Returns true
 /// if a track changed.
+#[allow(clippy::too_many_arguments)]
 fn track_headers(
     ui: &mut Ui,
     theme: &GloomTheme,
@@ -2388,6 +2420,7 @@ fn track_headers(
     geo: &Geo,
     project: &mut Project,
     inputs: &[gt_core::AudioInput],
+    actions: &mut Vec<PlaylistAction>,
 ) -> bool {
     st.armed
         .retain(|id| project.playlist.tracks.iter().any(|t| t.id == *id));
@@ -2424,6 +2457,18 @@ fn track_headers(
         );
         let swatch = Rect::from_min_size(r.min + vec2(2.0, 2.0), vec2(5.0, r.height() - 4.0));
         hui.painter().rect_filled(swatch, 1.0, color(t.color));
+        if t.frozen.is_some() {
+            // Frozen: the swatch is hollow and the clips play from the render.
+            hui.painter()
+                .rect_filled(swatch.shrink(1.0), 0.0, theme.bg_widget);
+            hui.painter().text(
+                pos2(r.right() - 4.0, r.bottom() - 2.0),
+                Align2::RIGHT_BOTTOM,
+                "frozen",
+                FontId::proportional(10.0),
+                theme.accent,
+            );
+        }
         let line1 = Rect::from_min_size(r.min + vec2(10.0, 3.0), vec2(r.width() - 76.0, 16.0));
         if hui
             .put(
@@ -2515,6 +2560,15 @@ fn track_headers(
         }
         let id = t.id;
         let mut col = t.color;
+        let frozen = t.frozen.is_some();
+        let selected: Vec<ClipId> = project
+            .playlist
+            .clips
+            .iter()
+            .filter(|c| c.track == id && st.selected.contains(&c.id))
+            .map(|c| c.id)
+            .collect();
+        let mut bounce = None;
         resp.context_menu(|ui| {
             ui.horizontal(|ui| {
                 for c in TRACK_COLORS {
@@ -2530,6 +2584,44 @@ fn track_headers(
                 egui::color_picker::color_edit_button_srgb(ui, &mut col);
             });
             ui.separator();
+            let render = if selected.is_empty() {
+                "Render loop region to audio"
+            } else {
+                "Render selected clips to audio"
+            };
+            if ui
+                .add_enabled(!frozen, egui::Button::new(render))
+                .on_hover_text("Render to a new audio clip on a new track; mutes what it replaces")
+                .clicked()
+            {
+                bounce = Some(BounceKind::Render);
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    !frozen && !selected.is_empty(),
+                    egui::Button::new("Consolidate selected clips"),
+                )
+                .on_hover_text("Merge the selected clips into one rendered audio clip")
+                .clicked()
+            {
+                bounce = Some(BounceKind::Consolidate);
+                ui.close();
+            }
+            let (label, kind) = if frozen {
+                ("Unfreeze", BounceKind::Unfreeze)
+            } else {
+                ("Freeze", BounceKind::Freeze)
+            };
+            if ui
+                .button(label)
+                .on_hover_text("Play a render of the track (through its insert) to save CPU")
+                .clicked()
+            {
+                bounce = Some(kind);
+                ui.close();
+            }
+            ui.separator();
             if ui.button("Insert track above").clicked() {
                 insert_at = Some(row);
                 ui.close();
@@ -2539,6 +2631,13 @@ fn track_headers(
                 ui.close();
             }
         });
+        if let Some(kind) = bounce {
+            actions.push(PlaylistAction::Bounce {
+                kind,
+                track: id,
+                clips: selected,
+            });
+        }
         if col != project.playlist.tracks[row].color {
             project.playlist.tracks[row].color = col;
             changed = true;
