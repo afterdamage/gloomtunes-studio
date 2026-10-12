@@ -16,6 +16,18 @@ pub struct MidiBinding {
     pub param: ParamId,
 }
 
+/// Live input from one MIDI port (and channel) that plays a fixed rack channel instead of the
+/// selected one (Prompt 16). Ports are named as the system names them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MidiRoute {
+    /// Input port name.
+    pub port: String,
+    /// MIDI channel 0 to 15, or every channel of the port.
+    pub channel: Option<u8>,
+    /// The rack channel it plays.
+    pub target: crate::ChannelId,
+}
+
 /// Highest controller number that can be learned.
 pub const MAX_LEARN_CC: u8 = 119;
 

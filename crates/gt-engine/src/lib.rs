@@ -39,7 +39,10 @@ pub use gt_core::MAX_CHANNELS;
 pub use input::{
     CalibrationSink, InputFeed, InputRoute, InputRoutes, RecMark, RecordSink, MAX_RECORD_LANES,
 };
-pub use live::{LiveInput, LiveNote, LIVE_CAPACITY};
+pub use live::{
+    clock_ns, LiveEvent, LiveInput, LiveKind, LiveNote, LiveRoutes, KEYBOARD, LIVE_CAPACITY,
+    ROUTE_PORTS,
+};
 pub use load::LoadMeter;
 pub use mixer::{create_effect, EffectBox, MixerParams, StripParams, MAX_PDC_FRAMES};
 pub use mixer::{freeze_post_fx, Tap};
@@ -224,7 +227,7 @@ pub struct EngineHandle {
     commands: Producer<EngineCommand>,
     events: Consumer<EngineEvent>,
     garbage: Consumer<Garbage>,
-    live: Option<Producer<LiveNote>>,
+    live: Option<Producer<LiveEvent>>,
     telemetry: Arc<Telemetry>,
     config: EngineConfig,
 }
@@ -257,7 +260,7 @@ impl EngineHandle {
 
     /// The sending end of this engine's live-note queue, for [`LiveInput::connect`]. Returns
     /// it once.
-    pub fn take_live_producer(&mut self) -> Option<Producer<LiveNote>> {
+    pub fn take_live_producer(&mut self) -> Option<Producer<LiveEvent>> {
         self.live.take()
     }
 

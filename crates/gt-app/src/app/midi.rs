@@ -3,9 +3,9 @@
 use std::path::Path;
 
 use gt_core::{ParamId, Tick};
-use gt_engine::{EngineCommand, EngineEvent, SongSnapshot, TransportState};
+use gt_engine::{EngineCommand, EngineEvent, LiveRoutes, SongSnapshot, TransportState};
 use gt_export::smf::{self, SmfScope};
-use gt_ui::views::{MidiAction, MidiPortRow, PlayState};
+use gt_ui::views::{MidiAction, MidiPortRow, MidiRouteRow, PlayState};
 
 use super::{GloomApp, MainView};
 use crate::files::Dialog;
@@ -84,6 +84,12 @@ impl GloomApp {
             (self.rack.selected < self.project.channels.len()).then_some(self.rack.selected as u16);
         if self.sent_live_slot != Some(slot) && self.try_send(EngineCommand::SetLiveChannel(slot)) {
             self.sent_live_slot = Some(slot);
+        }
+        let routes = self.live_routes();
+        if self.sent_routes.as_ref() != Some(&routes)
+            && self.try_send(EngineCommand::SetLiveRoutes(Box::new(routes.clone())))
+        {
+            self.sent_routes = Some(routes);
         }
 
         let seen = self.midi.activity();
@@ -203,6 +209,24 @@ impl GloomApp {
         self.pending_edit = Some("Record notes");
     }
 
+    /// The project's input routes for the engine, by the numbers of the ports seen so far.
+    /// Whole-port routes go first so a route for one of the port's channels wins.
+    fn live_routes(&self) -> LiveRoutes {
+        let mut routes = LiveRoutes::default();
+        let mut list: Vec<_> = self.project.midi_routes.iter().collect();
+        list.sort_by_key(|r| r.channel.is_some());
+        for r in list {
+            let (Some(port), Some(slot)) = (
+                self.midi.port_number(&r.port),
+                self.project.channel_index(r.target),
+            ) else {
+                continue;
+            };
+            routes.set(port, r.channel, Some(slot as u16));
+        }
+        routes
+    }
+
     pub(super) fn start_learning(&mut self, param: ParamId) {
         self.learning = Some(param);
         if self.midi.ports().iter().all(|p| !p.connected) {
@@ -225,9 +249,37 @@ impl GloomApp {
             .collect();
         m.error = self.midi.error();
         m.buffer_ms = self.audio.buffer_ms().unwrap_or(0.0);
+        let p = &self.project;
+        m.channels = p.channels.iter().map(|c| c.name.clone()).collect();
+        m.routes = p
+            .midi_routes
+            .iter()
+            .filter_map(|r| {
+                Some(MidiRouteRow {
+                    port: r.port.clone(),
+                    channel: r.channel,
+                    target: p.channel_index(r.target)?,
+                })
+            })
+            .collect();
         for a in gt_ui::views::midi_panel(ui, theme, m) {
             match a {
                 MidiAction::SetPortEnabled(name, on) => self.midi.set_enabled(&name, on),
+                MidiAction::RoutesChanged => {
+                    let p = &mut self.project;
+                    p.midi_routes = m
+                        .routes
+                        .iter()
+                        .filter_map(|r| {
+                            Some(gt_core::MidiRoute {
+                                port: r.port.clone(),
+                                channel: r.channel,
+                                target: p.channels.get(r.target)?.id,
+                            })
+                        })
+                        .collect();
+                    self.pending_edit = Some("MIDI routing");
+                }
             }
         }
     }

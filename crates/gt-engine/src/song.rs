@@ -667,6 +667,8 @@ pub struct ChannelParams {
     pub route: u8,
     /// The plugin instance it plays (when `kind` is `Plugin`).
     pub plugin: Option<gt_core::PluginInstanceId>,
+    /// Pitch bend range in semitones (built-in instruments; plugins use their own).
+    pub bend_range: f32,
 }
 
 impl Default for ChannelParams {
@@ -684,6 +686,7 @@ impl Default for ChannelParams {
             adsr: Adsr::default(),
             route: 0,
             plugin: None,
+            bend_range: Channel::DEFAULT_BEND,
         }
     }
 }
@@ -697,6 +700,7 @@ impl ChannelParams {
             silenced,
             pan: ch.pan.clamp(-1.0, 1.0),
             route: ch.insert.min(gt_core::STRIPS - 1) as u8,
+            bend_range: ch.bend_range.clamp(0.0, Channel::MAX_BEND),
             ..Self::default()
         };
         match &ch.instrument {
@@ -801,6 +805,8 @@ fn synth_settings_of(
                 DocSource::Velocity => ModSource::Velocity,
                 DocSource::Note => ModSource::Note,
                 DocSource::Random => ModSource::Random,
+                DocSource::ModWheel => ModSource::ModWheel,
+                DocSource::Aftertouch => ModSource::Aftertouch,
             },
             dest: match d.dest {
                 DocDest::Off => ModDest::Off,

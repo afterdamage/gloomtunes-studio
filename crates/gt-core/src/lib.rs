@@ -25,9 +25,11 @@ pub mod synth;
 pub mod time;
 
 pub use effects::{EffectKind, EffectSlot};
-pub use midi::{MidiBinding, MAX_LEARN_CC, MAX_MIDI_BINDINGS};
+pub use midi::{MidiBinding, MidiRoute, MAX_LEARN_CC, MAX_MIDI_BINDINGS};
 pub use mixer::{Mixer, MixerStrip, StripKind, FX_SLOTS, INSERTS, MASTER, SENDS, STRIPS};
-pub use modulation::{LfoRate, LfoShape, ModSourceKind, Modulator, ModulatorId, MAX_MODULATORS};
+pub use modulation::{
+    LfoRate, LfoShape, MidiControl, ModSourceKind, Modulator, ModulatorId, MAX_MODULATORS,
+};
 pub use param::{ParamCurve, ParamInfo, ParamUnit};
 pub use params::{ChannelParam, ParamId, StripParam, MASTER_VOLUME};
 pub use peaks::Peaks;

@@ -12,7 +12,7 @@ use crate::command::{EngineCommand, EngineEvent, Garbage, TransportState};
 use crate::control::{beats_of, ModClock, ModPlan, ParamDest};
 use crate::denormal::DenormalGuard;
 use crate::input::InputEngine;
-use crate::live::LiveNote;
+use crate::live::{clock_ns, LiveEvent, LiveKind, LiveRoutes, KEYBOARD, ROUTE_PORTS};
 use crate::mixer::MixerEngine;
 use crate::plugin::{PluginContext, PluginTable};
 use crate::song::{ChannelParams, SongSnapshot};
@@ -36,8 +36,12 @@ const CLIP_FADE_S: f64 = 0.002;
 
 /// Commands applied per quantum at most, so a flood of commands cannot stall a callback.
 const MAX_COMMANDS_PER_QUANTUM: usize = 64;
-/// Live notes applied per quantum at most.
+/// Live events taken from the queue per quantum at most.
 const MAX_LIVE_PER_QUANTUM: usize = 64;
+/// Live events waiting for their frame (a device period's worth at most).
+const LIVE_WAIT: usize = 256;
+/// Held-note sources: the routable ports, then one for the keyboard and every other port.
+const LIVE_SOURCES: usize = ROUTE_PORTS + 1;
 
 /// A count-in in progress: clicks on every beat from `start`, then play at `end`.
 #[derive(Debug, Clone, Copy)]
@@ -64,7 +68,7 @@ pub struct AudioProcessor {
     commands: Consumer<EngineCommand>,
     events: Producer<EngineEvent>,
     garbage: Producer<Garbage>,
-    live: Consumer<LiveNote>,
+    live: Consumer<LiveEvent>,
     out_channels: usize,
     sample_rate: f64,
 
@@ -115,9 +119,20 @@ pub struct AudioProcessor {
     metronome: bool,
     count_in: Option<CountIn>,
 
-    /// Slot that live notes play, and per key the slot + 1 holding a live note (0: none).
+    /// Slot that live input plays unless routed elsewhere.
     live_slot: Option<u16>,
-    live_held: [u16; 128],
+    /// Where each input port and MIDI channel plays.
+    live_routes: Box<LiveRoutes>,
+    /// Per source, MIDI channel and key, the slot + 1 holding a live note (0: none).
+    live_held: Box<[u16]>,
+    /// Live events waiting for their frame: (engine frame, event), in arrival order.
+    live_wait: Box<[(u64, LiveEvent); LIVE_WAIT]>,
+    live_wait_len: usize,
+    /// The current device callback: [`clock_ns`] at its start, its frames, and the engine
+    /// frame it starts to output.
+    cb_ns: u64,
+    cb_frames: u64,
+    cb_out: u64,
 
     tone: SineOsc,
     tone_ramp: LinearRamp,
@@ -148,7 +163,7 @@ impl AudioProcessor {
         commands: Consumer<EngineCommand>,
         events: Producer<EngineEvent>,
         garbage: Producer<Garbage>,
-        live: Consumer<LiveNote>,
+        live: Consumer<LiveEvent>,
     ) -> Self {
         let sr = config.sample_rate.max(1) as f32;
         let mut preview = ChannelSlot::new(sr);
@@ -192,7 +207,13 @@ impl AudioProcessor {
             metronome: true,
             count_in: None,
             live_slot: None,
-            live_held: [0; 128],
+            live_routes: Box::default(),
+            live_held: vec![0; LIVE_SOURCES * 16 * 128].into_boxed_slice(),
+            live_wait: Box::new([(0, LiveEvent::from(crate::LiveNote::off(0))); LIVE_WAIT]),
+            live_wait_len: 0,
+            cb_ns: 0,
+            cb_frames: 0,
+            cb_out: 0,
             tone: SineOsc::new(sr, TEST_TONE_HZ),
             tone_ramp: LinearRamp::new(0.0),
             tone_gain: db_to_gain(TEST_TONE_DBFS),
@@ -236,10 +257,19 @@ impl AudioProcessor {
     /// get silence); a mono device gets their average. A trailing partial frame (which a correct
     /// device never delivers) is zeroed.
     pub fn process(&mut self, out: &mut [f32]) {
+        self.process_at(out, clock_ns());
+    }
+
+    /// [`Self::process`] for a callback that started at `now_ns` on the [`clock_ns`] clock,
+    /// which places live events within it (tests pass their own times).
+    pub fn process_at(&mut self, out: &mut [f32], now_ns: u64) {
         // Subnormals flush to zero while rendering, on the device thread and in export alike.
         let _ftz = DenormalGuard::new();
         let ch = self.out_channels;
         let frames = out.len() / ch;
+        self.cb_ns = now_ns;
+        self.cb_frames = frames as u64;
+        self.cb_out = self.frame_clock - (Q - self.fifo_pos) as u64;
         let mut peak = 0.0_f32;
         let mut written = 0;
         while written < frames {
@@ -278,7 +308,6 @@ impl AudioProcessor {
     fn render_quantum(&mut self) {
         self.apply_commands();
         let count_click = self.advance_count_in();
-        self.apply_live();
         self.input.read(&self.telemetry);
 
         self.quantum_l.fill(0.0);
@@ -290,6 +319,7 @@ impl AudioProcessor {
             self.song.as_deref(),
             &mut self.scheduled,
         );
+        self.apply_live();
 
         // Metronome, sample-accurate: render up to each beat, trigger, continue.
         let mut cursor = 0;
@@ -716,8 +746,27 @@ impl AudioProcessor {
                 dt: Q as f64 / self.sample_rate,
                 bpm: self.transport.bpm_at(self.frame_clock),
                 beats: tick.map(beats_of),
+                mod_wheel: 0.0,
+                aftertouch: 0.0,
             };
+            let live_slot = self.live_slot;
             for target in &mut plan.targets {
+                // MIDI sources follow the target's own channel, else the selected one.
+                let slot = match target.dest {
+                    ParamDest::Channel { slot, .. }
+                    | ParamDest::Synth { slot, .. }
+                    | ParamDest::SynthMod { slot, .. } => Some(slot),
+                    _ => live_slot,
+                };
+                let expr = slot
+                    .and_then(|s| self.channels.get(usize::from(s)))
+                    .map(ChannelSlot::expression)
+                    .unwrap_or_default();
+                let clock = ModClock {
+                    mod_wheel: expr.mod_wheel,
+                    aftertouch: expr.pressure,
+                    ..clock
+                };
                 let base_at = |t: Option<f64>| match (target.lane, t.filter(|_| has_lanes), song) {
                     (Some(i), Some(t), Some(song)) => song
                         .automation
@@ -997,7 +1046,18 @@ impl AudioProcessor {
                 }
             }
             EngineCommand::SetLiveChannel(slot) => {
-                self.live_slot = slot.filter(|&s| usize::from(s) < self.channels.len());
+                let slot = slot.filter(|&s| usize::from(s) < self.channels.len());
+                if slot != self.live_slot {
+                    // The pedal and the wheels belonged to the old channel: let them go.
+                    if let Some(old) = self.live_slot {
+                        self.reset_expression(usize::from(old));
+                    }
+                    self.live_slot = slot;
+                }
+            }
+            EngineCommand::SetLiveRoutes(routes) => {
+                let old = std::mem::replace(&mut self.live_routes, routes);
+                self.retire(Garbage::LiveRoutes(old));
             }
             EngineCommand::CountIn { bars } => self.start_count_in(bars),
             EngineCommand::SetInput(feed) => {
@@ -1107,39 +1167,158 @@ impl AudioProcessor {
         Some(click)
     }
 
-    /// Plays the live notes that arrived since the last quantum, at its start, and reports
-    /// them for recording while the transport plays.
+    /// Takes the live events that arrived, and plays those due in this quantum at their
+    /// frames. An event plays one device period after it arrived, at the same place within the
+    /// period (D109): notes keep their timing however the callbacks fall. Events with no time
+    /// play at once.
     fn apply_live(&mut self) {
-        let playing = self.transport.state() == TransportState::Playing;
-        let tick = self.transport.position_at(self.frame_clock);
+        let q0 = self.frame_clock;
         for _ in 0..MAX_LIVE_PER_QUANTUM {
-            let Ok(n) = self.live.pop() else {
+            let Ok(e) = self.live.pop() else {
                 break;
             };
-            let k = usize::from(n.key.min(127));
-            if n.is_on() {
-                // A key struck again before its release ends the old note first.
-                if let Some(old) = self.live_held[k].checked_sub(1) {
-                    self.slot_note_off(usize::from(old), n.key);
-                    self.live_held[k] = 0;
-                }
-                if let Some(slot) = self.live_slot {
-                    if usize::from(slot) < self.channels.len() {
-                        self.slot_note_on(usize::from(slot), n.key, n.velocity);
-                        self.live_held[k] = slot + 1;
-                    }
-                }
-            } else if let Some(slot) = self.live_held[k].checked_sub(1) {
-                self.slot_note_off(usize::from(slot), n.key);
-                self.live_held[k] = 0;
+            let at = self.live_frame(e.at_ns);
+            if self.live_wait_len < LIVE_WAIT {
+                self.live_wait[self.live_wait_len] = (at, e);
+                self.live_wait_len += 1;
+            } else {
+                self.apply_live_event(&e, 0);
             }
-            if playing {
-                self.post(EngineEvent::LiveNote {
+        }
+        // Due events leave the list in order; the rest move up.
+        let mut kept = 0;
+        for i in 0..self.live_wait_len {
+            let (at, e) = self.live_wait[i];
+            if at < q0 + Q as u64 {
+                self.apply_live_event(&e, at.saturating_sub(q0) as u32);
+            } else {
+                self.live_wait[kept] = (at, e);
+                kept += 1;
+            }
+        }
+        self.live_wait_len = kept;
+    }
+
+    /// The engine frame where an event that arrived at `at_ns` plays.
+    fn live_frame(&self, at_ns: u64) -> u64 {
+        if at_ns == 0 || self.cb_frames == 0 {
+            return 0;
+        }
+        let period_ns = self.cb_frames as f64 * 1e9 / self.sample_rate;
+        let into = (at_ns as f64 + period_ns - self.cb_ns as f64) * self.sample_rate / 1e9;
+        self.cb_out + into.clamp(0.0, (self.cb_frames - 1) as f64) as u64
+    }
+
+    /// Plays one live event at frame `offset` of this quantum: notes through the event list
+    /// (so they start at their frame), expression at once.
+    fn apply_live_event(&mut self, e: &LiveEvent, offset: u32) {
+        let offset = offset.min(Q as u32 - 1);
+        let slot = self
+            .live_routes
+            .slot(e.port, e.channel, self.live_slot)
+            .filter(|&s| usize::from(s) < self.channels.len());
+        let playing = self.transport.state() == TransportState::Playing;
+        let tick = self
+            .transport
+            .position_at(self.frame_clock + u64::from(offset));
+        let n = match e.kind {
+            LiveKind::Note(n) => n,
+            kind => {
+                if let Some(slot) = slot {
+                    self.slot_expression(usize::from(slot), kind, offset);
+                }
+                return;
+            }
+        };
+        let source = match e.port {
+            p if usize::from(p) < ROUTE_PORTS => usize::from(p),
+            _ => ROUTE_PORTS,
+        };
+        let _ = KEYBOARD;
+        let h = (source * 16 + usize::from(e.channel & 0x0F)) * 128 + usize::from(n.key & 0x7F);
+        let at = Tick(tick as i64);
+        let ev = |kind| ScheduledEvent {
+            offset,
+            tick: at,
+            kind,
+        };
+        if n.is_on() {
+            // A key struck again before its release ends the old note first.
+            if let Some(old) = self.live_held[h].checked_sub(1) {
+                self.scheduled.insert(ev(EventKind::NoteOff {
+                    slot: old,
+                    key: n.key,
+                }));
+                self.live_held[h] = 0;
+            }
+            if let Some(slot) = slot {
+                self.scheduled.insert(ev(EventKind::NoteOn {
+                    slot,
                     key: n.key,
                     velocity: n.velocity,
-                    tick,
-                });
+                }));
+                self.live_held[h] = slot + 1;
             }
+        } else if let Some(old) = self.live_held[h].checked_sub(1) {
+            self.scheduled.insert(ev(EventKind::NoteOff {
+                slot: old,
+                key: n.key,
+            }));
+            self.live_held[h] = 0;
+        }
+        if playing {
+            self.post(EngineEvent::LiveNote {
+                key: n.key,
+                velocity: n.velocity,
+                tick,
+            });
+        }
+    }
+
+    /// Bend, sustain, mod wheel or aftertouch on a channel slot: built-in instruments take it
+    /// at once, plugins as MIDI (polyphonic aftertouch as a note expression) at `offset`.
+    fn slot_expression(&mut self, slot: usize, kind: LiveKind, offset: u32) {
+        let Some(ch) = self.channels.get_mut(slot) else {
+            return;
+        };
+        if ch.is_plugin() {
+            let seven = |v: f32| (v.clamp(0.0, 1.0) * 127.0).round() as u8;
+            let msg = match kind {
+                LiveKind::Bend(b) => {
+                    let v = ((b.clamp(-1.0, 1.0) + 1.0) * 8192.0).round().min(16383.0) as u16;
+                    [0xE0, (v & 0x7F) as u8, (v >> 7) as u8]
+                }
+                LiveKind::Sustain(down) => [0xB0, 64, if down { 127 } else { 0 }],
+                LiveKind::ModWheel(v) => [0xB0, 1, seven(v)],
+                LiveKind::Pressure(v) => [0xD0, seven(v), 0],
+                LiveKind::KeyPressure { key, value } => {
+                    self.plugins.key_pressure(ch.plugin, offset, key, value);
+                    return;
+                }
+                LiveKind::Note(_) => return,
+            };
+            self.plugins.midi(ch.plugin, offset, msg);
+            return;
+        }
+        match kind {
+            LiveKind::Bend(b) => ch.set_bend(b),
+            LiveKind::Sustain(down) => ch.set_sustain(down),
+            LiveKind::ModWheel(v) => ch.set_mod_wheel(v),
+            LiveKind::Pressure(v) => ch.set_pressure(v),
+            LiveKind::KeyPressure { key, value } => ch.set_key_pressure(key, value),
+            LiveKind::Note(_) => {}
+        }
+    }
+
+    /// Centres the bend, lifts the pedal and zeroes the wheels of a slot.
+    fn reset_expression(&mut self, slot: usize) {
+        for kind in [
+            LiveKind::Sustain(false),
+            LiveKind::Bend(0.0),
+            LiveKind::ModWheel(0.0),
+            LiveKind::Pressure(0.0),
+        ] {
+            self.slot_expression(slot, kind, 0);
         }
     }
 
@@ -1606,6 +1785,104 @@ mod tests {
         let mut tail = vec![0.0; 48_000];
         p.process(&mut tail);
         assert!(tail[40_000..].iter().all(|s| s.abs() < 1e-4));
+    }
+
+    /// A synth on `slot` with the metronome off and a connected live input.
+    fn live_synth(slots: &[u16]) -> (EngineHandle, AudioProcessor, crate::LiveInput) {
+        let (mut h, p) = engine(48_000, 1);
+        let live = crate::LiveInput::default();
+        live.connect(h.take_live_producer().unwrap());
+        for &slot in slots {
+            h.send(EngineCommand::SetChannelParams {
+                slot,
+                params: Box::new(crate::ChannelParams {
+                    kind: crate::InstrumentKind::Synth,
+                    gain: 1.0,
+                    ..crate::ChannelParams::default()
+                }),
+            })
+            .unwrap();
+        }
+        h.send(EngineCommand::SetMetronome(false)).unwrap();
+        (h, p, live)
+    }
+
+    fn first_sound(buf: &[f32]) -> Option<usize> {
+        buf.iter().position(|s| s.abs() > 1e-6)
+    }
+
+    #[test]
+    fn live_notes_play_one_period_later_at_their_place_in_the_period() {
+        let ms = 1_000_000;
+        // 480-frame callbacks (10 ms at 48 kHz), the first at 1 s. A key struck `into` ns after
+        // the second callback started plays that far into the third.
+        for (into, frame) in [(2_500_000, 120), (7_500_000, 360), (0, 0)] {
+            let (mut h, mut p, live) = live_synth(&[0]);
+            h.send(EngineCommand::SetLiveChannel(Some(0))).unwrap();
+            let mut buf = vec![0.0; 480];
+            p.process_at(&mut buf, 1_000 * ms);
+            p.process_at(&mut buf, 1_010 * ms);
+            assert_eq!(first_sound(&buf), None);
+            live.send(crate::LiveEvent {
+                kind: crate::LiveKind::Note(crate::LiveNote::on(60, 1.0)),
+                port: 0,
+                channel: 0,
+                at_ns: 1_010 * ms + into,
+            });
+            p.process_at(&mut buf, 1_020 * ms);
+            let f = first_sound(&buf).unwrap();
+            assert!(
+                (frame..frame + 3).contains(&f),
+                "{into} ns: at {f}, not {frame}"
+            );
+        }
+        // No time (the computer keyboard): at the next quantum.
+        let (mut h, mut p, live) = live_synth(&[0]);
+        h.send(EngineCommand::SetLiveChannel(Some(0))).unwrap();
+        let mut buf = vec![0.0; 480];
+        p.process_at(&mut buf, 1_000 * ms);
+        live.send(crate::LiveNote::on(60, 1.0));
+        p.process_at(&mut buf, 1_010 * ms);
+        assert!(first_sound(&buf).unwrap() < 3);
+    }
+
+    #[test]
+    fn routed_ports_and_channels_play_their_own_instruments() {
+        let (mut h, mut p, live) = live_synth(&[1]);
+        let mut routes = crate::LiveRoutes::default();
+        routes.set(0, Some(3), Some(1));
+        h.send(EngineCommand::SetLiveRoutes(Box::new(routes)))
+            .unwrap();
+        // The selected channel (slot 0) has no instrument: only the route sounds.
+        h.send(EngineCommand::SetLiveChannel(Some(0))).unwrap();
+        let note = |port, channel, on| crate::LiveEvent {
+            kind: crate::LiveKind::Note(if on {
+                crate::LiveNote::on(60, 1.0)
+            } else {
+                crate::LiveNote::off(60)
+            }),
+            port,
+            channel,
+            at_ns: 0,
+        };
+        let mut buf = vec![0.0; 4800];
+        for (port, channel) in [(0, 0), (1, 3), (crate::KEYBOARD, 3)] {
+            live.send(note(port, channel, true));
+            p.process(&mut buf);
+            assert_eq!(first_sound(&buf), None, "port {port} channel {channel}");
+            live.send(note(port, channel, false));
+        }
+        live.send(note(0, 3, true));
+        p.process(&mut buf);
+        assert!(first_sound(&buf).is_some());
+        // Rerouting while the key is down: its release still reaches the instrument it played.
+        h.send(EngineCommand::SetLiveRoutes(Box::default()))
+            .unwrap();
+        p.process(&mut buf);
+        live.send(note(0, 3, false));
+        let mut tail = vec![0.0_f32; 96_000];
+        p.process(&mut tail);
+        assert!(tail[80_000..].iter().all(|s| s.abs() < 1e-4));
     }
 
     #[test]

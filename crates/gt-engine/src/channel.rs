@@ -5,7 +5,7 @@ use std::sync::Arc;
 use gt_core::params::ChannelParam;
 use gt_core::synth::{SynthParam, MOD_SLOTS};
 use gt_core::{SampleData, ROOT_KEY};
-use gt_dsp::{AdsrParams, GloomSynth, LinearRamp, SamplerVoice, VoiceRegion};
+use gt_dsp::{AdsrParams, Expression, GloomSynth, LinearRamp, SamplerVoice, VoiceRegion};
 
 use crate::song::{ChannelParams, InstrumentKind, PatchValues};
 
@@ -53,6 +53,12 @@ pub(crate) struct ChannelSlot {
     ramp_frames: u32,
     /// Plugin table entry running this channel's instrument plugin.
     pub(crate) plugin: Option<u8>,
+    /// Pitch bend (-1 to 1), mod wheel and aftertouch from live input (Prompt 16).
+    bend: f32,
+    expr: Expression,
+    /// Sustain pedal down, and the sampler voices it holds after their key was let go.
+    sustain: bool,
+    sustained: [bool; VOICES_PER_CHANNEL],
 }
 
 /// Equal-power pan law: -3 dB per side at centre, so a sound keeps its loudness as it moves.
@@ -76,6 +82,10 @@ impl ChannelSlot {
             gain_r: LinearRamp::new(0.0),
             ramp_frames: (sample_rate * GAIN_RAMP_S) as u32,
             plugin: None,
+            bend: 0.0,
+            expr: Expression::default(),
+            sustain: false,
+            sustained: [false; VOICES_PER_CHANNEL],
         }
     }
 
@@ -144,6 +154,9 @@ impl ChannelSlot {
             self.kill_all();
         }
         self.params = p;
+        if self.bend != 0.0 {
+            self.set_bend(self.bend);
+        }
         if p.kind == InstrumentKind::Synth {
             self.synth.set_settings(&self.effective_patch().settings());
             self.ctl.synth_dirty = false;
@@ -260,7 +273,7 @@ impl ChannelSlot {
             return;
         }
         let p = self.effective();
-        let semis = p.pitch + f32::from(key) - f32::from(ROOT_KEY);
+        let semis = p.pitch + self.expr.bend_semis + f32::from(key) - f32::from(ROOT_KEY);
         let step =
             f64::from((semis / 12.0).exp2()) * f64::from(sample.sample_rate) / f64::from(self.sr);
         let region = VoiceRegion::from_fractions(frames, p.start, p.end, p.looped);
@@ -283,6 +296,7 @@ impl ChannelSlot {
                 oldest
             });
         self.voices[idx].trigger(key, gain, step, region, self.env, age);
+        self.sustained[idx] = false;
     }
 
     /// Starts a note that has been under way for `into_s` seconds (playback started or
@@ -307,7 +321,7 @@ impl ChannelSlot {
             return;
         }
         let frames = sample.frames();
-        let semis = p.pitch + f32::from(key) - f32::from(ROOT_KEY);
+        let semis = p.pitch + self.expr.bend_semis + f32::from(key) - f32::from(ROOT_KEY);
         let step =
             f64::from((semis / 12.0).exp2()) * f64::from(sample.sample_rate) / f64::from(self.sr);
         let region = VoiceRegion::from_fractions(frames, p.start, p.end, p.looped);
@@ -329,12 +343,17 @@ impl ChannelSlot {
         }
     }
 
-    /// Releases held voices playing `key` (one-shot voices ignore it).
+    /// Releases held voices playing `key` (one-shot voices ignore it). With the sustain
+    /// pedal down they keep sounding until it comes up.
     pub(crate) fn note_off(&mut self, key: u8) {
         self.synth.note_off(key);
-        for v in &mut self.voices {
-            if v.is_held() && v.key() == key {
-                v.release();
+        for (v, s) in self.voices.iter_mut().zip(&mut self.sustained) {
+            if v.is_held() && !*s && v.key() == key {
+                if self.sustain {
+                    *s = true;
+                } else {
+                    v.release();
+                }
             }
         }
     }
@@ -345,6 +364,7 @@ impl ChannelSlot {
         for v in &mut self.voices {
             v.release();
         }
+        self.sustained = [false; VOICES_PER_CHANNEL];
     }
 
     /// Silences every voice at once.
@@ -353,6 +373,57 @@ impl ChannelSlot {
         for v in &mut self.voices {
             v.kill();
         }
+        self.sustained = [false; VOICES_PER_CHANNEL];
+    }
+
+    /// Sustain pedal down or up. Up releases the voices whose keys were let go meanwhile.
+    pub(crate) fn set_sustain(&mut self, down: bool) {
+        self.sustain = down;
+        self.synth.set_sustain(down);
+        if !down {
+            for (v, s) in self.voices.iter_mut().zip(&mut self.sustained) {
+                if std::mem::take(s) {
+                    v.release();
+                }
+            }
+        }
+    }
+
+    /// Pitch bend, -1 to 1, times the channel's bend range. Sounding voices follow.
+    pub(crate) fn set_bend(&mut self, bend: f32) {
+        let bend = bend.clamp(-1.0, 1.0);
+        let old = self.expr.bend_semis;
+        self.bend = bend;
+        self.expr.bend_semis = bend * self.params.bend_range;
+        let ratio = f64::from(((self.expr.bend_semis - old) / 12.0).exp2());
+        if ratio != 1.0 {
+            for v in self.voices.iter_mut().filter(|v| v.is_active()) {
+                v.scale_step(ratio);
+            }
+        }
+        self.synth.set_expression(self.expr);
+    }
+
+    /// Mod wheel, 0 to 1.
+    pub(crate) fn set_mod_wheel(&mut self, v: f32) {
+        self.expr.mod_wheel = v.clamp(0.0, 1.0);
+        self.synth.set_expression(self.expr);
+    }
+
+    /// Channel aftertouch, 0 to 1.
+    pub(crate) fn set_pressure(&mut self, v: f32) {
+        self.expr.pressure = v.clamp(0.0, 1.0);
+        self.synth.set_expression(self.expr);
+    }
+
+    /// Polyphonic aftertouch on `key`, 0 to 1 (the synth's voices on that key).
+    pub(crate) fn set_key_pressure(&mut self, key: u8, v: f32) {
+        self.synth.set_key_pressure(key, v);
+    }
+
+    /// The live expression: bend in semitones, mod wheel and aftertouch.
+    pub(crate) fn expression(&self) -> Expression {
+        self.expr
     }
 
     /// Mixer strip this channel plays into.
@@ -541,5 +612,65 @@ mod tests {
         let ones = vec![1.0; 1024];
         ch.mix_into((&ones, &ones), (&mut l, &mut r));
         assert_eq!(l[1000], 0.0, "muted wins over automation");
+    }
+
+    fn sampler_channel() -> ChannelSlot {
+        let mut ch = ChannelSlot::new(48_000.0);
+        let data: Vec<f32> = (0..48_000).map(|i| i as f32 / 48_000.0).collect();
+        ch.set_sample(Some(Arc::new(SampleData::mono(48_000, data))));
+        ch.set_params_now(ChannelParams {
+            gain: 1.0,
+            looped: true,
+            bend_range: 12.0,
+            ..ChannelParams::default()
+        });
+        ch
+    }
+
+    fn slope(ch: &mut ChannelSlot) -> f32 {
+        let (mut l, mut r) = (vec![0.0; 64], vec![0.0; 64]);
+        ch.render_voices(&mut l, &mut r);
+        (l[40] - l[20]) / 20.0 * 48_000.0
+    }
+
+    #[test]
+    fn bend_follows_the_channels_range() {
+        let mut ch = sampler_channel();
+        ch.note_on(60, 1.0, 0);
+        assert!((slope(&mut ch) - 1.0).abs() < 1e-3);
+        ch.set_bend(1.0);
+        assert!(
+            (slope(&mut ch) - 2.0).abs() < 1e-3,
+            "full bend: +12 st here"
+        );
+        ch.set_bend(-0.5);
+        assert!((slope(&mut ch) - 0.707).abs() < 1e-2, "half down: -6 st");
+        // New notes start bent too.
+        ch.note_on(72, 1.0, 1);
+        ch.set_bend(0.0);
+        let mut p = ch.params;
+        p.bend_range = 2.0;
+        ch.set_params(p);
+        ch.set_bend(1.0);
+        assert!((ch.expression().bend_semis - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sustain_holds_released_sampler_voices_until_the_pedal_lifts() {
+        let mut ch = sampler_channel();
+        let held = |ch: &ChannelSlot| ch.voices.iter().filter(|v| v.is_held()).count();
+        ch.set_sustain(true);
+        ch.note_on(60, 1.0, 0);
+        ch.note_on(64, 1.0, 1);
+        ch.note_off(60);
+        assert_eq!(held(&ch), 2, "the pedal keeps 60");
+        // Struck again under the pedal: a second voice, the first still sustained.
+        ch.note_on(60, 1.0, 2);
+        assert_eq!(held(&ch), 3);
+        ch.set_sustain(false);
+        assert_eq!(held(&ch), 2, "only the let-go voice released");
+        ch.note_off(60);
+        ch.note_off(64);
+        assert_eq!(held(&ch), 0);
     }
 }

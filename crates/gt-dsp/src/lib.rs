@@ -32,4 +32,4 @@ pub use lfo::{Lfo, LfoWave, Noise};
 pub use osc::SineOsc;
 pub use ramp::LinearRamp;
 pub use sampler::{SamplerVoice, VoiceRegion};
-pub use synth::{GloomSynth, SynthSettings};
+pub use synth::{Expression, GloomSynth, SynthSettings};

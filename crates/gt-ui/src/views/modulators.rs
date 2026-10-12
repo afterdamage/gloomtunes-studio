@@ -5,7 +5,9 @@
 
 use egui::{vec2, RichText, Ui};
 use gt_core::modulation::SYNC_RATES;
-use gt_core::{LfoRate, LfoShape, ModSourceKind, ModulatorId, ParamId, Project, STRIPS};
+use gt_core::{
+    LfoRate, LfoShape, MidiControl, ModSourceKind, ModulatorId, ParamId, Project, STRIPS,
+};
 
 use crate::GloomTheme;
 
@@ -122,11 +124,23 @@ fn source_editor(ui: &mut Ui, id: ModulatorId, src: &mut ModSourceKind, strips: 
         .selected_text(src.name())
         .show_ui(ui, |ui| {
             let is_lfo = matches!(src, ModSourceKind::Lfo { .. });
+            let is_fol = matches!(src, ModSourceKind::Follower { .. });
+            let is_midi = matches!(src, ModSourceKind::Midi { .. });
             if ui.selectable_label(is_lfo, "LFO").clicked() && !is_lfo {
                 *src = ModSourceKind::default_lfo();
             }
-            if ui.selectable_label(!is_lfo, "Follower").clicked() && is_lfo {
+            if ui.selectable_label(is_fol, "Follower").clicked() && !is_fol {
                 *src = ModSourceKind::default_follower(1);
+            }
+            if ui
+                .selectable_label(is_midi, "MIDI")
+                .on_hover_text("Mod wheel or aftertouch of the target's channel")
+                .clicked()
+                && !is_midi
+            {
+                *src = ModSourceKind::Midi {
+                    control: MidiControl::ModWheel,
+                };
             }
         });
     match src {
@@ -230,6 +244,21 @@ fn source_editor(ui: &mut Ui, id: ModulatorId, src: &mut ModSourceKind, strips: 
                     .max_decimals(2),
             )
             .on_hover_text("Input gain: a peak of 1/gain drives the follower fully");
+        }
+        ModSourceKind::Midi { control } => {
+            egui::ComboBox::from_id_salt(("mod_midi", id.0))
+                .width(96.0)
+                .selected_text(control.name())
+                .show_ui(ui, |ui| {
+                    for c in MidiControl::ALL {
+                        ui.selectable_value(control, c, c.name());
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "From the target's own channel; mixer and effect targets follow the \
+                     selected channel",
+                );
         }
     }
     *src != before

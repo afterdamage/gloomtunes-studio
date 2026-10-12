@@ -139,6 +139,8 @@ named_enum! {
         Velocity => "velocity", "Velocity";
         Note => "note", "Note";
         Random => "random", "Random";
+        ModWheel => "modwheel", "Mod wheel";
+        Aftertouch => "aftertouch", "Aftertouch";
     }
 }
 

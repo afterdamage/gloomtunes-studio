@@ -181,6 +181,12 @@ impl EventBuf {
         self.events[..self.len].sort_unstable_by_key(|e| (e.offset, e.kind.rank()));
     }
 
+    /// Adds an event in order (live input joining the scheduled events of a quantum).
+    pub(crate) fn insert(&mut self, e: ScheduledEvent) {
+        self.push(e);
+        self.sort();
+    }
+
     fn push(&mut self, e: ScheduledEvent) {
         if self.len < MAX_EVENTS_PER_QUANTUM {
             self.events[self.len] = e;
