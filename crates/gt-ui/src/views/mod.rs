@@ -3,6 +3,7 @@
 mod audio_panel;
 mod browser;
 mod channel_rack;
+mod input_panel;
 mod midi_panel;
 mod mixer;
 mod modulators;
@@ -19,6 +20,9 @@ pub use audio_panel::{
 };
 pub use browser::{browser, BrowserAction, BrowserEntry, BrowserModel};
 pub use channel_rack::{channel_rack, RackAction, RackState, RackView};
+pub use input_panel::{
+    input_menu, input_panel, offered_inputs, InputAction, InputPanelModel, PairMode,
+};
 pub use midi_panel::{midi_panel, MidiAction, MidiPanelModel, MidiPortRow};
 pub use mixer::{mixer_view, MixerState, MixerView, StripMeter};
 pub use modulators::{modulators_panel, ModulatorsState};

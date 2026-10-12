@@ -20,6 +20,7 @@ mod channel;
 mod command;
 pub mod control;
 mod denormal;
+pub mod input;
 mod live;
 mod load;
 mod mixer;
@@ -34,6 +35,9 @@ pub use command::{EngineCommand, EngineEvent, Garbage, LoopRegion, TransportStat
 pub use control::{ModPlan, ParamDest};
 pub use denormal::DenormalGuard;
 pub use gt_core::MAX_CHANNELS;
+pub use input::{
+    CalibrationSink, InputFeed, InputRoute, InputRoutes, RecMark, RecordSink, MAX_RECORD_LANES,
+};
 pub use live::{LiveInput, LiveNote, LIVE_CAPACITY};
 pub use load::LoadMeter;
 pub use mixer::{create_effect, EffectBox, MixerParams, StripParams, MAX_PDC_FRAMES};
@@ -47,7 +51,7 @@ pub use song::{
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
-use gt_core::{Tick, FX_SLOTS, STRIPS};
+use gt_core::{Tick, FX_SLOTS, MAX_INPUT_CHANNELS, STRIPS};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 /// Frames per render quantum. The engine always renders in blocks of exactly this size, counted
@@ -117,6 +121,25 @@ pub struct Telemetry {
     pub overloads: AtomicU32,
     /// Buffer underruns the audio backend reported (xruns).
     pub xruns: AtomicU32,
+    /// Peak level per device input channel since the UI last reset it.
+    pub input_peaks: [AtomicF32; MAX_INPUT_CHANNELS],
+    /// Input frames waiting in the device ring when the engine reads (smoothed): part of the
+    /// round-trip latency.
+    pub input_fill: AtomicF32,
+    /// Times the input ran dry or was realigned (clock drift, xruns).
+    pub input_slips: AtomicU32,
+    /// Output latency the device reports (callback to playback), in frames; written by the
+    /// device layer.
+    pub output_latency: AtomicU32,
+    /// Input latency the device reports (capture to callback), in frames; written by the
+    /// device layer.
+    pub input_latency: AtomicU32,
+    /// True while a take is being recorded.
+    pub recording: AtomicBool,
+    /// Frames in the take being recorded.
+    pub record_frames: AtomicU64,
+    /// Times recorded audio could not be handed to the disk writer (its ring was full).
+    pub record_gaps: AtomicU32,
 }
 
 /// One strip's meter. The engine raises `peak` with `fetch_max` (the UI swaps it back to 0
@@ -157,6 +180,14 @@ impl Default for Telemetry {
             cpu_peak: AtomicF32::default(),
             overloads: AtomicU32::default(),
             xruns: AtomicU32::default(),
+            input_peaks: std::array::from_fn(|_| AtomicF32::default()),
+            input_fill: AtomicF32::default(),
+            input_slips: AtomicU32::default(),
+            output_latency: AtomicU32::default(),
+            input_latency: AtomicU32::default(),
+            recording: AtomicBool::default(),
+            record_frames: AtomicU64::default(),
+            record_gaps: AtomicU32::default(),
         }
     }
 }

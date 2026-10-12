@@ -2,6 +2,8 @@
 //!
 //! Lives on the UI thread. It enumerates devices, keeps one output stream open around an
 //! `AudioProcessor`, converts samples at the edge, and turns device errors into status text.
+//! Since Prompt 13 it also opens an input stream (at the output's sample rate) that feeds the
+//! engine through a lock-free ring, and reports both devices' latencies into the telemetry.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +15,11 @@ use cpal::{
     ErrorKind, FromSample, SampleFormat, SizedSample, StreamConfig, SupportedBufferSize,
     SupportedStreamConfig,
 };
-use gt_engine::{AudioProcessor, EngineCommand, EngineConfig, EngineHandle, LoadMeter, Telemetry};
+use gt_core::{AudioInput, MonitorMode, MAX_INPUT_CHANNELS};
+use gt_engine::{
+    AudioProcessor, EngineCommand, EngineConfig, EngineHandle, InputFeed, LoadMeter, Telemetry,
+};
+use gt_ui::views::PairMode;
 
 use crate::settings::AudioPrefs;
 
@@ -26,6 +32,19 @@ const SCRATCH_FRAMES: usize = 4096;
 /// If the fade-out has not been confirmed by the audio thread after this long (e.g. the device
 /// stopped calling back), the stream is reopened anyway.
 const STOP_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// The open input stream.
+struct InputRunning {
+    stream: cpal::Stream,
+    channels: usize,
+    device_name: String,
+}
+
+impl Drop for InputRunning {
+    fn drop(&mut self) {
+        let _ = self.stream.pause();
+    }
+}
 
 struct Running {
     stream: cpal::Stream,
@@ -59,6 +78,19 @@ pub struct AudioIo {
     /// The backend could not give the audio thread real-time priority.
     rt_denied: Arc<AtomicBool>,
     status: String,
+
+    /// Input devices; `None` at index 0 means "no input".
+    in_devices: Vec<Option<cpal::Device>>,
+    in_names: Vec<String>,
+    in_selected: usize,
+    input: Option<InputRunning>,
+    in_status: String,
+    /// How each channel pair is offered.
+    pub pairs: Vec<PairMode>,
+    /// Monitoring of armed tracks.
+    pub monitor: MonitorMode,
+    /// Manual latency offset in ms.
+    pub offset_ms: f32,
 }
 
 impl AudioIo {
@@ -81,11 +113,31 @@ impl AudioIo {
             stream_error: Arc::new(Mutex::new(None)),
             rt_denied: Arc::new(AtomicBool::new(false)),
             status: String::new(),
+            in_devices: vec![None],
+            in_names: vec![NO_INPUT.to_owned()],
+            in_selected: 0,
+            input: None,
+            in_status: String::new(),
+            pairs: prefs
+                .input_pairs
+                .iter()
+                .map(|k| PairMode::from_key(k))
+                .collect(),
+            monitor: MonitorMode::from_key(&prefs.monitor),
+            offset_ms: if prefs.input_offset_ms.is_finite() {
+                prefs.input_offset_ms.clamp(-200.0, 200.0)
+            } else {
+                0.0
+            },
         };
         if let Some(name) = &prefs.device {
             // rescan keeps the selection by name.
             io.names.push(name.clone());
             io.selected = 1;
+        }
+        if let Some(name) = &prefs.input_device {
+            io.in_names.push(name.clone());
+            io.in_selected = 1;
         }
         io.rescan();
         io.open();
@@ -100,6 +152,12 @@ impl AudioIo {
                 .flatten(),
             buffer_size: self.buffer_size,
             sample_rate: self.sample_rate,
+            input_device: (self.in_selected > 0)
+                .then(|| self.in_names.get(self.in_selected).cloned())
+                .flatten(),
+            input_pairs: self.pairs.iter().map(|p| p.key().to_owned()).collect(),
+            monitor: self.monitor.key().to_owned(),
+            input_offset_ms: self.offset_ms,
         }
     }
 
@@ -122,6 +180,112 @@ impl AudioIo {
             .and_then(|p| self.names.iter().position(|n| *n == p))
             .unwrap_or(0);
         self.rates = self.device().map_or_else(Vec::new, |d| supported_rates(&d));
+
+        let previous = self.in_names.get(self.in_selected).cloned();
+        self.in_devices = vec![None];
+        self.in_names = vec![NO_INPUT.to_owned()];
+        if let Ok(devices) = self.host.input_devices() {
+            for d in devices {
+                self.in_names.push(device_name(&d));
+                self.in_devices.push(Some(d));
+            }
+        }
+        self.in_selected = previous
+            .and_then(|p| self.in_names.iter().position(|n| *n == p))
+            .unwrap_or(0);
+    }
+
+    /// Picks the input device (0: none) and opens it.
+    pub fn select_input(&mut self, index: usize) {
+        if index < self.in_devices.len() {
+            self.in_selected = index;
+            self.open_input();
+        }
+    }
+
+    /// Input device names (index 0: "No input") and the selection.
+    pub fn input_devices(&self) -> (&[String], usize) {
+        (&self.in_names, self.in_selected)
+    }
+
+    /// Channels of the open input stream (0 without one).
+    pub fn input_channels(&self) -> usize {
+        self.input.as_ref().map_or(0, |i| i.channels)
+    }
+
+    /// Inputs tracks and inserts can use, as the channel pairs are set up.
+    pub fn offered_inputs(&self) -> Vec<AudioInput> {
+        gt_ui::views::offered_inputs(self.input_channels(), &self.pairs)
+    }
+
+    /// Status of the input (why it is not open, or what is open).
+    pub fn input_status(&self) -> &str {
+        &self.in_status
+    }
+
+    /// True when input and output are different devices (and so have separate clocks).
+    pub fn separate_clocks(&self) -> bool {
+        match (&self.input, &self.running) {
+            (Some(i), Some(r)) => !r.device_name.starts_with(&i.device_name),
+            _ => false,
+        }
+    }
+
+    /// The latency the devices report for a round trip, in frames: output plus input buffers
+    /// plus the input frames the engine keeps waiting, plus one render quantum.
+    pub fn reported_latency(&self) -> Option<u32> {
+        let e = self.engine()?;
+        self.input.as_ref()?;
+        let t = e.telemetry();
+        let fill = t.input_fill.load(Ordering::Relaxed).max(0.0).round() as u32;
+        Some(
+            t.output_latency.load(Ordering::Relaxed)
+                + t.input_latency.load(Ordering::Relaxed)
+                + fill
+                + gt_engine::RENDER_QUANTUM as u32,
+        )
+    }
+
+    /// The compensation for recordings, in frames: reported latency plus the manual offset.
+    pub fn compensation(&self) -> u32 {
+        let sr = self.engine().map_or(48_000, |e| e.config().sample_rate) as f32;
+        let reported = self.reported_latency().unwrap_or(0) as f32;
+        (reported + self.offset_ms * sr / 1000.0).round().max(0.0) as u32
+    }
+
+    /// Opens the selected input for the running engine (closing the previous one).
+    fn open_input(&mut self) {
+        self.input = None;
+        let Some(r) = self.running.as_mut() else {
+            self.in_status = String::new();
+            return;
+        };
+        let _ = r.engine.send(EngineCommand::SetInput(None));
+        let device = match self.in_devices.get(self.in_selected) {
+            Some(Some(d)) => d.clone(),
+            _ => {
+                self.in_status = if self.in_selected == 0 {
+                    String::new()
+                } else {
+                    "The input device is not connected".to_owned()
+                };
+                return;
+            }
+        };
+        match open_input_stream(&device, r, self.buffer_size) {
+            Ok((running, feed)) => {
+                self.in_status = format!(
+                    "Input: {} channels from {}",
+                    running.channels, running.device_name
+                );
+                let _ = r.engine.send(EngineCommand::SetInput(Some(Box::new(feed))));
+                self.input = Some(running);
+            }
+            Err(e) => {
+                log::warn!("{e}");
+                self.in_status = e;
+            }
+        }
     }
 
     pub fn select_device(&mut self, index: usize) {
@@ -203,6 +367,7 @@ impl AudioIo {
         r.engine.poll_events(|e| events.push(e));
         if r.engine.telemetry().faulted.load(Ordering::Relaxed) {
             self.status = "Audio engine fault: output muted. Use Restart audio.".to_owned();
+            self.input = None;
             self.running = None;
             self.reopening_since = None;
             return;
@@ -210,6 +375,7 @@ impl AudioIo {
         if let Some(since) = self.reopening_since {
             let silent = r.engine.telemetry().silent.load(Ordering::Relaxed);
             if silent || since.elapsed() > STOP_TIMEOUT {
+                self.input = None;
                 self.running = None; // dropping the stream closes the device
                 self.reopening_since = None;
                 self.open();
@@ -287,6 +453,7 @@ impl AudioIo {
                 self.status = format!("Audio running on {}", running.device_name);
                 self.running = Some(running);
                 self.fresh_engine = true;
+                self.open_input();
             }
             Err(e) => {
                 log::error!("{e}");
@@ -379,6 +546,134 @@ impl Drop for Running {
     }
 }
 
+const NO_INPUT: &str = "No input";
+
+/// Opens `device` for input at the output's sample rate, feeding a new ring for the engine.
+fn open_input_stream(
+    device: &cpal::Device,
+    out: &Running,
+    buffer_size: u32,
+) -> Result<(InputRunning, InputFeed), String> {
+    let rate = out.sample_rate;
+    let name = device_name(device);
+    let mut configs: Vec<_> = device
+        .supported_input_configs()
+        .map_err(|e| format!("{name} has no usable input: {e}"))?
+        .filter(|c| (c.min_sample_rate()..=c.max_sample_rate()).contains(&rate))
+        .collect();
+    // The device's own channel count (its default input config), then the most channels up
+    // to what the engine reads, then f32 samples.
+    let default_channels = device.default_input_config().ok().map(|c| c.channels());
+    configs.sort_by_key(|c| {
+        (
+            Some(c.channels()) != default_channels,
+            std::cmp::Reverse(usize::from(c.channels()).min(MAX_INPUT_CHANNELS)),
+            c.sample_format() != SampleFormat::F32,
+        )
+    });
+    let supported = configs
+        .into_iter()
+        .next()
+        .and_then(|c| c.try_with_sample_rate(rate))
+        .ok_or_else(|| {
+            format!(
+                "{name} cannot record at {rate} Hz (the output's rate); pick the same rate for \
+                 both or another input"
+            )
+        })?;
+    let format = supported.sample_format();
+    let mut config: StreamConfig = supported.config();
+    if let SupportedBufferSize::Range { min, max } = supported.buffer_size() {
+        if (*min..=*max).contains(&buffer_size) {
+            config.buffer_size = cpal::BufferSize::Fixed(buffer_size);
+        }
+    }
+    let channels = usize::from(config.channels.max(1));
+    // Half a second of input; the engine keeps about one buffer of it waiting.
+    let (tx, rx) = rtrb::RingBuffer::new(rate as usize / 2 * channels);
+    let telemetry = out.engine.shared_telemetry();
+    let error_slot = ErrorSink {
+        slot: Arc::new(Mutex::new(None)),
+        rt_denied: Arc::new(AtomicBool::new(false)),
+        telemetry: Arc::clone(&telemetry),
+    };
+    let stream = match format {
+        SampleFormat::F32 => build_input::<f32>(device, &config, tx, telemetry, error_slot),
+        SampleFormat::F64 => build_input::<f64>(device, &config, tx, telemetry, error_slot),
+        SampleFormat::I16 => build_input::<i16>(device, &config, tx, telemetry, error_slot),
+        SampleFormat::I32 => build_input::<i32>(device, &config, tx, telemetry, error_slot),
+        SampleFormat::U16 => build_input::<u16>(device, &config, tx, telemetry, error_slot),
+        SampleFormat::U8 => build_input::<u8>(device, &config, tx, telemetry, error_slot),
+        SampleFormat::I8 => build_input::<i8>(device, &config, tx, telemetry, error_slot),
+        other => return Err(format!("Unsupported input sample format {other}")),
+    }
+    .map_err(|e| format!("Could not open the input of {name}: {e}"))?;
+    stream
+        .play()
+        .map_err(|e| format!("Could not start the input of {name}: {e}"))?;
+    log::info!("input open: {name}, {rate} Hz, {channels} ch, {format}");
+    let prime = (buffer_size as usize).max(gt_engine::RENDER_QUANTUM);
+    let feed = InputFeed {
+        samples: rx,
+        channels,
+        prime_frames: prime,
+        max_frames: prime * 4,
+    };
+    Ok((
+        InputRunning {
+            stream,
+            channels,
+            device_name: name,
+        },
+        feed,
+    ))
+}
+
+/// The input callback: converts to f32 and pushes into the ring (dropping what does not fit;
+/// the engine notices the gap), and reports the capture latency.
+fn build_input<T>(
+    device: &cpal::Device,
+    config: &StreamConfig,
+    mut tx: rtrb::Producer<f32>,
+    telemetry: Arc<Telemetry>,
+    error_slot: ErrorSink,
+) -> Result<cpal::Stream, cpal::Error>
+where
+    T: SizedSample,
+    f32: FromSample<T>,
+{
+    let rate = f64::from(config.sample_rate);
+    device.build_input_stream::<T, _, _>(
+        *config,
+        move |data: &[T], info: &cpal::InputCallbackInfo| {
+            let ts = info.timestamp();
+            let latency = ts.callback.duration_since(ts.capture).as_secs_f64() * rate;
+            telemetry
+                .input_latency
+                .store(latency.round() as u32, Ordering::Relaxed);
+            let n = data.len().min(tx.slots());
+            if let Ok(chunk) = tx.write_chunk_uninit(n) {
+                chunk.fill_from_iter(
+                    data[..n]
+                        .iter()
+                        .map(|&s| <f32 as FromSample<T>>::from_sample_(s)),
+                );
+            }
+        },
+        error_callback(error_slot),
+        None,
+    )
+}
+
+/// Stores the output latency the backend reports for this callback.
+fn report_output_latency(telemetry: &Telemetry, info: &cpal::OutputCallbackInfo, rate: f64) {
+    let ts = info.timestamp();
+    let latency = ts.playback.duration_since(ts.callback).as_secs_f64() * rate;
+    telemetry
+        .output_latency
+        .store(latency.round() as u32, Ordering::Relaxed);
+}
+
 /// Uses the host named by `GT_AUDIO_HOST` (e.g. `jack`, `pipewire`, `asio`) when it was compiled
 /// in, otherwise the platform default (WASAPI on Windows, ALSA on Linux).
 fn pick_host() -> cpal::Host {
@@ -464,15 +759,17 @@ fn build_f32(
 ) -> Result<cpal::Stream, cpal::Error> {
     let mut faulted = false;
     let channels = usize::from(config.channels.max(1));
+    let rate = f64::from(config.sample_rate);
     let mut meter = LoadMeter::new(config.sample_rate);
     device.build_output_stream::<f32, _, _>(
         *config,
-        move |out: &mut [f32], _| {
+        move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
             if faulted {
                 out.fill(0.0);
                 return;
             }
             let start = Instant::now();
+            report_output_latency(processor.telemetry(), info, rate);
             // Last line of defence (ARCHITECTURE.md §3): a panic must not unwind into the
             // backend. On panic, mute for good and let the UI offer a restart.
             if catch_unwind(AssertUnwindSafe(|| processor.process(out))).is_err() {
@@ -503,15 +800,17 @@ where
     // Allocated here, on the UI thread, and moved into the callback.
     let mut scratch = vec![0.0_f32; SCRATCH_FRAMES * channels];
     let mut faulted = false;
+    let rate = f64::from(config.sample_rate);
     let mut meter = LoadMeter::new(config.sample_rate);
     device.build_output_stream::<T, _, _>(
         *config,
-        move |out: &mut [T], _| {
+        move |out: &mut [T], info: &cpal::OutputCallbackInfo| {
             if faulted {
                 out.fill(T::EQUILIBRIUM);
                 return;
             }
             let start = Instant::now();
+            report_output_latency(processor.telemetry(), info, rate);
             let result = catch_unwind(AssertUnwindSafe(|| {
                 for chunk in out.chunks_mut(scratch.len()) {
                     let tmp = &mut scratch[..chunk.len()];

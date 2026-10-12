@@ -94,7 +94,7 @@ impl GloomApp {
         } else {
             t.midi_light = (t.midi_light - MIDI_LIGHT_FALL_PER_S * dt).max(0.0);
         }
-        t.recording = self.recorder.armed;
+        t.recording = self.recorder.armed || self.record.active();
         t.typing_keyboard = self.keyboard.on;
         t.count_in = self.audio.engine().map_or(0, |e| {
             e.telemetry()
@@ -106,18 +106,25 @@ impl GloomApp {
         }
     }
 
-    /// Arms recording (counting in from stop) or ends the take.
+    /// Arms recording (counting in from stop) or ends the take. MIDI records into the current
+    /// pattern for the selected channel; armed playlist tracks record their audio input.
     pub(super) fn toggle_record(&mut self) {
-        if self.recorder.armed {
+        if self.recorder.armed || self.record.active() {
             self.end_take();
             return;
         }
-        let Some(ch) = self.project.channels.get(self.rack.selected) else {
-            self.toast("Add a channel to record into");
-            return;
-        };
-        self.take = Some((ch.id, self.project.current_pattern().length_ticks()));
-        self.recorder.armed = true;
+        let audio = self.start_audio_take();
+        match self.project.channels.get(self.rack.selected) {
+            Some(ch) => {
+                self.take = Some((ch.id, self.project.current_pattern().length_ticks()));
+                self.recorder.armed = true;
+            }
+            None if !audio => {
+                self.toast("Add a channel or arm a track to record into");
+                return;
+            }
+            None => {}
+        }
         if self.midi_model.record_click {
             self.send(EngineCommand::SetMetronome(true));
         }
@@ -128,9 +135,15 @@ impl GloomApp {
         }
     }
 
-    /// Ends the take: completes held notes at the playhead and disarms.
+    /// Ends the take: stops audio recording, completes held notes at the playhead and
+    /// disarms.
     pub(super) fn end_take(&mut self) {
+        let audio = self.record.active();
+        self.stop_audio_take();
         if !self.recorder.armed {
+            if audio {
+                self.send(EngineCommand::SetMetronome(self.transport.metronome));
+            }
             return;
         }
         self.recorder.armed = false;

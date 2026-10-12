@@ -2,7 +2,7 @@
 //! audio files the project uses.
 //!
 //! ```text
-//! project.json          { "format": "gloomtunes-project", "schema_version": 2, "project": {...} }
+//! project.json          { "format": "gloomtunes-project", "schema_version": 3, "project": {...} }
 //! samples/<hash>-<name> embedded copies of the audio files, byte for byte (optional)
 //! plugins/<hash>.bin    the saved state of each third-party plugin, as the plugin wrote it
 //! ```
@@ -31,11 +31,12 @@ use gt_core::effects::EffectKind;
 use gt_core::modulation::SYNC_RATES;
 use gt_core::synth::{ModDest, ModSlot, ModSource, SynthParam, SynthPatch, MOD_SLOTS};
 use gt_core::{
-    Adsr, AutoPoint, Automation, BuiltInSample, Channel, ChannelId, Clip, ClipId, ClipKind, Curve,
-    EffectSlot, Instrument, LfoRate, LfoShape, LoopMode, Marker, ModSourceKind, Modulator,
-    ModulatorId, Note, ParamId, Pattern, PatternId, PluginFormat, PluginInstanceId, PluginKind,
-    PluginParamInfo, PluginRef, Project, SampleSource, SamplerSettings, SigChange, TempoMap,
-    TempoPoint, Tick, TimeSig, TimeSigMap, Track, TrackId, FX_SLOTS, SENDS,
+    Adsr, AudioInput, AutoPoint, Automation, BuiltInSample, Channel, ChannelId, Clip, ClipId,
+    ClipKind, Curve, EffectSlot, Gap, Instrument, LfoRate, LfoShape, LoopMode, Marker,
+    ModSourceKind, Modulator, ModulatorId, Note, ParamId, Pattern, PatternId, PluginFormat,
+    PluginInstanceId, PluginKind, PluginParamInfo, PluginRef, Project, SampleSource,
+    SamplerSettings, SigChange, TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, Track, TrackId,
+    FX_SLOTS, SENDS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -545,6 +546,9 @@ struct StripDto {
     sidechain: Option<usize>,
     #[serde(default)]
     slots: Vec<Option<EffectDto>>,
+    /// Live device input ("1", "1-2"; schema 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -577,6 +581,9 @@ struct TrackDto {
     solo: bool,
     #[serde(default)]
     insert: usize,
+    /// Recording input ("1", "1-2"; schema 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -601,6 +608,10 @@ enum ClipContentDto {
     Audio {
         source: SampleDto,
         gain: f32,
+        /// Where a recording lost input: `[seconds into the file, seconds of silence]`
+        /// (schema 3).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        gaps: Vec<(f64, f64)>,
     },
     Automation {
         target: String,
@@ -768,6 +779,7 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
             output: s.output,
             sends: s.sends.to_vec(),
             sidechain: s.sidechain,
+            input: s.input.map(AudioInput::key),
             slots: s
                 .slots
                 .iter()
@@ -801,6 +813,7 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                 mute: t.mute,
                 solo: t.solo,
                 insert: t.insert,
+                input: t.input.map(AudioInput::key),
             })
             .collect(),
         clips: pl
@@ -815,9 +828,10 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                 muted: c.muted,
                 content: match &c.kind {
                     ClipKind::Pattern(id) => ClipContentDto::Pattern { pattern: id.0 },
-                    ClipKind::Audio { source, gain } => ClipContentDto::Audio {
+                    ClipKind::Audio { source, gain, gaps } => ClipContentDto::Audio {
                         source: sample_dto(source, dir, embedded),
                         gain: *gain,
+                        gaps: gaps.iter().map(|g| (g.at_s, g.len_s)).collect(),
                     },
                     ClipKind::Automation(a) => ClipContentDto::Automation {
                         target: a.target.key(),
@@ -1128,6 +1142,7 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
             *to = *from;
         }
         strip.sidechain = sd.sidechain;
+        strip.input = sd.input.as_deref().and_then(AudioInput::from_key);
         for (slot, ed) in strip
             .slots
             .iter_mut()
@@ -1163,13 +1178,21 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
             mute: t.mute,
             solo: t.solo,
             insert: t.insert,
+            input: t.input.as_deref().and_then(AudioInput::from_key),
         });
     }
     for c in d.playlist.clips {
         let kind = match c.content {
             ClipContentDto::Pattern { pattern } => Some(ClipKind::Pattern(PatternId(pattern))),
-            ClipContentDto::Audio { source, gain } => {
-                sample(source, &mut warnings).map(|source| ClipKind::Audio { source, gain })
+            ClipContentDto::Audio { source, gain, gaps } => {
+                sample(source, &mut warnings).map(|source| ClipKind::Audio {
+                    source,
+                    gain,
+                    gaps: gaps
+                        .into_iter()
+                        .map(|(at_s, len_s)| Gap { at_s, len_s })
+                        .collect(),
+                })
             }
             ClipContentDto::Automation { target, points } => match ParamId::parse(&target) {
                 Some(target) => Some(ClipKind::Automation(Automation {
@@ -1570,6 +1593,109 @@ mod tests {
         let to = &found[&gone];
         assert_eq!(relink(&mut loaded.project, &gone, to), 1);
         assert_eq!(sample_files(&loaded.project), vec![to.clone()]);
+    }
+
+    #[test]
+    fn recordings_keep_their_inputs_gaps_and_travel_embedded() {
+        let dir = temp_dir("rec");
+        std::fs::create_dir_all(dir.join("song/recordings")).unwrap();
+        let take = dir.join("song/recordings/Vox take 1.wav");
+        std::fs::write(&take, b"RIFF....take").unwrap();
+        let mut p = Project::empty();
+        let t = p.playlist.tracks[0].id;
+        p.playlist.tracks[0].input = Some(AudioInput::stereo(2));
+        p.playlist.tracks[1].input = Some(AudioInput::mono(0));
+        p.mixer.strips[4].input = Some(AudioInput::mono(7));
+        let gaps = vec![
+            Gap {
+                at_s: 1.25,
+                len_s: 0.01,
+            },
+            Gap {
+                at_s: 3.5,
+                len_s: 0.0,
+            },
+        ];
+        p.playlist.add_clip(
+            t,
+            1234,
+            9600,
+            ClipKind::Audio {
+                source: SampleSource::File(take.clone()),
+                gain: 1.0,
+                gaps: gaps.clone(),
+            },
+        );
+        let path = dir.join("song/song.gloom");
+        let report = save(
+            &p,
+            &path,
+            SaveOptions {
+                embed_samples: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.embedded, 1, "the recording is embedded");
+        let json = to_value(&p, Some(&dir.join("song")), &HashMap::new());
+        let track = &json["project"]["playlist"]["tracks"][0];
+        assert_eq!(track["input"], "3-4");
+        assert_eq!(json["project"]["mixer"][4]["input"], "8");
+        assert_eq!(
+            json["project"]["playlist"]["clips"][0]["content"]["source"]["path"],
+            "recordings/Vox take 1.wav"
+        );
+
+        // The project folder moves to another machine without the recordings folder.
+        std::fs::remove_file(&take).unwrap();
+        let loaded = load(&path, &dir.join("extracted")).unwrap();
+        assert!(loaded.missing.is_empty());
+        assert_eq!(loaded.extracted, 1);
+        let q = &loaded.project;
+        assert_eq!(q.playlist.tracks[0].input, Some(AudioInput::stereo(2)));
+        assert_eq!(q.playlist.tracks[1].input, Some(AudioInput::mono(0)));
+        assert_eq!(q.playlist.tracks[2].input, None);
+        assert_eq!(q.mixer.strips[4].input, Some(AudioInput::mono(7)));
+        let ClipKind::Audio {
+            source: SampleSource::File(got),
+            gaps: back,
+            ..
+        } = &q.playlist.clips[0].kind
+        else {
+            panic!("an audio clip")
+        };
+        assert_eq!(back, &gaps);
+        assert_eq!(std::fs::read(got).unwrap(), b"RIFF....take");
+
+        // Relinking finds a recording like any other audio file.
+        let mut q = q.clone();
+        let moved = dir.join("elsewhere.wav");
+        assert_eq!(relink(&mut q, got, &moved), 1);
+        assert_eq!(sample_files(&q), vec![moved]);
+    }
+
+    #[test]
+    fn version_2_files_open_without_inputs() {
+        let mut v = to_value(&Project::demo(), None, &HashMap::new());
+        v["schema_version"] = 2.into();
+        let back = from_value(v, None).unwrap();
+        assert_eq!(back.schema_version, 2);
+        assert_eq!(back.project, Project::demo());
+        assert!(back
+            .project
+            .playlist
+            .tracks
+            .iter()
+            .all(|t| t.input.is_none()));
+        // Inputs a file cannot name are dropped, not invented.
+        let mut v = to_value(&Project::demo(), None, &HashMap::new());
+        v["project"]["playlist"]["tracks"][0]["input"] = "2-4".into();
+        v["project"]["mixer"][0]["input"] = "1".into();
+        let back = from_value(v, None).unwrap();
+        assert_eq!(back.project.playlist.tracks[0].input, None);
+        assert_eq!(
+            back.project.mixer.strips[0].input, None,
+            "never on the master"
+        );
     }
 
     #[test]

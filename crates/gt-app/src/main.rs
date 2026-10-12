@@ -11,6 +11,7 @@ mod files;
 mod library;
 mod live;
 mod midi_io;
+mod recording;
 mod settings;
 
 /// What `main` hands the app: the saved settings and when the process started.

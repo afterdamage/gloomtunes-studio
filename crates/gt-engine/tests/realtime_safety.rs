@@ -8,13 +8,13 @@ use assert_no_alloc::{assert_no_alloc, AllocDisabler};
 use std::sync::Arc;
 
 use gt_core::{
-    ChannelParam, ClipKind, EffectKind, EffectSlot, LfoRate, LfoShape, ModSourceKind, ParamId,
-    Project, SampleData, SampleSource, SigChange, StripParam, SynthParam, TempoMap, TempoPoint,
-    Tick, TimeSig, TimeSigMap, MAX_CHANNELS,
+    AudioInput, ChannelParam, ClipKind, EffectKind, EffectSlot, LfoRate, LfoShape, ModSourceKind,
+    MonitorMode, ParamId, Project, SampleData, SampleSource, SigChange, StripParam, SynthParam,
+    TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, MAX_CHANNELS,
 };
 use gt_engine::{
-    create, create_effect, ChannelParams, EngineCommand, EngineConfig, LoopRegion, MixerParams,
-    ModPlan, SongSnapshot,
+    create, create_effect, CalibrationSink, ChannelParams, EngineCommand, EngineConfig, InputFeed,
+    InputRoute, InputRoutes, LoopRegion, MixerParams, ModPlan, RecordSink, SongSnapshot,
 };
 
 #[global_allocator]
@@ -212,6 +212,7 @@ fn process_does_not_allocate() {
                 ClipKind::Audio {
                     source: SampleSource::BuiltIn(gt_core::BuiltInSample::Snare),
                     gain: 0.8,
+                    gaps: Vec::new(),
                 },
             );
             song.playlist.clip_mut(c).unwrap().offset = 200;
@@ -325,6 +326,65 @@ fn process_does_not_allocate() {
             3,
             "two replaced plans and the empty one"
         );
+
+        // Audio input: a feed with a few seconds of a stereo signal, live routes, a recorder
+        // across loop wraps (a take per pass) whose disk ring fills up, then a calibration.
+        let (mut input, samples) = rtrb::RingBuffer::new(sr as usize * 8);
+        for i in 0..sr as usize * 3 {
+            let x = (i as f32 * 0.01).sin() * 0.3;
+            input.push(x).unwrap();
+            input.push(-x).unwrap();
+        }
+        h.send(EngineCommand::SetInput(Some(Box::new(InputFeed {
+            samples,
+            channels: 2,
+            prime_frames: block,
+            max_frames: 8 * block,
+        }))))
+        .unwrap();
+        h.send(EngineCommand::SetInputRoutes(Box::new(InputRoutes {
+            routes: vec![
+                InputRoute {
+                    input: AudioInput::stereo(0),
+                    strip: 5,
+                    armed: None,
+                },
+                InputRoute {
+                    input: AudioInput::mono(1),
+                    strip: 0,
+                    armed: Some(MonitorMode::Auto),
+                },
+            ],
+        })))
+        .unwrap();
+        let (rec_samples, rec) = rtrb::RingBuffer::new(sr as usize);
+        let (marks, rec_marks) = rtrb::RingBuffer::new(64);
+        h.send(EngineCommand::SetRecorder(Some(Box::new(RecordSink {
+            samples: rec_samples,
+            marks,
+            lanes: vec![AudioInput::stereo(0), AudioInput::mono(1)],
+            compensation: 300,
+        }))))
+        .unwrap();
+        run(&mut p, 5 * sr as usize / block);
+        let (calib_samples, calib) = rtrb::RingBuffer::new(sr as usize);
+        h.send(EngineCommand::Calibrate(Some(Box::new(CalibrationSink {
+            samples: calib_samples,
+            channel: 1,
+        }))))
+        .unwrap();
+        h.send(EngineCommand::SetRecorder(None)).unwrap();
+        run(&mut p, sr as usize / block);
+        h.send(EngineCommand::Calibrate(None)).unwrap();
+        h.send(EngineCommand::SetInput(None)).unwrap();
+        run(&mut p, 10);
+        assert_eq!(
+            h.collect_garbage(),
+            3,
+            "the recorder, the calibration and the feed"
+        );
+        assert!(rec.slots() > 0 && rec_marks.slots() > 0 && calib.slots() > 0);
+        drop((rec, rec_marks, calib, input));
 
         h.send(EngineCommand::Pause).unwrap();
         h.send(EngineCommand::Locate(Tick(12_345))).unwrap();

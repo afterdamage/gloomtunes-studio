@@ -55,6 +55,14 @@ pub struct AudioPrefs {
     pub buffer_size: u32,
     /// Requested sample rate; `None` uses the device default.
     pub sample_rate: Option<u32>,
+    /// Input device by name; `None` opens no input (Prompt 13).
+    pub input_device: Option<String>,
+    /// How each pair of input channels is offered ("both", "mono", "stereo", "off").
+    pub input_pairs: Vec<String>,
+    /// Monitoring of armed tracks ("off", "mixer", "auto").
+    pub monitor: String,
+    /// Manual recording latency offset in ms, added to what the devices report.
+    pub input_offset_ms: f32,
 }
 
 impl Default for AudioPrefs {
@@ -63,6 +71,10 @@ impl Default for AudioPrefs {
             device: None,
             buffer_size: 256,
             sample_rate: None,
+            input_device: None,
+            input_pairs: Vec::new(),
+            monitor: gt_core::MonitorMode::default().key().to_owned(),
+            input_offset_ms: 0.0,
         }
     }
 }
@@ -210,6 +222,10 @@ mod tests {
             device: Some("USB Interface".into()),
             buffer_size: 128,
             sample_rate: Some(96_000),
+            input_device: Some("USB Interface".into()),
+            input_pairs: vec!["mono".into(), "off".into()],
+            monitor: "mixer".into(),
+            input_offset_ms: -1.5,
         };
         s.midi.disabled_ports = vec!["Through Port".into()];
         let mut theme = GloomTheme::gloom();

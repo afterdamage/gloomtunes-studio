@@ -207,6 +207,8 @@ pub struct PlaylistState {
     pub selected: Vec<ClipId>,
     /// Track that new automation clips and dropped audio prefer.
     pub selected_track: Option<TrackId>,
+    /// Tracks armed for audio recording (not saved with the project).
+    pub armed: Vec<TrackId>,
     drag: Option<Drag>,
     /// Loop region being dragged (preview).
     loop_preview: Option<(i64, i64)>,
@@ -227,6 +229,7 @@ impl Default for PlaylistState {
             tool: PlaylistTool::Draw,
             selected: Vec::new(),
             selected_track: None,
+            armed: Vec::new(),
             drag: None,
             loop_preview: None,
             popup: None,
@@ -260,6 +263,10 @@ pub struct PlaylistView<'a> {
     pub loop_region: (i64, i64, bool),
     /// Loaded audio, for waveforms and clip lengths.
     pub audio: &'a dyn AudioLookup,
+    /// Device inputs a track can record from.
+    pub inputs: &'a [gt_core::AudioInput],
+    /// The take being recorded: its start tick and the tracks recording.
+    pub recording: Option<(i64, &'a [TrackId])>,
 }
 
 /// Things the app must act on.
@@ -394,7 +401,7 @@ pub fn playlist(
     }
 
     paint(ui, theme, st, &geo, area, ruler, project, &view);
-    changed |= track_headers(ui, theme, st, headers, &geo, project);
+    changed |= track_headers(ui, theme, st, headers, &geo, project, view.inputs);
     let (popup_timing, popup_changed) = show_popup(ui, theme, st, project);
     let timing = timing | popup_timing;
     changed |= popup_changed;
@@ -1187,6 +1194,7 @@ fn drop_audio(
         ClipKind::Audio {
             source: (*src).clone(),
             gain: 1.0,
+            gaps: Vec::new(),
         },
     );
     st.selected = vec![id];
@@ -1802,10 +1810,11 @@ fn paint(
                 }
                 pat.map_or_else(|| "(missing)".to_owned(), |p| p.name.clone())
             }
-            ClipKind::Audio { source, .. } => {
+            ClipKind::Audio { source, gaps, .. } => {
                 if let Some((peaks, rate)) = view.audio.peaks(source) {
                     paint_wave(&cp, geo, c, &project.tempo, peaks, rate, body, ink);
                 }
+                paint_gaps(&cp, geo, c, &project.tempo, gaps, body, theme.warn);
                 source.display_name()
             }
             ClipKind::Automation(a) => {
@@ -1830,6 +1839,30 @@ fn paint(
             Stroke::new(1.0, base.gamma_multiply(0.9))
         };
         cp.rect_stroke(r, 2.0, stroke, egui::StrokeKind::Inside);
+    }
+
+    // The take being recorded grows from its start to the playhead on every armed track.
+    if let (Some((start, tracks)), Some(head)) = (view.recording, view.playhead) {
+        for id in tracks {
+            let Some(row) = pl.track_index(*id) else {
+                continue;
+            };
+            let r = geo.clip_rect(row, start, head.max(start + 1));
+            gp.rect_filled(r, 2.0, theme.warn.gamma_multiply(0.35));
+            gp.rect_stroke(
+                r,
+                2.0,
+                Stroke::new(1.0, theme.warn),
+                egui::StrokeKind::Inside,
+            );
+            gp.text(
+                pos2(r.left() + 4.0, r.top() + 1.0),
+                Align2::LEFT_TOP,
+                "Recording",
+                FontId::proportional(10.5),
+                Color32::WHITE,
+            );
+        }
     }
 
     // Selection box.
@@ -2045,6 +2078,30 @@ fn paint_wave(
     }
 }
 
+/// Marks where a recording lost input: a band over silence, a line where it was realigned.
+fn paint_gaps(
+    p: &egui::Painter,
+    geo: &Geo,
+    c: &gt_core::Clip,
+    tempo: &TempoMap,
+    gaps: &[gt_core::Gap],
+    body: Rect,
+    color: Color32,
+) {
+    let origin = tempo.tick_to_seconds((c.start - c.offset) as f64);
+    for g in gaps {
+        let x0 = geo.xf(tempo.seconds_to_tick(origin + g.at_s));
+        let x1 = geo
+            .xf(tempo.seconds_to_tick(origin + g.at_s + g.len_s))
+            .max(x0 + 2.0);
+        if x1 < body.left() || x0 > body.right() {
+            continue;
+        }
+        let r = Rect::from_min_max(pos2(x0, body.top()), pos2(x1, body.bottom()));
+        p.rect_filled(r, 0.0, color.gamma_multiply(0.7));
+    }
+}
+
 fn paint_curve(
     p: &egui::Painter,
     geo: &Geo,
@@ -2083,7 +2140,10 @@ fn track_headers(
     headers: Rect,
     geo: &Geo,
     project: &mut Project,
+    inputs: &[gt_core::AudioInput],
 ) -> bool {
+    st.armed
+        .retain(|id| project.playlist.tracks.iter().any(|t| t.id == *id));
     let mut changed = false;
     let mut hui = ui.new_child(egui::UiBuilder::new().max_rect(headers));
     hui.set_clip_rect(headers.intersect(ui.clip_rect()));
@@ -2117,7 +2177,7 @@ fn track_headers(
         );
         let swatch = Rect::from_min_size(r.min + vec2(2.0, 2.0), vec2(5.0, r.height() - 4.0));
         hui.painter().rect_filled(swatch, 1.0, color(t.color));
-        let line1 = Rect::from_min_size(r.min + vec2(10.0, 3.0), vec2(r.width() - 56.0, 16.0));
+        let line1 = Rect::from_min_size(r.min + vec2(10.0, 3.0), vec2(r.width() - 76.0, 16.0));
         if hui
             .put(
                 line1,
@@ -2146,6 +2206,25 @@ fn track_headers(
             t.solo = !t.solo;
             changed = true;
         }
+        let armed = st.armed.contains(&t.id);
+        if btn(
+            &mut hui,
+            62.0,
+            armed,
+            "R",
+            "Arm for recording: Record then records this track's input",
+            theme.warn,
+        ) {
+            if armed {
+                st.armed.retain(|id| *id != t.id);
+            } else {
+                st.armed.push(t.id);
+                if t.input.is_none() {
+                    t.input = inputs.first().copied();
+                    changed |= t.input.is_some();
+                }
+            }
+        }
         if r.height() >= 40.0 {
             let line2 =
                 Rect::from_min_size(pos2(r.left() + 10.0, r.top() + 21.0), vec2(90.0, 16.0));
@@ -2168,6 +2247,23 @@ fn track_headers(
             if resp.changed() {
                 t.insert = ins.clamp(0, gt_core::INSERTS as i64) as usize;
                 changed = true;
+            }
+            let line2b = Rect::from_min_max(
+                pos2(line2.right() + 4.0, line2.top()),
+                pos2(r.right() - 4.0, line2.bottom()),
+            );
+            if line2b.width() >= 40.0 {
+                let mut child = hui.new_child(egui::UiBuilder::new().max_rect(line2b));
+                child.style_mut().override_text_style = Some(egui::TextStyle::Small);
+                if crate::views::input_menu(
+                    &mut child,
+                    ("pl_input", t.id.0),
+                    line2b.width() - 8.0,
+                    &mut t.input,
+                    inputs,
+                ) {
+                    changed = true;
+                }
             }
         }
         let id = t.id;
@@ -2282,6 +2378,8 @@ mod tests {
                     playhead: None,
                     loop_region: (0, 0, false),
                     audio: &NoAudio,
+                    inputs: &[],
+                    recording: None,
                 },
             );
         });

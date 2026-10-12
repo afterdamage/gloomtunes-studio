@@ -48,6 +48,7 @@ fn dc_project(strip: usize, bars: i64) -> Project {
         ClipKind::Audio {
             source: SampleSource::BuiltIn(gt_core::BuiltInSample::Kick),
             gain: 1.0,
+            gaps: Vec::new(),
         },
     );
     p
@@ -202,6 +203,7 @@ fn an_envelope_follower_ducks_one_strip_under_another() {
     let src = || ClipKind::Audio {
         source: SampleSource::BuiltIn(gt_core::BuiltInSample::Kick),
         gain: 1.0,
+        gaps: Vec::new(),
     };
     for bar in 0..3 {
         p.playlist.add_clip(kick, bar * 3840, 960, src());

@@ -420,6 +420,10 @@ many plugins only test against a few hosts. Estimated effort: 3 to 5 weeks, afte
 - `app/plugins.rs` (Step 11): owns the `PluginHost`, syncs it every frame after the views, runs
   the plugin browser and the plugin panels' requests; `main.rs` answers `--scan-clap <file>`
   before any window opens (D74).
+- `audio_io` and `app/record.rs` (Prompt 13): the input stream next to the output stream,
+  the channel pairs offered as inputs, monitoring, latency compensation and the loopback
+  measurement (D96-D99). `recording` runs the disk-writer thread that turns the engine's
+  recorded samples into 32-bit float WAV files, one per armed track (D98, D100).
 - Logging (`log` + `env_logger`), never called from the audio thread.
 
 ---
@@ -434,6 +438,8 @@ many plugins only test against a few hosts. Estimated effort: 3 to 5 weeks, afte
 | Workers (small pool) | gt-app | sample decode + resample, waveform peaks, large compiles, export, autosave serialization | touch the engine directly |
 | Plugin main (Step 11) | gt-app UI thread via gt-plugin-host | CLAP main-thread calls, editors, timers, fds | run on the audio thread |
 | Plugin scan (Step 11) | a background thread in gt-plugin-host, one child process per file | open each plugin file and list its plugins as JSON | load plugin files into the app's own process |
+| Audio input (Prompt 13) | cpal input callback | convert to f32 and push into the input ring | anything else: it is a real-time thread |
+| Disk writer (Prompt 13) | gt-app, one per recording session | drain the recorder's rings into WAV files | touch the engine; it only reads its rings |
 
 **Allowed on the audio thread:** arithmetic on preallocated buffers, reading/writing atomics,
 `rtrb` push/pop (wait-free), swapping `Box`/pointer ownership, `Arc` clone (an atomic increment).
@@ -604,6 +610,13 @@ pub struct MeterCell { pub peak: [AtomicF32; 2], pub rms: [AtomicF32; 2] } // At
 > The device layer measures each callback with `Instant::now` around `process` and feeds the
 > numbers through `gt_engine::LoadMeter`, so tests and the `render_cost` example use the same
 > arithmetic (D83).
+
+> **Prompt 13:** commands `SetInput`, `SetInputRoutes`, `SetRecorder` and `Calibrate` hand the
+> engine boxed input objects; each replaced box comes back as `Garbage::Input`,
+> `InputRoutes`, `Recorder` or `Calibration`. `Telemetry` adds input peaks per channel
+> (`input_peaks`, 32), the input ring's fill (`input_fill`), realignments (`input_slips`), the
+> latencies the device callbacks report (`output_latency`, `input_latency`) and the recorder's
+> state (`recording`, `record_frames`, `record_gaps`). See §7.10.
 
 The engine computes peak (with hold handled by the UI) and RMS per quantum and stores them with
 `Relaxed` ordering; tearing between L and R is harmless for metering. Meter ballistics (decay,
@@ -803,6 +816,11 @@ pub enum ClipKind {
 > (path or built-in) and a linear gain; the track's `insert` says where its audio goes.
 > `ClipKind::Automation` embeds its `Automation { target, points }` instead of pointing into a
 > separate map (D50). Signatures are a `TimeSigMap` of changes on bar boundaries (D46).
+>
+> **Prompt 13 (D96, D100):** `Track.input: Option<AudioInput>` is the input an armed track
+> records from (arming itself is UI state, not saved). `ClipKind::Audio` adds
+> `gaps: Vec<Gap>`, the stretches of a recording where input was lost (seconds from the start
+> of the file), drawn in the clip.
 
 ### Automation and parameters
 
@@ -865,6 +883,10 @@ Routing (outputs, sends, sidechains) must form a directed acyclic graph. `gt-pro
 that would create a cycle; `compile::graph_patch` topologically sorts the inserts into a flat
 processing order.
 
+> **Prompt 13 (D96):** `MixerStrip.input: Option<AudioInput>` on an insert (not the master or
+> sends) feeds that input live into the insert, ahead of its effects, for playing through
+> them. Sanitizing drops it from any other strip.
+
 ### Samples
 
 ```rust
@@ -900,6 +922,11 @@ samples/<hash>.flac # optional embedded samples (lossless)
 > the plugin's own saved state (identical states are stored once). The v1 to v2 migration has
 > nothing to do (v1 files cannot hold plugins); the golden export fixture deliberately stays a
 > v1 file so every CI run also loads and migrates an old version.
+>
+> **Prompt 13 (D100):** `schema_version` 3 adds `input` on tracks and mixer strips (text keys
+> `"3"`, `"1-2"`) and `gaps` on audio clips (`[[at_s, len_s], ...]`). All three are optional, so
+> the v2 to v3 migration has nothing to do. Recordings are ordinary file samples: they are
+> embedded, relinked and listed as missing like any other.
 
 JSON (not RON) was chosen because migrations operate on a `serde_json::Value` tree before typed
 deserialization, and every tool can read it. Each schema change bumps `schema_version` and adds a
@@ -1128,6 +1155,49 @@ The cause of the old p99 was subnormal arithmetic in decaying filter, delay and 
 flush-to-zero (D82) removed it. Nothing else stood out: memory and startup are dominated by the
 graphics driver, and the UI frame stays well inside 16 ms.
 
+### 7.10 Audio input and recording (Prompt 13)
+
+**Input.** gt-app opens the chosen input device at the output's sample rate. Its callback
+converts to f32 and pushes interleaved frames into an `rtrb` ring (half a second). The engine
+owns the consumer (`InputFeed`) and reads exactly one quantum per quantum, on the output's
+clock, into a preallocated buffer. It starts reading once the ring holds a cushion (the input
+buffer size, at least one quantum). When the ring runs dry it outputs silence for the missing
+frames and waits for the cushion again; when it holds more than four cushions it drops the
+surplus. Both count as a slip (`input_slips`) and are reported to the recorder (D97).
+
+**Routes.** `InputRoutes` lists where inputs go: each armed track with an input and each
+insert with an input becomes a route to that insert's input bus, added ahead of its effects.
+A route from an insert input always plays; a route from an armed track plays according to the
+monitoring mode (D96).
+
+**Recorder.** `RecordSink` holds the lanes (the input of each armed track), a samples ring and
+a marks ring to the disk writer, and the latency compensation in frames. While playing in song
+mode the engine writes every lane's frames, interleaved, for each played segment, and marks:
+
+| Mark | Meaning |
+|---|---|
+| `Start { take, tick }` | A take starts at `tick`, the first whole tick at or after the playhead; the writer skips the compensation plus the frames before that tick |
+| `Gap { at, frames, fill: true }` | The samples ring was full: the writer writes `frames` of silence at file frame `at` |
+| `Gap { at, frames, fill: false }` | The input ran dry: the silence is already in the samples (`frames > 0`), or the input was realigned (`frames == 0`) |
+| `End { frames }` | The take ends after `frames` file frames (stop, pause, a locate or a loop wrap) |
+
+The writer thread snapshots the samples available, then reads marks, then copies samples, so
+a mark is never applied before the samples it refers to. It writes one WAV per lane (32-bit
+float, hound), merges gaps in consecutive quanta into one, and hands each finished take to the
+UI, which adds one audio clip per track at the take's tick with its gaps (D98).
+
+**Latency.** A sample captured at time t arrives in the engine after the input latency plus
+the time it waits in the ring, and the sound the player heard at t left the engine an output
+latency earlier. The compensation is output latency + input latency (both from cpal's callback
+timestamps) + the smoothed ring fill + one quantum + a manual offset. The loopback measurement
+plays eight 4 ms bursts and cross-correlates the capture with them (`gt_dsp::latency`); the
+offset becomes the measured delay minus the reported one (D99).
+
+**Cost.** `cargo bench -p gt-engine --bench input`: an idle engine renders a second of audio in
+about 10.1 ms here; with 8 input channels, 4 routes and 4 stereo tracks recording, about
+14.8 ms. Input and recording cost about 0.5 % of one core. One loopback analysis takes about
+14 ms (`cargo bench -p gt-dsp --bench latency`), once per measurement on the UI thread.
+
 ---
 
 ## 8. Top 10 technical risks
@@ -1250,6 +1320,12 @@ polled), and float determinism across compilers.
 | D93 | Plugin editors on macOS embed into an `NSWindow` made with `objc2-app-kit` (the same objc2 version winit uses, so no new code is compiled for the framework bindings). There is no delegate: each UI frame polls whether the window is still visible (closed) and its content size (resized). The window is not released on close, so the plugin's view is removed first | No Objective-C class of our own to declare; the poll matches how the X11 and Win32 windows are handled | Closing needs to be vetoed, or polling misses an event |
 | D94 | Shortcuts use egui's `COMMAND` modifier everywhere, which is Cmd on macOS and Ctrl elsewhere. Labels and saved text say `Cmd` on macOS (`keymap::COMMAND_KEY`); both words parse on every system, so a settings file moves between machines | One keymap; Mac conventions (Cmd+S, Cmd+, for Settings) without a second set of defaults | — |
 | D95 | macOS packaging: `packaging/macos/build-app.sh` builds both architectures in the `dist` profile, joins them with `lipo`, writes the bundle (Info.plist template, `.icns`) and a compressed `.dmg` with an Applications link. Without secrets it signs ad hoc (Apple Silicon refuses unsigned code; Gatekeeper asks once). With a Developer ID certificate it signs with the hardened runtime and `disable-library-validation` (plugins are other vendors' code) and notarizes when Apple credentials exist. No `.gloom` document type is declared: Finder opens documents with an Apple Event that eframe does not pass on, so an association would start the app without the file | Works without an Apple developer account today and becomes a fully trusted download once one exists; no promise the app cannot keep | Handle `application:openURLs:` (through winit) and declare the document type |
+| D96 | An input is one channel or an adjacent pair of the input device, stored as channel numbers (`AudioInput`). Settings choose per pair whether it is offered as two monos, a stereo pair, both, or not at all. Playlist tracks record from an input when armed; any mixer insert can take an input as a live source ahead of its effects. Monitoring of armed tracks is Off, Through the mixer, or Auto (heard while stopped and while recording, not during playback of a take) | Matches how interfaces label their inputs and survives switching interfaces (a missing input shows as missing, not lost). Live effects come for free from the insert chain | Per-track monitoring modes; input on send buses |
+| D97 | Duplex clock drift: the engine runs on the output's clock only. Input reaches it through a ring with a cushion; when separate devices drift, the engine repeats (silence) or skips input and reports each slip, as a gap in the recording and a count in Settings, which also warns that two devices have two clocks and recommends one device or an aggregate | No resampler on the audio path, no added latency, sample-exact timing on one device (the common case for recording). Drift between two devices is real and shows; hiding it would make takes slowly slide | Adaptive resampling of the input (rubato's async resampler steered by the ring fill) if users record with two devices often |
+| D98 | Recording runs through two lock-free rings from the engine to a disk-writer thread: samples (interleaved lanes) and marks (`Start`, `Gap`, `End`). The engine never blocks: a full samples ring becomes a filled gap. Files are 32-bit float WAV, one per armed track, written as they record | Disk stalls cannot cause dropouts, and the file keeps its timing whatever happens. Float WAV needs no dithering or clipping decisions | Writing FLAC; recording more than 32 lanes |
+| D99 | Latency compensation = output + input latency reported by the device callbacks + the input ring's fill + one quantum + a manual offset. A loopback measurement (eight bursts, cross-correlation, median) sets the offset to measured minus reported. Takes start on the first whole tick at or after the playhead | Reported latencies are often wrong by a few ms (converters, driver buffers); a measurement fixes that once per setup. Whole-tick starts keep clips on the grid without moving audio by more than a tick | A per-device offset table |
+| D100 | Schema 3: track and strip `input`, audio-clip `gaps`; the migration from 2 does nothing. Recordings go to `recordings/` next to the project file, or `recordings/` in the data folder for an unsaved project, named `<track> take N.wav` (never overwriting). A new take mutes the earlier clips of the same recording session it overlaps | Old projects open unchanged; recordings are ordinary file samples, so embedding, relinking and missing-file handling already work | Moving unsaved recordings next to the project on the first save (Prompt 13 part 2) |
+| D101 | macOS asks for microphone access: `NSMicrophoneUsageDescription` in Info.plist and the `audio-input` entitlement for the hardened runtime | Without them macOS silently delivers silence to a signed app | — |
 
 ---
 
@@ -1262,12 +1338,12 @@ GPL-3.0-or-later. **Flagged** entries are copyleft or have special terms.
 |---|---|---|---|
 | cpal | audio I/O | Apache-2.0 | 1 |
 | eframe / egui | GUI | MIT OR Apache-2.0 | 1 |
-| rtrb | lock-free SPSC queues | MIT OR Apache-2.0 | 2 |
+| rtrb | lock-free SPSC queues (Prompt 13: also the input and recording rings in `gt-app`) | MIT OR Apache-2.0 | 2 |
 | assert_no_alloc | RT-safety checks (dev/debug) | BSD-2-Clause | 2 |
 | log, env_logger | logging | MIT OR Apache-2.0 | 1 |
 | symphonia 0.6 (`mp3` feature on) | decoding wav/flac/mp3/ogg | **MPL-2.0 (flag: file-level copyleft; compatible with GPL-3.0)**; added in Step 3 | 3 |
 | rubato 5 (+ audioadapter crates) | resampling | MIT OR Apache-2.0; added in Step 3 | 3 |
-| hound | WAV writing (Step 3: test-only; Step 9: export in `gt-export`) | Apache-2.0 | 3/9 |
+| hound | WAV writing (Step 3: test-only; Step 9: export in `gt-export`; Prompt 13: recordings in `gt-app`) | Apache-2.0 | 3/9/13 |
 | serde, serde_json | serialization; added in Step 5 for presets | MIT OR Apache-2.0 | 5/9 |
 | zip 7 (`deflate-flate2-zlib-rs` only) | project container; added in Step 9 | MIT (zlib-rs: Zlib) | 9 |
 | rfd 0.17 | native open/save/folder dialogs (xdg portal on Linux, no GTK); added in Step 9 | MIT | 9 |
@@ -1311,4 +1387,5 @@ eframe's frame timing and the Performance page covered Step 12.
 | UI | Piano roll at 10k notes stays under 16 ms per frame | ignored release test + manual benchmark |
 | App (Step 12) | Settings round trip, defaults for missing fields, damaged file set aside; keymap text round trip, conflicts, most-specific matching, typing rules; crash hook writes only when enabled; issue links encoded and bounded; load meter arithmetic; FTZ inside the guard only | `cargo test` |
 | Packaging (Step 12) | `.deb`, AppImage and Windows installer built on PRs that touch packaging, and on release tags | GitHub Actions (`release.yml`) |
+| Recording (Prompt 13) | The loopback measurement finds exact delays through noise and inversion; a looped-back click lands on its beat to the sample after compensation (tempo 137, three cable lengths); inputs are monitored as routed; gaps keep the timing; the disk writer under load and with a stalled disk; schema 2 files open without inputs | `cargo test`, criterion |
 | CI | build, test, clippy `-D warnings`, rustfmt check on windows-latest and ubuntu-22.04; `cargo deny` | GitHub Actions |

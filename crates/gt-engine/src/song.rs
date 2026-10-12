@@ -209,7 +209,7 @@ impl SongSnapshot {
                         expand_pattern(project, pat, clip, swing, &mut events);
                     }
                 }
-                ClipKind::Audio { source, gain } => {
+                ClipKind::Audio { source, gain, .. } => {
                     let Some(sample) = samples(source) else {
                         continue;
                     };
@@ -835,6 +835,7 @@ mod tests {
             ClipKind::Audio {
                 source: src.clone(),
                 gain: 0.5,
+                gaps: Vec::new(),
             },
         );
         p.playlist.clip_mut(c).unwrap().offset = 960;
