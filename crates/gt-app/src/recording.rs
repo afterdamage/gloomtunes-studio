@@ -433,27 +433,58 @@ mod tests {
         (k as f32) * 0.001 + c as f32 * 0.25
     }
 
-    /// Pushes like the engine: frames when they fit, a filled gap when they do not.
+    /// Pushes like the engine: frames when they fit; when they do not, one filled gap that
+    /// grows until frames fit again (`pending`), sent before them.
     fn push_quantum(
         samples: &mut Producer<f32>,
         marks: &mut Producer<RecMark>,
+        pending: &mut Option<(u64, u32)>,
         frame: u64,
         n: u64,
     ) {
+        let flushed = match *pending {
+            Some((at, frames)) => {
+                let ok = marks
+                    .push(RecMark::Gap {
+                        at,
+                        frames,
+                        fill: true,
+                    })
+                    .is_ok();
+                if ok {
+                    *pending = None;
+                }
+                ok
+            }
+            None => true,
+        };
         let needed = n as usize * 3;
-        match samples.write_chunk_uninit(needed) {
-            Ok(chunk) => {
+        match samples.write_chunk_uninit(needed).ok().filter(|_| flushed) {
+            Some(chunk) => {
                 chunk.fill_from_iter(
                     (frame..frame + n).flat_map(|k| (0..3).map(move |c| value(k, c))),
                 );
             }
-            Err(_) => marks
-                .push(RecMark::Gap {
-                    at: frame,
-                    frames: n as u32,
-                    fill: true,
-                })
-                .unwrap(),
+            None => match pending.as_mut() {
+                Some((_, frames)) => *frames += n as u32,
+                None => *pending = Some((frame, n as u32)),
+            },
+        }
+    }
+
+    /// Sends a pending gap before an end mark, waiting for room like the engine does.
+    fn flush_pending(marks: &mut Producer<RecMark>, pending: &mut Option<(u64, u32)>) {
+        while let Some((at, frames)) = *pending {
+            let gap = RecMark::Gap {
+                at,
+                frames,
+                fill: true,
+            };
+            if marks.push(gap).is_ok() {
+                *pending = None;
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
     }
 
@@ -518,13 +549,15 @@ mod tests {
                     .unwrap();
                 let frames = 48_000 * 60_u64;
                 let mut f = 0;
+                let mut pending = None;
                 while f < frames {
-                    push_quantum(&mut sink.samples, &mut sink.marks, f, 32);
+                    push_quantum(&mut sink.samples, &mut sink.marks, &mut pending, f, 32);
                     f += 32;
                     if f % (32 * 50) == 0 {
                         std::thread::sleep(Duration::from_micros(660));
                     }
                 }
+                flush_pending(&mut sink.marks, &mut pending);
                 sink.marks.push(RecMark::End { frames: f }).unwrap();
                 total.push(f);
             }
@@ -565,17 +598,19 @@ mod tests {
         marks.push(RecMark::Start { take: 0, tick: 0 }).unwrap();
         // The writer is not running yet: everything after four quanta becomes a gap.
         let mut f = 0;
+        let mut pending = None;
         while f < 32 * 100 {
-            push_quantum(&mut samples, &mut marks, f, 32);
+            push_quantum(&mut samples, &mut marks, &mut pending, f, 32);
             f += 32;
         }
         let thread = std::thread::spawn(move || writer.run());
         std::thread::sleep(Duration::from_millis(50));
         while f < 32 * 200 {
-            push_quantum(&mut samples, &mut marks, f, 32);
+            push_quantum(&mut samples, &mut marks, &mut pending, f, 32);
             f += 32;
             std::thread::sleep(Duration::from_micros(200));
         }
+        flush_pending(&mut marks, &mut pending);
         marks.push(RecMark::End { frames: f }).unwrap();
         drop((samples, marks));
         thread.join().unwrap();
