@@ -6,8 +6,11 @@
 //! song time where the source's first frame belongs) and runs at the engine's rate, so playing
 //! it needs no resampling. Renders are built off the audio thread ([`StretchJob::render`]):
 //! the app on a worker thread into a cache, the export before it starts. Both use the same
-//! code, so the export matches playback. A clip whose render is not ready yet plays its
-//! source resampled at the right speed (the pitch follows the speed until the render arrives).
+//! code, so the export matches playback. A clip whose render is not ready yet stretches live on
+//! the audio thread ([`LiveStretch`]): the same stream, run block by block with the engine's
+//! look-ahead, so played from the clip's start it gives the render's exact samples. Played
+//! from inside the clip it restarts the stream there, which sounds the same but is not
+//! bit-identical. A reversed clip without its render plays resampled.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -16,7 +19,7 @@ use std::sync::Arc;
 use gt_core::{
     Clip, ClipKind, ClipStretch, Project, SampleData, SampleSource, StretchMode, Tick, PPQ,
 };
-use gt_dsp::stretch::{render, Signalsmith, TimeMap};
+use gt_dsp::stretch::{render, Signalsmith, StretchStream, TimeMap};
 
 /// A stretch render to make: the clip's source through its time map.
 #[derive(Debug, Clone)]
@@ -49,6 +52,71 @@ impl StretchJob {
             sample_rate: rate,
             channels: vec![l, r],
         }
+    }
+}
+
+impl StretchJob {
+    /// A stream that makes this render while playing (allocates: build it off the audio
+    /// thread).
+    pub fn live(&self, sample_rate: u32) -> LiveStretch {
+        LiveStretch::new(self.map.clone(), self.semitones, sample_rate, self.frames)
+    }
+}
+
+/// A clip's stretch made while it plays (the render is still building). Cloning starts a new
+/// stream at the clip's start.
+pub struct LiveStretch {
+    stream: Box<StretchStream>,
+    map: TimeMap,
+    semitones: f32,
+    sample_rate: u32,
+    /// Length of the stretched audio.
+    pub frames: usize,
+}
+
+impl LiveStretch {
+    fn new(map: TimeMap, semitones: f32, sample_rate: u32, frames: usize) -> Self {
+        Self {
+            stream: Box::new(StretchStream::new(
+                Box::new(Signalsmith::new(sample_rate)),
+                map.clone(),
+                semitones,
+            )),
+            map,
+            semitones,
+            sample_rate,
+            frames,
+        }
+    }
+
+    /// Writes stretched frames `at..at + out_l.len()` (from the clip's origin) of `source`.
+    /// Continues where the last call ended, or jumps there first. Allocation-free.
+    pub fn fill(&mut self, source: &SampleData, at: usize, out_l: &mut [f32], out_r: &mut [f32]) {
+        if self.stream.position() != at {
+            self.stream.seek_to(at);
+        }
+        self.stream
+            .fill(source.left(), source.right(), out_l, out_r);
+    }
+}
+
+impl Clone for LiveStretch {
+    fn clone(&self) -> Self {
+        Self::new(
+            self.map.clone(),
+            self.semitones,
+            self.sample_rate,
+            self.frames,
+        )
+    }
+}
+
+impl std::fmt::Debug for LiveStretch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveStretch")
+            .field("frames", &self.frames)
+            .field("semitones", &self.semitones)
+            .finish_non_exhaustive()
     }
 }
 

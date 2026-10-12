@@ -136,6 +136,9 @@ impl TimeMap {
 pub struct StretchStream {
     engine: Box<dyn StretchEngine>,
     map: TimeMap,
+    /// Output frame the current run of blocks started at (0, or where [`StretchStream::seek_to`]
+    /// jumped to).
+    base: usize,
     /// Next source frame to feed (relative to the source start, may be past its end).
     cursor: i64,
     /// Raw output blocks produced so far.
@@ -161,6 +164,7 @@ impl StretchStream {
         Self {
             engine,
             map,
+            base: 0,
             cursor: 0,
             raw_blocks: 0,
             delivered: 0,
@@ -175,6 +179,21 @@ impl StretchStream {
     /// Output frames delivered so far.
     pub fn position(&self) -> usize {
         self.delivered
+    }
+
+    /// Jumps to output frame `out` (playback located into the clip) without allocating. The
+    /// engine restarts there as a fresh stream would at the start, so the output after a jump
+    /// sounds the same source but is not bit-identical to an uninterrupted run; the first block
+    /// after it renders the engine's latency worth of warm-up.
+    pub fn seek_to(&mut self, out: usize) {
+        self.engine.reset();
+        self.base = out;
+        self.cursor = 0;
+        self.raw_blocks = 0;
+        self.delivered = out;
+        self.to_drop = self.engine.output_latency();
+        self.started = false;
+        self.block_pos = BLOCK;
     }
 
     /// Writes the next `out_l.len()` frames (same length as `out_r`) reading the source
@@ -212,18 +231,18 @@ impl StretchStream {
         let in_lat = self.engine.input_latency() as i64;
         if !self.started {
             self.started = true;
-            let start = self.map.at(0.0).floor() as i64;
+            let start = self.map.at(self.base as f64).floor() as i64;
             self.input.clear();
             for f in start..start + in_lat {
                 let (l, r) = read(f);
                 self.input.push(l);
                 self.input.push(r);
             }
-            let speed = self.map.speed(0.0);
+            let speed = self.map.speed(self.base as f64);
             self.engine.seek(&self.input, speed);
             self.cursor = start + in_lat;
         }
-        let end_out = ((self.raw_blocks + 1) * BLOCK) as f64;
+        let end_out = (self.base + (self.raw_blocks + 1) * BLOCK) as f64;
         let want = (self.map.at(end_out).floor() as i64 + in_lat).max(self.cursor);
         self.input.clear();
         for f in self.cursor..want {
@@ -392,5 +411,48 @@ mod tests {
         }
         assert_eq!(a, b);
         assert_eq!(s.position(), SR as usize);
+    }
+
+    #[test]
+    fn a_jump_lands_on_the_map_and_a_jump_home_starts_over() {
+        // Clicks every 0.25 s stretched by 1.6: after jumping into the middle they still come
+        // every 0.4 s, and jumping back to 0 gives the uninterrupted render again.
+        let mut src = vec![0.0_f32; 2 * SR as usize];
+        for k in 0..8 {
+            for i in 0..48 {
+                src[k * SR as usize / 4 + i] = if i % 2 == 0 { 0.9 } else { -0.9 };
+            }
+        }
+        let frames = (3.2 * f64::from(SR)) as usize;
+        let map = TimeMap::linear(1.0 / 1.6, frames);
+        let mut s = StretchStream::new(Box::new(Signalsmith::new(SR)), map.clone(), 0.0);
+        let jump = SR as usize; // 1.0 s: between the clicks at 0.8 and 1.2 s
+        s.seek_to(jump);
+        let (mut l, mut r) = (vec![0.0; frames - jump], vec![0.0; frames - jump]);
+        s.fill(&src, &src, &mut l, &mut r);
+        assert_eq!(s.position(), frames);
+        for k in 3..7 {
+            let want = (k as f64 * 0.4 * f64::from(SR)) as usize - jump;
+            let at = (want - 2400..want + 2400)
+                .max_by(|&a, &b| l[a].abs().total_cmp(&l[b].abs()))
+                .unwrap() as i64
+                - want as i64;
+            assert!(
+                at.abs() < 480,
+                "click {k} is {at} frames off after the jump"
+            );
+        }
+        let (whole, _) = render(
+            Box::new(Signalsmith::new(SR)),
+            &src,
+            &src,
+            map,
+            0.0,
+            SR as usize,
+        );
+        s.seek_to(0);
+        let (mut l, mut r) = (vec![0.0; SR as usize], vec![0.0; SR as usize]);
+        s.fill(&src, &src, &mut l, &mut r);
+        assert_eq!(l, whole);
     }
 }

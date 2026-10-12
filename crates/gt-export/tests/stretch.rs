@@ -1,6 +1,6 @@
 //! Stretched audio clips (Prompt 15): tempo follow puts the audio's beats on the project's
 //! beats through tempo changes, the export renders exactly what playback plays, and a clip
-//! whose render is not ready yet still plays at the right speed.
+//! whose render is not ready yet stretches live with the same result.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -72,8 +72,15 @@ fn export(p: &Project, samples: &HashMap<SampleSource, Arc<SampleData>>) -> Vec<
     out[0].audio.chunks_exact(2).map(|f| f[0]).collect()
 }
 
-/// Plays the song in the engine the way the app does: renders from the cache, odd blocks.
-fn play(p: &Project, sample: &Arc<SampleData>, frames: usize, cached: bool) -> Vec<f32> {
+/// Plays the song in the engine the way the app does: renders from the cache (or live without
+/// it), odd blocks, from tick `from`.
+fn play_from(
+    p: &Project,
+    sample: &Arc<SampleData>,
+    frames: usize,
+    cached: bool,
+    from: i64,
+) -> Vec<f32> {
     let lookup = |_: &SampleSource| Some(Arc::clone(sample));
     let renders: HashMap<u64, Arc<SampleData>> = if cached {
         gt_engine::stretch::jobs(p, lookup)
@@ -92,12 +99,17 @@ fn play(p: &Project, sample: &Arc<SampleData>, frames: usize, cached: bool) -> V
         .unwrap();
     h.send(EngineCommand::SetSong(Box::new(song))).unwrap();
     h.send(EngineCommand::SetMetronome(false)).unwrap();
+    h.send(EngineCommand::Locate(Tick(from))).unwrap();
     h.send(EngineCommand::Play).unwrap();
     let mut out = vec![0.0; 2 * frames];
     for chunk in out.chunks_mut(2 * 441) {
         proc_.process(chunk);
     }
     out.chunks_exact(2).map(|f| f[0]).collect()
+}
+
+fn play(p: &Project, sample: &Arc<SampleData>, frames: usize, cached: bool) -> Vec<f32> {
+    play_from(p, sample, frames, cached, 0)
 }
 
 /// Where the burst nearest `at` starts (first sample above 0.2 within `win` frames), relative
@@ -164,17 +176,47 @@ fn the_export_matches_playback() {
 }
 
 #[test]
-fn without_its_render_a_clip_plays_resampled_at_the_right_speed() {
+fn without_its_render_a_clip_stretches_live_with_the_same_result() {
+    let tempo = TempoMap::from_points_lossy(&[TempoPoint {
+        at: Tick(0),
+        bpm: 128.0,
+    }]);
+    for stretch in [
+        follow(100.0),
+        ClipStretch {
+            mode: StretchMode::Manual,
+            ratio: 0.8,
+            semitones: 5.0,
+            bpm: 0.0,
+        },
+    ] {
+        let (p, src) = project(stretch, tempo.clone());
+        let sample = loop_100();
+        let samples = HashMap::from([(src, Arc::clone(&sample))]);
+        let offline = export(&p, &samples);
+        let live = play(&p, &sample, offline.len(), false);
+        let worst = offline
+            .iter()
+            .zip(&live)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(worst < 1e-4, "{stretch:?}: live differs by {worst}");
+    }
+}
+
+#[test]
+fn started_inside_the_clip_the_live_stretch_keeps_the_beats() {
     let tempo = TempoMap::from_points_lossy(&[TempoPoint {
         at: Tick(0),
         bpm: 120.0,
     }]);
-    let (p, _) = project(follow(100.0), tempo.clone());
-    let out = play(&p, &loop_100(), 4 * SR as usize, false);
-    // Beats every 0.5 s, exactly (resampling keeps timing, only the pitch is off).
-    for b in 1..8 {
-        let off = onset_near(&out, b * SR as usize / 2, 1200);
-        assert!(off.abs() <= 2, "beat {b} is {off} frames off");
+    let (p, _) = project(follow(100.0), tempo);
+    // From beat 2.5: beats 3..7 at 0.5 s spacing, the first 0.25 s in.
+    let out = play_from(&p, &loop_100(), 3 * SR as usize, false, 2 * 960 + 480);
+    for b in 3..8 {
+        let at = (b * 2 - 5) * SR as usize / 4;
+        let off = onset_near(&out, at, 2400);
+        assert!(off.abs() < 240, "beat {b} is {off} frames off");
     }
 }
 

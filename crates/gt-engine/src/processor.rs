@@ -82,6 +82,9 @@ pub struct AudioProcessor {
     mono: [f32; Q],
     /// Per-channel scratch, reused for each channel in turn.
     scratch_l: [f32; Q],
+    /// Live stretch output of one clip for one quantum (Prompt 15 part 2).
+    live_l: [f32; Q],
+    live_r: [f32; Q],
     scratch_r: [f32; Q],
 
     song: Option<Box<SongSnapshot>>,
@@ -169,6 +172,8 @@ impl AudioProcessor {
             fifo_pos: Q,
             mono: [0.0; Q],
             scratch_l: [0.0; Q],
+            live_l: [0.0; Q],
+            live_r: [0.0; Q],
             scratch_r: [0.0; Q],
             song: None,
             control_tick: f64::NAN,
@@ -557,7 +562,7 @@ impl AudioProcessor {
         if self.scheduled.segments().is_empty() {
             self.clip_resume_s = f64::NEG_INFINITY;
         }
-        let Some(song) = self.song.as_deref() else {
+        let Some(song) = self.song.as_deref_mut() else {
             return;
         };
         if song.audio.is_empty() {
@@ -575,7 +580,7 @@ impl AudioProcessor {
             }
             self.clip_resume_s = b;
             let jump = self.clip_jump_s;
-            for clip in &song.audio {
+            for clip in &mut song.audio {
                 if clip.start_s >= b {
                     break;
                 }
@@ -593,24 +598,56 @@ impl AudioProcessor {
                 } else {
                     self.mixer.direct_mut(usize::from(clip.route))
                 };
-                for i in i0..i1.min(n) {
-                    let t = a + i as f64 / sr;
-                    let mut pos = (t - clip.origin_s) * rate * clip.speed;
-                    if pos < 0.0 {
+                // A clip stretching live renders its frames for this segment in one go.
+                let mut live_at = None;
+                if let Some(live) = clip.live.as_mut() {
+                    let first = (i0..i1).find(|&i| a + i as f64 / sr >= clip.origin_s);
+                    if let Some(first) = first {
+                        let at = ((a + first as f64 / sr - clip.origin_s) * rate).round() as usize;
+                        let m = (i1 - first).min(live.frames.saturating_sub(at));
+                        live.fill(
+                            &clip.sample,
+                            at,
+                            &mut self.live_l[..m],
+                            &mut self.live_r[..m],
+                        );
+                        live_at = Some((first, first + m));
+                    } else {
                         continue;
                     }
-                    if clip.reverse {
-                        pos = (len as f64 - 1.0) - pos;
-                        if pos < 0.0 {
+                }
+                for i in i0..i1.min(n) {
+                    let t = a + i as f64 / sr;
+                    let (vl, vr) = if let Some((first, end)) = live_at {
+                        if i < first {
+                            continue;
+                        }
+                        if i >= end {
                             break;
                         }
-                    }
-                    let k = pos as usize;
-                    if k >= len {
-                        break;
-                    }
-                    let frac = (pos - k as f64) as f32;
-                    let k1 = (k + 1).min(len - 1);
+                        (self.live_l[i - first], self.live_r[i - first])
+                    } else {
+                        let mut pos = (t - clip.origin_s) * rate * clip.speed;
+                        if pos < 0.0 {
+                            continue;
+                        }
+                        if clip.reverse {
+                            pos = (len as f64 - 1.0) - pos;
+                            if pos < 0.0 {
+                                break;
+                            }
+                        }
+                        let k = pos as usize;
+                        if k >= len {
+                            break;
+                        }
+                        let frac = (pos - k as f64) as f32;
+                        let k1 = (k + 1).min(len - 1);
+                        (
+                            src_l[k] + (src_l[k1] - src_l[k]) * frac,
+                            src_r[k] + (src_r[k1] - src_r[k]) * frac,
+                        )
+                    };
                     let mut edge = 1.0_f64;
                     if clip.fade_in {
                         edge = edge.min((t - clip.start_s) / CLIP_FADE_S);
@@ -624,8 +661,8 @@ impl AudioProcessor {
                     let edge = edge.clamp(0.0, 1.0) * clip.fade_gain(t);
                     let g = clip.gain * edge as f32;
                     let o = seg.offset as usize + i;
-                    dl[o] += (src_l[k] + (src_l[k1] - src_l[k]) * frac) * g;
-                    dr[o] += (src_r[k] + (src_r[k1] - src_r[k]) * frac) * g;
+                    dl[o] += vl * g;
+                    dr[o] += vr * g;
                 }
             }
         }

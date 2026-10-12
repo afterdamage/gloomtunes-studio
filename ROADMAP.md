@@ -490,9 +490,13 @@ sound identical; the golden export test stays.
   - CPU cost: a render costs about 16 ms per second of stereo audio (1.6 % of one core while
     it builds; `cargo bench -p gt-dsp --bench stretch`); playing a render costs the same as any
     audio clip.
-  - Known limits: until its render is ready a clip plays resampled at the right speed (so its
-    pitch is off for a moment); part 2 replaces that with real-time stretching. Pitch accuracy
-    is within 5 cents (about 4 cents at some intervals). Renders are kept in memory only.
+  - Known limits: pitch accuracy is within 5 cents (about 4 cents at some intervals). Renders
+    are kept in memory only.
+- Part 2 delivered (2026-10-12), in review (D107): a clip whose render is not ready yet
+  stretches live on the audio thread with look-ahead; from the clip's start it plays exactly
+  the render's samples, and after a locate it restarts the stream there. CPU: the same 1.6 %
+  of a core per live clip, only until its render arrives. Limit: a reversed clip plays
+  resampled until its render is ready.
 
 ---
 
@@ -503,7 +507,6 @@ Optional for v1.0: Step 11 (CLAP), delivered.
 Out (post-v1 backlog):
 
 - VST3 hosting.
-- Time-stretching and pitch-shifting of audio clips.
 - Tempo ramps (the tempo map currently has step changes only).
 - Out-of-process plugin sandbox (evaluated and deferred in Step 11, D74).
 - Additional built-in instruments (FM, wavetable, drum synth).
