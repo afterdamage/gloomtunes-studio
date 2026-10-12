@@ -12,8 +12,11 @@ publish = false
 [lints]
 workspace = true
 
+[dependencies]
+signalsmith-stretch.workspace = true
 
 [dev-dependencies]
+rustfft.workspace = true
 criterion.workspace = true
 insta.workspace = true
 
@@ -27,4 +30,8 @@ harness = false
 
 [[bench]]
 name = "latency"
+harness = false
+
+[[bench]]
+name = "stretch"
 harness = false

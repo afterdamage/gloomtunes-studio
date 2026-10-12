@@ -539,7 +539,20 @@ fn load_engine(
             }
         }
     }
-    let song = SongSnapshot::compile_song(project, |src| samples.get(src).map(Arc::clone));
+    // Stretched clips: the same renders the app caches (D106), made here before playing.
+    let renders: HashMap<u64, Arc<SampleData>> =
+        gt_engine::stretch::jobs(project, |src| samples.get(src).map(Arc::clone))
+            .into_iter()
+            .filter_map(|j| {
+                let src = samples.get(&j.source)?;
+                Some((j.key, Arc::new(j.render(src))))
+            })
+            .collect();
+    let song = SongSnapshot::compile_song_with(
+        project,
+        |src| samples.get(src).map(Arc::clone),
+        |key| renders.get(&key).map(Arc::clone),
+    );
     send(h, p, EngineCommand::SetSong(Box::new(song)));
     send(
         h,

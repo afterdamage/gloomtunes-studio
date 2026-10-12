@@ -91,6 +91,9 @@ pub struct AudioPlay {
     /// A frozen track's render: joins its strip at the freeze point (after an insert's
     /// effects, D105) instead of at the strip's input.
     pub frozen: bool,
+    /// Source frames per output frame (resampling: 2 plays an octave up in half the time;
+    /// 1 for stretch renders, which already run at the right speed).
+    pub speed: f64,
 }
 
 impl AudioPlay {
@@ -269,6 +272,16 @@ impl SongSnapshot {
         project: &Project,
         samples: impl Fn(&SampleSource) -> Option<Arc<SampleData>>,
     ) -> Self {
+        Self::compile_song_with(project, samples, |_| None)
+    }
+
+    /// [`Self::compile_song`] with the stretch renders `stretched` has ready, by cache key
+    /// ([`crate::stretch`]). A clip whose render is missing plays its source resampled.
+    pub fn compile_song_with(
+        project: &Project,
+        samples: impl Fn(&SampleSource) -> Option<Arc<SampleData>>,
+        stretched: impl Fn(u64) -> Option<Arc<SampleData>>,
+    ) -> Self {
         let pl = &project.playlist;
         let swing = swing_ticks(project);
         let tempo = &project.tempo;
@@ -299,6 +312,7 @@ impl SongSnapshot {
                 fade_out_curve: FadeCurve::Linear,
                 reverse: false,
                 frozen: true,
+                speed: 1.0,
                 sample,
                 gain: 1.0,
                 route: t.insert.min(gt_core::STRIPS - 1) as u8,
@@ -322,6 +336,14 @@ impl SongSnapshot {
                 } => {
                     let Some(sample) = samples(source) else {
                         continue;
+                    };
+                    let render = crate::stretch::key(project, clip, &sample).and_then(&stretched);
+                    let (sample, speed) = match render {
+                        Some(r) => (r, 1.0),
+                        None => (
+                            sample,
+                            crate::stretch::plain_speed(project, clip, &edit.stretch.sanitized()),
+                        ),
                     };
                     // Overlaps with the neighbours on this track crossfade (equal power)
                     // unless the clip's own fade is already longer.
@@ -351,7 +373,7 @@ impl SongSnapshot {
                         sec(clip.end()),
                         sec(clip.start - clip.offset),
                     );
-                    let cut_end = end_s < origin_s + sample.seconds();
+                    let cut_end = end_s < origin_s + sample.seconds() / speed;
                     audio.push(AudioPlay {
                         start_s,
                         end_s,
@@ -364,6 +386,7 @@ impl SongSnapshot {
                         fade_out_curve: fade_out.curve,
                         reverse: edit.reverse,
                         frozen: false,
+                        speed,
                         sample,
                         gain: gain.clamp(0.0, 4.0),
                         route: route as u8,

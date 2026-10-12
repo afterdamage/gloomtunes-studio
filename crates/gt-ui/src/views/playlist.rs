@@ -27,9 +27,9 @@ use egui::{
 };
 use gt_core::playlist::TRACK_COLORS;
 use gt_core::{
-    AutoPoint, Automation, ClipId, ClipKind, Curve, FadeCurve, ParamId, PatternId, Peaks, Project,
-    SampleSource, SigChange, StripKind, TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, TrackId,
-    FX_SLOTS, MASTER, PPQ, STRIPS,
+    AutoPoint, Automation, ClipId, ClipKind, ClipStretch, Curve, FadeCurve, ParamId, PatternId,
+    Peaks, Project, SampleSource, SigChange, StretchMode, StripKind, TempoMap, TempoPoint, Tick,
+    TimeSig, TimeSigMap, TrackId, FX_SLOTS, MASTER, PPQ, STRIPS,
 };
 
 use crate::GloomTheme;
@@ -442,7 +442,7 @@ pub fn playlist(
         view.inputs,
         &mut actions,
     );
-    let (popup_timing, popup_changed) = show_popup(ui, theme, st, project);
+    let (popup_timing, popup_changed) = show_popup(ui, theme, st, project, view.audio);
     let timing = timing | popup_timing;
     changed |= popup_changed;
     if popup_changed {
@@ -1655,6 +1655,7 @@ fn show_popup(
     theme: &GloomTheme,
     st: &mut PlaylistState,
     project: &mut Project,
+    audio: &dyn AudioLookup,
 ) -> (bool, bool) {
     let Some((popup, pos, age)) = st.popup else {
         return (false, false);
@@ -1741,6 +1742,12 @@ fn show_popup(
                         }
                     }
                     Popup::Clip(id) => {
+                        let seconds = project.playlist.clip(id).and_then(|c| match &c.kind {
+                            ClipKind::Audio { source, .. } => audio
+                                .peaks(source)
+                                .map(|(p, r)| p.frames() as f64 / f64::from(r.max(1))),
+                            _ => None,
+                        });
                         let Some(c) = project.playlist.clip_mut(id) else {
                             close = true;
                             return;
@@ -1761,6 +1768,7 @@ fn show_popup(
                             takes.iter().map(|t| t.source.display_name()).collect();
                         let mut pick = None;
                         let mut clear = false;
+                        let mut new_len = None;
                         ui.vertical(|ui| {
                             ui.label(RichText::new(current.clone()).color(theme.text_dim));
                             ui.horizontal(|ui| {
@@ -1802,6 +1810,20 @@ fn show_popup(
                                         });
                                 });
                             }
+                            ui.separator();
+                            let before = edit.stretch;
+                            stretch_controls(ui, &mut edit.stretch, seconds);
+                            if edit.stretch != before {
+                                changed = true;
+                                // Resampling and manual stretch change the length: the clip
+                                // follows.
+                                if edit.stretch.mode != StretchMode::TempoFollow
+                                    && before.mode != StretchMode::TempoFollow
+                                    && before.ratio != edit.stretch.ratio
+                                {
+                                    new_len = Some(edit.stretch.ratio / before.ratio);
+                                }
+                            }
                             if !others.is_empty() {
                                 ui.separator();
                                 ui.label(RichText::new("Takes").color(theme.text_dim));
@@ -1817,6 +1839,9 @@ fn show_popup(
                                     .clicked();
                             }
                         });
+                        if let Some(f) = new_len {
+                            c.length = ((c.length as f64 * f).round() as i64).max(1);
+                        }
                         if let Some(i) = pick {
                             changed |= c.use_take(i);
                         }
@@ -2013,17 +2038,14 @@ fn paint(
                 ..
             } => {
                 if let Some((peaks, rate)) = view.audio.peaks(source) {
-                    paint_wave(
-                        &cp,
-                        geo,
-                        c,
-                        &project.tempo,
-                        peaks,
-                        rate,
-                        edit.reverse,
-                        body,
-                        ink,
-                    );
+                    let look = WaveLook {
+                        reverse: edit.reverse,
+                        speed: edit
+                            .stretch
+                            .sanitized()
+                            .speed(project.tempo.bpm_at(Tick(c.start - c.offset))),
+                    };
+                    paint_wave(&cp, geo, c, &project.tempo, peaks, rate, look, body, ink);
                 }
                 paint_gaps(&cp, geo, c, &project.tempo, gaps, body, theme.warn);
                 paint_fades(&cp, geo, c, edit, r, body, ink);
@@ -2255,6 +2277,14 @@ fn paint_pattern(
     }
 }
 
+/// How a clip reads its audio, for drawing.
+#[derive(Debug, Clone, Copy)]
+struct WaveLook {
+    reverse: bool,
+    /// Source seconds per song second (tempo follow: at the clip's start).
+    speed: f64,
+}
+
 /// Waveform of an audio clip from the peak cache, one column per pixel.
 #[allow(clippy::too_many_arguments)]
 fn paint_wave(
@@ -2264,10 +2294,11 @@ fn paint_wave(
     tempo: &TempoMap,
     peaks: &Peaks,
     rate: u32,
-    reverse: bool,
+    look: WaveLook,
     body: Rect,
     ink: Color32,
 ) {
+    let WaveLook { reverse, speed } = look;
     let vis = p.clip_rect().intersect(body);
     if vis.width() <= 0.0 {
         return;
@@ -2276,7 +2307,7 @@ fn paint_wave(
     let rate = f64::from(rate.max(1));
     let mid = body.center().y;
     let half = body.height() * 0.5 - 1.0;
-    let frame_at = |x: f32| (tempo.tick_to_seconds(geo.tick_f(x)) - origin) * rate;
+    let frame_at = |x: f32| (tempo.tick_to_seconds(geo.tick_f(x)) - origin) * rate * speed;
     let mut x = vis.left().floor();
     let mut f0 = frame_at(x);
     while x < vis.right() {
@@ -2336,6 +2367,89 @@ fn paint_fades(
     }
     for (_, q) in fade_handles(geo, r, c.start, c.end(), edit) {
         p.rect_filled(Rect::from_center_size(q, egui::vec2(6.0, 6.0)), 1.0, ink);
+    }
+}
+
+/// Stretch mode, speed and pitch of an audio clip (the popup). `seconds` is the source's
+/// length, for guessing its tempo.
+fn stretch_controls(ui: &mut Ui, s: &mut ClipStretch, seconds: Option<f64>) {
+    ui.horizontal(|ui| {
+        ui.label("Speed");
+        egui::ComboBox::from_id_salt("pl_stretch_mode")
+            .width(100.0)
+            .selected_text(s.mode.name())
+            .show_ui(ui, |ui| {
+                for m in StretchMode::ALL {
+                    ui.selectable_value(&mut s.mode, m, m.name());
+                }
+            })
+            .response
+            .on_hover_text(
+                "Resample: pitch follows speed. Tempo follow: keeps pitch and follows the \
+                 project tempo. Stretch: length and pitch set separately.",
+            );
+    });
+    match s.mode {
+        StretchMode::Off | StretchMode::Manual => {
+            ui.horizontal(|ui| {
+                ui.label("Length");
+                ui.add(
+                    egui::DragValue::new(&mut s.ratio)
+                        .range(ClipStretch::RATIO.0..=ClipStretch::RATIO.1)
+                        .speed(0.005)
+                        .fixed_decimals(3)
+                        .prefix("×"),
+                )
+                .on_hover_text("2 plays twice as long");
+            });
+        }
+        StretchMode::TempoFollow => {
+            ui.horizontal(|ui| {
+                ui.label("Original");
+                ui.add(
+                    egui::DragValue::new(&mut s.bpm)
+                        .range(0.0..=ClipStretch::BPM.1)
+                        .speed(0.05)
+                        .fixed_decimals(2)
+                        .suffix(" BPM"),
+                )
+                .on_hover_text("The tempo the audio was played at (0: unknown)");
+                if let Some(g) = seconds.and_then(ClipStretch::guess_bpm) {
+                    if ui
+                        .small_button("From length")
+                        .on_hover_text(format!(
+                            "{g:.2} BPM: the clip holds a whole number of beats"
+                        ))
+                        .clicked()
+                    {
+                        s.bpm = (g * 100.0).round() / 100.0;
+                    }
+                }
+            });
+        }
+    }
+    if s.mode == StretchMode::Manual {
+        ui.horizontal(|ui| {
+            ui.label("Pitch");
+            let mut semi = s.semitones.trunc();
+            let mut cents = ((s.semitones - semi) * 100.0).round();
+            let a = ui.add(
+                egui::DragValue::new(&mut semi)
+                    .range(-ClipStretch::SEMITONES..=ClipStretch::SEMITONES)
+                    .speed(0.05)
+                    .suffix(" st"),
+            );
+            let b = ui.add(
+                egui::DragValue::new(&mut cents)
+                    .range(-99.0..=99.0)
+                    .speed(0.2)
+                    .suffix(" ct"),
+            );
+            if a.changed() || b.changed() {
+                s.semitones =
+                    (semi + cents / 100.0).clamp(-ClipStretch::SEMITONES, ClipStretch::SEMITONES);
+            }
+        });
     }
 }
 

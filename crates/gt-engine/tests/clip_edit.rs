@@ -68,7 +68,7 @@ fn fades_follow_their_curves() {
             AudioEdit {
                 fade_in: fade,
                 fade_out: fade,
-                reverse: false,
+                ..AudioEdit::default()
             },
         );
         let out = render(&p, &dc(3.0), Tick(0), 2.1);

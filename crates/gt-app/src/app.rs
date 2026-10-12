@@ -36,6 +36,7 @@ mod midi;
 mod plugins;
 mod prefs;
 mod record;
+mod stretch;
 
 use crate::audio_io::AudioIo;
 use crate::files::{self, Dialog, DialogAction, ExportForm, Then};
@@ -143,6 +144,8 @@ pub struct GloomApp {
     export_job: Option<std::thread::JoinHandle<Result<Vec<PathBuf>, gt_export::ExportError>>>,
     /// Render to audio, consolidate or freeze in progress.
     bounce_job: Option<bounce::BounceJob>,
+    /// Renders of stretched audio clips.
+    stretch: stretch::StretchCache,
     /// A short message shown at the bottom right, and when it appeared.
     toast: Option<(String, Instant)>,
     /// The user confirmed quitting (or there was nothing to save).
@@ -289,6 +292,7 @@ impl GloomApp {
             export_form: None,
             export_job: None,
             bounce_job: None,
+            stretch: stretch::StretchCache::new(),
             toast: None,
             quit_confirmed: false,
             window_title: String::new(),
@@ -417,10 +421,14 @@ impl GloomApp {
     fn push_song(&mut self) {
         let song = if self.transport.song_mode {
             self.request_clip_audio();
+            self.request_stretches();
             let lib = &self.library;
-            SongSnapshot::compile_song(&self.project, |src| {
-                lib.get(src).map(|l| std::sync::Arc::clone(&l.data))
-            })
+            let cache = &self.stretch;
+            SongSnapshot::compile_song_with(
+                &self.project,
+                |src| lib.get(src).map(|l| std::sync::Arc::clone(&l.data)),
+                |key| cache.get(key),
+            )
         } else {
             SongSnapshot::compile(&self.project)
         };
@@ -1709,6 +1717,7 @@ impl GloomApp {
     fn document_frame(&mut self, ctx: &egui::Context, theme: &GloomTheme) {
         self.poll_export();
         self.poll_bounce();
+        self.poll_stretches();
         if let Some(mut d) = self.dialog.take() {
             let action = files::show(ctx, theme, &mut d);
             self.dialog = Some(d);

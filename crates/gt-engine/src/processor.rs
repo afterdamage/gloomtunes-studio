@@ -595,7 +595,7 @@ impl AudioProcessor {
                 };
                 for i in i0..i1.min(n) {
                     let t = a + i as f64 / sr;
-                    let mut pos = (t - clip.origin_s) * rate;
+                    let mut pos = (t - clip.origin_s) * rate * clip.speed;
                     if pos < 0.0 {
                         continue;
                     }

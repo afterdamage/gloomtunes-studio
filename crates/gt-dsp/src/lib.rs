@@ -18,6 +18,7 @@ mod lfo;
 mod osc;
 mod ramp;
 mod sampler;
+pub mod stretch;
 pub mod synth;
 
 pub use adsr::{Adsr, AdsrParams};

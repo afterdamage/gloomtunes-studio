@@ -32,11 +32,11 @@ use gt_core::modulation::SYNC_RATES;
 use gt_core::synth::{ModDest, ModSlot, ModSource, SynthParam, SynthPatch, MOD_SLOTS};
 use gt_core::{
     Adsr, AudioEdit, AudioInput, AudioTake, AutoPoint, Automation, BuiltInSample, Channel,
-    ChannelId, Clip, ClipId, ClipKind, Curve, EffectSlot, Fade, FadeCurve, Frozen, Gap, Instrument,
-    LfoRate, LfoShape, LoopMode, Marker, ModSourceKind, Modulator, ModulatorId, Note, ParamId,
-    Pattern, PatternId, PluginFormat, PluginInstanceId, PluginKind, PluginParamInfo, PluginRef,
-    Project, SampleSource, SamplerSettings, SigChange, TempoMap, TempoPoint, Tick, TimeSig,
-    TimeSigMap, Track, TrackId, FX_SLOTS, SENDS,
+    ChannelId, Clip, ClipId, ClipKind, ClipStretch, Curve, EffectSlot, Fade, FadeCurve, Frozen,
+    Gap, Instrument, LfoRate, LfoShape, LoopMode, Marker, ModSourceKind, Modulator, ModulatorId,
+    Note, ParamId, Pattern, PatternId, PluginFormat, PluginInstanceId, PluginKind, PluginParamInfo,
+    PluginRef, Project, SampleSource, SamplerSettings, SigChange, StretchMode, TempoMap,
+    TempoPoint, Tick, TimeSig, TimeSigMap, Track, TrackId, FX_SLOTS, SENDS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -652,11 +652,38 @@ enum ClipContentDto {
         /// Plays backwards (schema 4).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         reverse: bool,
+        /// Speed and pitch (schema 4, optional).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stretch: Option<StretchDto>,
     },
     Automation {
         target: String,
         points: Vec<PointDto>,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+struct StretchDto {
+    mode: String,
+    #[serde(default = "one")]
+    ratio: f64,
+    #[serde(default)]
+    semitones: f32,
+    #[serde(default)]
+    bpm: f64,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+fn stretch_dto(s: ClipStretch) -> Option<StretchDto> {
+    (s != ClipStretch::default()).then(|| StretchDto {
+        mode: s.mode.key().to_owned(),
+        ratio: s.ratio,
+        semitones: s.semitones,
+        bpm: s.bpm,
+    })
 }
 
 fn fade_dto(f: Fade) -> Option<(i64, String)> {
@@ -905,6 +932,7 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                         fade_in: fade_dto(edit.fade_in),
                         fade_out: fade_dto(edit.fade_out),
                         reverse: edit.reverse,
+                        stretch: stretch_dto(edit.stretch),
                     },
                     ClipKind::Automation(a) => ClipContentDto::Automation {
                         target: a.target.key(),
@@ -1271,6 +1299,7 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                 fade_in,
                 fade_out,
                 reverse,
+                stretch,
             } => {
                 let fade = |f: Option<(i64, String)>| {
                     f.map_or_else(Fade::default, |(len, curve)| Fade {
@@ -1282,6 +1311,12 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                     fade_in: fade(fade_in),
                     fade_out: fade(fade_out),
                     reverse,
+                    stretch: stretch.map_or_else(ClipStretch::default, |s| ClipStretch {
+                        mode: StretchMode::from_key(&s.mode),
+                        ratio: s.ratio,
+                        semitones: s.semitones,
+                        bpm: s.bpm,
+                    }),
                 };
                 let to_gaps = |g: Vec<(f64, f64)>| {
                     g.into_iter()
@@ -1747,6 +1782,12 @@ mod tests {
                 curve: FadeCurve::Exponential,
             },
             reverse: true,
+            stretch: ClipStretch {
+                mode: StretchMode::TempoFollow,
+                ratio: 1.0,
+                semitones: -2.5,
+                bpm: 92.5,
+            },
         };
         p.playlist.add_clip(
             t,

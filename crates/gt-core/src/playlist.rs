@@ -349,7 +349,7 @@ pub struct Fade {
 }
 
 /// Non-destructive edits of an audio clip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct AudioEdit {
     /// Fade at the left edge.
     pub fade_in: Fade,
@@ -357,6 +357,140 @@ pub struct AudioEdit {
     pub fade_out: Fade,
     /// Play the audio backwards (the clip's offset counts from the audio's end).
     pub reverse: bool,
+    /// Speed and pitch (Prompt 15).
+    pub stretch: ClipStretch,
+}
+
+/// How an audio clip's speed and pitch are set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StretchMode {
+    /// Resample: the audio plays `ratio` times as long and the pitch follows the speed.
+    #[default]
+    Off,
+    /// Keep the pitch and follow the project tempo map from the clip's original BPM.
+    TempoFollow,
+    /// Stretch to `ratio` times the length and shift the pitch by `semitones`, independently.
+    Manual,
+}
+
+impl StretchMode {
+    /// Every mode, in menu order.
+    pub const ALL: [StretchMode; 3] = [Self::Off, Self::TempoFollow, Self::Manual];
+
+    /// Menu label.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "Resample",
+            Self::TempoFollow => "Tempo follow",
+            Self::Manual => "Stretch",
+        }
+    }
+
+    /// Project-file key.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::TempoFollow => "tempo",
+            Self::Manual => "manual",
+        }
+    }
+
+    /// The mode for a key; unknown keys give [`StretchMode::Off`].
+    pub fn from_key(key: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|m| m.key() == key)
+            .unwrap_or_default()
+    }
+}
+
+/// Speed and pitch of an audio clip.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipStretch {
+    /// How speed and pitch are set.
+    pub mode: StretchMode,
+    /// Length multiplier (2 plays twice as long) for `Off` and `Manual`.
+    pub ratio: f64,
+    /// Pitch shift for `Manual`, in semitones (fractions are cents).
+    pub semitones: f32,
+    /// Tempo the audio was played at, for `TempoFollow`; 0 when unknown.
+    pub bpm: f64,
+}
+
+impl Default for ClipStretch {
+    fn default() -> Self {
+        Self {
+            mode: StretchMode::Off,
+            ratio: 1.0,
+            semitones: 0.0,
+            bpm: 0.0,
+        }
+    }
+}
+
+impl ClipStretch {
+    /// Shortest and longest length multiplier.
+    pub const RATIO: (f64, f64) = (0.25, 4.0);
+    /// Largest pitch shift either way, in semitones.
+    pub const SEMITONES: f32 = 24.0;
+    /// Original tempo range.
+    pub const BPM: (f64, f64) = (20.0, 400.0);
+
+    /// True when the stretch engine (not plain resampling) shapes the sound.
+    pub fn uses_engine(&self) -> bool {
+        match self.mode {
+            StretchMode::Off => false,
+            StretchMode::TempoFollow => self.bpm > 0.0,
+            StretchMode::Manual => self.ratio != 1.0 || self.semitones != 0.0,
+        }
+    }
+
+    /// Source seconds per song second, given the project tempo where the clip's audio starts:
+    /// exact for resampling and manual stretch, the starting speed for tempo follow.
+    pub fn speed(&self, bpm_at_origin: f64) -> f64 {
+        match self.mode {
+            StretchMode::Off | StretchMode::Manual => 1.0 / self.ratio.max(1e-3),
+            StretchMode::TempoFollow if self.bpm > 0.0 => bpm_at_origin / self.bpm,
+            StretchMode::TempoFollow => 1.0,
+        }
+    }
+
+    /// An original tempo for audio `seconds` long, assuming it holds a whole number of beats
+    /// (a power of two) at a tempo between 70 and 180 BPM; the one nearest 120 BPM wins.
+    pub fn guess_bpm(seconds: f64) -> Option<f64> {
+        if seconds.is_nan() || seconds <= 0.0 {
+            return None;
+        }
+        (0..10)
+            .map(|k| f64::from(1u32 << k) * 60.0 / seconds)
+            .filter(|b| (70.0..=180.0).contains(b))
+            .min_by(|a, b| (a - 120.0).abs().total_cmp(&(b - 120.0).abs()))
+    }
+
+    /// The same settings brought into range.
+    pub fn sanitized(self) -> Self {
+        let ratio = if self.ratio.is_finite() {
+            self.ratio.clamp(Self::RATIO.0, Self::RATIO.1)
+        } else {
+            1.0
+        };
+        let semitones = if self.semitones.is_finite() {
+            self.semitones.clamp(-Self::SEMITONES, Self::SEMITONES)
+        } else {
+            0.0
+        };
+        let bpm = if self.bpm.is_finite() && self.bpm > 0.0 {
+            self.bpm.clamp(Self::BPM.0, Self::BPM.1)
+        } else {
+            0.0
+        };
+        Self {
+            mode: self.mode,
+            ratio,
+            semitones,
+            bpm,
+        }
+    }
 }
 
 /// A take of an audio clip that is not playing.
@@ -704,6 +838,7 @@ impl Playlist {
                 let len = c.length.max(1);
                 edit.fade_in.len = edit.fade_in.len.clamp(0, len);
                 edit.fade_out.len = edit.fade_out.len.clamp(0, len - edit.fade_in.len);
+                edit.stretch = edit.stretch.sanitized();
                 for t in takes.iter_mut() {
                     t.length = t.length.max(1);
                     t.gaps.retain(|g| {
