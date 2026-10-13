@@ -10,7 +10,7 @@ use std::sync::Arc;
 use gt_core::{
     AudioInput, ChannelParam, ClipKind, EffectKind, EffectSlot, LfoRate, LfoShape, ModSourceKind,
     MonitorMode, ParamId, Project, SampleData, SampleSource, SigChange, StripParam, SynthParam,
-    TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, MAX_CHANNELS,
+    TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, FX_SLOTS, MAX_CHANNELS,
 };
 use gt_engine::{
     create, create_effect, CalibrationSink, ChannelParams, EngineCommand, EngineConfig, InputFeed,
@@ -133,13 +133,16 @@ fn process_does_not_allocate() {
         run(&mut p, 100);
         h.collect_garbage();
 
-        // The demo mix (sends, sidechain, limiter) plus every effect kind on insert 10, then
-        // parameter sweeps and bypass toggles while playing.
+        // The demo mix (sends, sidechain, limiter) plus every effect kind on inserts 10 and 11
+        // (some at a partial slot mix), then parameter sweeps and bypass toggles while playing.
         let mut mix = Project::demo().mixer;
         for (k, kind) in EffectKind::ALL.into_iter().enumerate() {
-            mix.strips[10].slots[k] = Some(EffectSlot::new(kind));
+            let mut slot = EffectSlot::new(kind);
+            slot.mix = if k % 3 == 0 { 0.5 } else { 1.0 };
+            mix.strips[10 + k / FX_SLOTS].slots[k % FX_SLOTS] = Some(slot);
         }
         mix.strips[10].sidechain = Some(1);
+        mix.strips[11].sidechain = Some(1);
         for (si, strip) in mix.strips.iter().enumerate() {
             for (k, slot) in strip.slots.iter().enumerate() {
                 if let Some(slot) = slot {

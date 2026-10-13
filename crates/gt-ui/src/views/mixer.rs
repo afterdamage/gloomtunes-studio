@@ -2,7 +2,7 @@
 //! strip its routing, send levels and effect slots, with an editor for the selected effect.
 
 use egui::{pos2, vec2, Color32, RichText, Sense, Shape, Stroke, Ui};
-use gt_core::effects::EQ_BANDS;
+use gt_core::effects::{EQ_BANDS, SLOT_MIX};
 use gt_core::mixer::FIRST_SEND;
 use gt_core::{
     EffectKind, EffectSlot, Mixer, MixerStrip, ParamId, PluginOwner, StripKind, StripParam,
@@ -491,11 +491,37 @@ fn detail(
             let title = slot
                 .plugin
                 .as_ref()
-                .map_or(slot.kind.name(), |p| p.name.as_str());
-            ui.label(
-                RichText::new(format!("{title} · slot {}", k + 1))
-                    .strong()
-                    .color(theme.accent),
+                .map_or(slot.kind.name(), |p| p.name.as_str())
+                .to_owned();
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("{title} · slot {}", k + 1))
+                        .strong()
+                        .color(theme.accent),
+                );
+                let presets = slot.kind.presets();
+                if !presets.is_empty() {
+                    egui::ComboBox::from_id_salt(("fx_preset", i, k))
+                        .width(110.0)
+                        .selected_text(RichText::new("Presets").small())
+                        .show_ui(ui, |ui| {
+                            for preset in presets {
+                                if ui.selectable_label(false, preset.name).clicked() {
+                                    slot.apply_preset(preset);
+                                    changed = true;
+                                }
+                            }
+                        });
+                }
+            });
+            // Every slot's own wet/dry mix, lined up with the effect's latency in the engine.
+            changed |= param_knob(
+                ui,
+                theme,
+                (i, k, usize::MAX),
+                &SLOT_MIX,
+                &mut slot.mix,
+                None,
             );
             changed |= if let Some(p) = slot.plugin.as_deref_mut() {
                 let owner = PluginOwner::Effect { strip: i, slot: k };

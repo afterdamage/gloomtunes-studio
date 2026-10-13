@@ -1168,12 +1168,18 @@ impl AudioProcessor {
                 slot,
                 index,
                 value,
-            } => self.mixer.set_effect_param(
-                usize::from(strip),
-                usize::from(slot),
-                usize::from(index),
-                value,
-            ),
+            } => {
+                if self.mixer.set_effect_param(
+                    usize::from(strip),
+                    usize::from(slot),
+                    usize::from(index),
+                    value,
+                ) {
+                    self.telemetry
+                        .latency_frames
+                        .store(self.mixer.latency() as u32, Ordering::Relaxed);
+                }
+            }
             EngineCommand::PreviewSample(sample) => {
                 let start = sample.is_some();
                 if let Some(old) = self.preview.set_sample(sample) {
@@ -1581,12 +1587,14 @@ fn apply_param(
                 StripParam::Send(k) => mixer.automate_send(s, k, value, ramp),
             }
         }
-        ParamDest::Effect { strip, slot, index } => mixer.set_effect_param(
-            usize::from(strip),
-            usize::from(slot),
-            usize::from(index),
-            value,
-        ),
+        ParamDest::Effect { strip, slot, index } => {
+            mixer.set_effect_param(
+                usize::from(strip),
+                usize::from(slot),
+                usize::from(index),
+                value,
+            );
+        }
         ParamDest::Plugin { instance, index } => plugins.set_param(instance, index, value),
     }
 }

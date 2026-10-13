@@ -632,6 +632,17 @@ struct EffectDto {
     /// The plugin of a plugin slot (Step 11).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     plugin: Option<PluginDto>,
+    /// Slot wet/dry mix (Prompt 19); left out at 100 %.
+    #[serde(default = "full_mix", skip_serializing_if = "is_full_mix")]
+    mix: f32,
+}
+
+fn full_mix() -> f32 {
+    1.0
+}
+
+fn is_full_mix(v: &f32) -> bool {
+    *v == 1.0
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -952,6 +963,7 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                             .map(|(info, &v)| (info.key.to_owned(), v))
                             .collect(),
                         plugin: e.plugin.as_deref().map(plugin_dto),
+                        mix: e.mix,
                     })
                 })
                 .collect(),
@@ -1374,10 +1386,14 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                 if kind == EffectKind::Plugin {
                     let mut e = EffectSlot::plugin(plugin(ed.plugin?, &mut warnings)?);
                     e.enabled = ed.enabled;
+                    e.mix = ed.mix;
+                    e.sanitize();
                     return Some(e);
                 }
                 let mut e = EffectSlot::new(kind);
                 e.enabled = ed.enabled;
+                e.mix = ed.mix;
+                e.sanitize();
                 for (key, v) in &ed.params {
                     e = e.with(key, *v);
                 }
@@ -2152,6 +2168,21 @@ mod tests {
         let v =
             serde_json::json!({ "format": "something-else", "schema_version": 1, "project": {} });
         assert!(matches!(from_value(v, None), Err(FileError::Format(_))));
+    }
+
+    #[test]
+    fn new_effects_and_slot_mix_round_trip() {
+        let mut p = Project::demo();
+        let mut slot = EffectSlot::new(EffectKind::Filter).with("cutoff", 440.0);
+        slot.mix = 0.25;
+        p.mixer.strips[2].slots[0] = Some(slot.clone());
+        p.mixer.strips[2].slots[1] = Some(EffectSlot::new(EffectKind::Gate));
+        let v = to_value(&p, None, &HashMap::new());
+        // A full mix is left out of the file.
+        assert!(v["project"]["mixer"][2]["slots"][1].get("mix").is_none());
+        let back = from_value(v, None).unwrap().project;
+        assert_eq!(back.mixer.strips[2].slots[0], Some(slot));
+        assert_eq!(back.mixer.strips[2].slots[1].as_ref().unwrap().mix, 1.0);
     }
 
     #[test]

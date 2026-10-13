@@ -6,26 +6,61 @@
 //! knob drag never clicks; choice parameters switch at once. Effects allocate only in `new`.
 
 mod biquad;
+mod bitcrusher;
 mod chorus;
+mod clipper;
 mod compressor;
 mod delay;
 mod distortion;
 mod eq;
+mod filter;
+mod flanger;
+mod gate;
 mod limiter;
+mod oversample;
+mod phaser;
 mod reverb;
 mod smooth;
+mod transient;
 mod width;
 
 pub use biquad::{Biquad, BiquadCoeffs};
+pub use bitcrusher::Bitcrusher;
 pub use chorus::Chorus;
+pub use clipper::SoftClipper;
 pub use compressor::Compressor;
 pub use delay::{Delay, DELAY_DIVISIONS};
 pub use distortion::Distortion;
 pub use eq::{eq_band_response, BandType, ParamEq, EQ_BANDS};
+pub use filter::{FilterMode, MultiFilter};
+pub use flanger::Flanger;
+pub use gate::Gate;
 pub use limiter::Limiter;
+pub use oversample::{Downsampler2x, Upsampler2x};
+pub use phaser::Phaser;
 pub use reverb::Reverb;
 pub use smooth::Smooth;
+pub use transient::TransientShaper;
 pub use width::StereoWidth;
+
+/// Note values for tempo-synced modulation, in beats (matches `gt_core::effects::LFO_SYNC`).
+pub const LFO_SYNC_BEATS: [f32; 9] = [
+    0.125,     // 1/32
+    0.25,      // 1/16
+    0.5,       // 1/8
+    2.0 / 3.0, // 1/4 triplet
+    1.0,       // 1/4
+    2.0,       // 1/2
+    4.0,       // 1 bar
+    8.0,       // 2 bars
+    16.0,      // 4 bars
+];
+
+/// Rate in Hz of LFO note value `div` (an index into [`LFO_SYNC_BEATS`]) at `bpm`.
+pub(crate) fn sync_hz(div: usize, bpm: f32) -> f32 {
+    let beats = LFO_SYNC_BEATS[div.min(LFO_SYNC_BEATS.len() - 1)];
+    bpm.clamp(10.0, 999.0) / 60.0 / beats
+}
 
 /// What an effect may need from the host besides its audio.
 #[derive(Debug, Clone, Copy, Default)]
@@ -152,6 +187,19 @@ pub(crate) mod test_util {
         20.0 * x.max(1e-12).log10()
     }
 
+    /// Level of `freq` in `x` (a single DFT bin, Goertzel), as an amplitude.
+    pub fn tone(x: &[f32], freq: f32, sr: f32) -> f32 {
+        let w = std::f64::consts::TAU * f64::from(freq) / f64::from(sr);
+        let (mut re, mut im) = (0.0_f64, 0.0_f64);
+        for (i, &v) in x.iter().enumerate() {
+            // A Hann window keeps leakage from strong neighbours out of the bin.
+            let win = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / x.len() as f64).cos();
+            re += f64::from(v) * win * (w * i as f64).cos();
+            im -= f64::from(v) * win * (w * i as f64).sin();
+        }
+        ((re * re + im * im).sqrt() * 4.0 / x.len() as f64) as f32
+    }
+
     /// Runs `fx` over stereo buffers in 64-frame blocks.
     pub fn run(fx: &mut dyn super::Effect, l: &mut [f32], r: &mut [f32], bpm: f32) {
         let ctx = super::FxContext {
@@ -193,6 +241,13 @@ mod tests {
             Box::new(Distortion::new(sr)),
             Box::new(Limiter::new(sr)),
             Box::new(StereoWidth::new(sr)),
+            Box::new(MultiFilter::new(sr)),
+            Box::new(Gate::new(sr)),
+            Box::new(Flanger::new(sr)),
+            Box::new(Phaser::new(sr)),
+            Box::new(Bitcrusher::new(sr)),
+            Box::new(SoftClipper::new(sr)),
+            Box::new(TransientShaper::new(sr)),
         ];
         for mut fx in effects {
             for extreme in [f32::NEG_INFINITY, -1e9, 1e9, f32::NAN] {
