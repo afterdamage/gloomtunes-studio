@@ -23,7 +23,9 @@ pub use channel_rack::{channel_rack, RackAction, RackState, RackView};
 pub use input_panel::{
     input_menu, input_panel, offered_inputs, InputAction, InputPanelModel, PairMode,
 };
-pub use midi_panel::{midi_panel, MidiAction, MidiPanelModel, MidiPortRow, MidiRouteRow};
+pub use midi_panel::{
+    midi_panel, LoopPasses, MidiAction, MidiPanelModel, MidiPortRow, MidiRouteRow, RecordMode,
+};
 pub use mixer::{mixer_view, MixerState, MixerView, StripMeter};
 pub use modulators::{modulators_panel, ModulatorsState};
 pub use piano_roll::{

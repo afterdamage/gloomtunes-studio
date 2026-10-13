@@ -232,13 +232,29 @@ pub enum EngineEvent {
         /// Position in ticks at the change.
         position: Tick,
     },
-    /// A live note (key down or up) arrived while the transport was playing, for recording.
+    /// A live note (key down or up) played a channel slot, for recording (and, with the
+    /// transport stopped, step recording).
     LiveNote {
+        /// The channel slot it played.
+        slot: u16,
         /// MIDI key.
         key: u8,
         /// Velocity from 0 to 1; 0 for a key going up.
         velocity: f32,
-        /// Song position where the engine played it (the start of its quantum), in ticks.
+        /// Song position where the engine played it, in ticks.
+        tick: f64,
+        /// The transport was playing.
+        playing: bool,
+    },
+    /// A live controller moved on a channel slot while the transport was playing.
+    LiveControl {
+        /// The channel slot.
+        slot: u16,
+        /// Which controller.
+        kind: gt_core::ControlKind,
+        /// Its value.
+        value: f32,
+        /// Song position, in ticks.
         tick: f64,
     },
 }

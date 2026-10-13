@@ -16,6 +16,66 @@ pub struct MidiPortRow {
     pub connected: bool,
 }
 
+/// What recording does to the notes already in the pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecordMode {
+    /// New notes join the old ones.
+    #[default]
+    Overdub,
+    /// Where the playhead passes while recording, the recording channels' notes and
+    /// controller data are cleared first.
+    Replace,
+}
+
+impl RecordMode {
+    /// Name in settings files.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Overdub => "overdub",
+            Self::Replace => "replace",
+        }
+    }
+
+    /// The mode named `key` (overdub for anything else).
+    pub fn from_key(key: &str) -> Self {
+        if key == "replace" {
+            Self::Replace
+        } else {
+            Self::Overdub
+        }
+    }
+}
+
+/// What each pass around a looping pattern does while recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LoopPasses {
+    /// Passes add up in the pattern.
+    #[default]
+    Merge,
+    /// Each pass is kept as its own copy of the pattern ("… take 1", "… take 2"), and the next
+    /// pass starts from the pattern as it was before recording.
+    Stack,
+}
+
+impl LoopPasses {
+    /// Name in settings files.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Stack => "stack",
+        }
+    }
+
+    /// The choice named `key` (merge for anything else).
+    pub fn from_key(key: &str) -> Self {
+        if key == "stack" {
+            Self::Stack
+        } else {
+            Self::Merge
+        }
+    }
+}
+
 /// One input route: a port (and MIDI channel) that plays a fixed rack channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MidiRouteRow {
@@ -44,6 +104,10 @@ pub struct MidiPanelModel {
     pub extra_ms: f32,
     /// Octave of the typing keyboard's bottom-row C.
     pub octave: i32,
+    /// Overdub or replace.
+    pub mode: RecordMode,
+    /// Merge or stack loop passes.
+    pub passes: LoopPasses,
     /// Input routes; anything not routed plays the selected channel.
     pub routes: Vec<MidiRouteRow>,
     /// Rack channel names, for route targets.
@@ -60,6 +124,8 @@ impl Default for MidiPanelModel {
             buffer_ms: 0.0,
             extra_ms: 0.0,
             octave: 3,
+            mode: RecordMode::Overdub,
+            passes: LoopPasses::Merge,
             routes: Vec::new(),
             channels: Vec::new(),
         }
@@ -110,6 +176,28 @@ pub fn midi_panel(ui: &mut Ui, theme: &GloomTheme, m: &mut MidiPanelModel) -> Ve
         .num_columns(2)
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
+            ui.label(dim("Mode"));
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut m.mode, RecordMode::Overdub, "Overdub")
+                    .on_hover_text("Recorded notes join the ones already there");
+                ui.selectable_value(&mut m.mode, RecordMode::Replace, "Replace")
+                    .on_hover_text(
+                        "Where the playhead passes, the recording channel's notes and controller \
+                     data are cleared",
+                    );
+            });
+            ui.end_row();
+            ui.label(dim("Loop passes"));
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut m.passes, LoopPasses::Merge, "Merge")
+                    .on_hover_text("Each pass around the pattern adds to it");
+                ui.selectable_value(&mut m.passes, LoopPasses::Stack, "Stack")
+                    .on_hover_text(
+                        "Each pass around the pattern is kept as its own copy (\"take 1\", \
+                     \"take 2\" …); the last pass stays in the pattern",
+                    );
+            });
+            ui.end_row();
             ui.label(dim("Count-in"));
             ui.horizontal(|ui| {
                 for (bars, label) in [(0, "Off"), (1, "1 bar"), (2, "2 bars")] {

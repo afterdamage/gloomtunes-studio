@@ -91,6 +91,10 @@ pub struct MidiPrefs {
     pub extra_ms: f32,
     /// Octave of the typing keyboard.
     pub octave: i32,
+    /// "overdub" or "replace".
+    pub record_mode: String,
+    /// "merge" or "stack".
+    pub loop_passes: String,
 }
 
 impl Default for MidiPrefs {
@@ -102,6 +106,8 @@ impl Default for MidiPrefs {
             record_click: m.record_click,
             extra_ms: m.extra_ms,
             octave: m.octave,
+            record_mode: m.mode.key().to_owned(),
+            loop_passes: m.passes.key().to_owned(),
         }
     }
 }

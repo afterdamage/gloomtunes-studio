@@ -556,6 +556,16 @@ struct PatternDto {
     steps: u16,
     #[serde(default)]
     notes: Vec<ChannelNotesDto>,
+    /// Recorded controller data (Prompt 16); absent in older files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    controls: Vec<ChannelControlsDto>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ChannelControlsDto {
+    channel: u32,
+    /// `[tick, kind, value]` per point; kinds 0 bend, 1 sustain, 2 mod wheel, 3 aftertouch.
+    points: Vec<(i64, u8, f32)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -866,6 +876,15 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                         .iter()
                         .map(|n| (n.start, n.length, n.key, n.velocity))
                         .collect(),
+                })
+                .collect(),
+            controls: pat
+                .controls
+                .iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(ch, v)| ChannelControlsDto {
+                    channel: ch.0,
+                    points: v.iter().map(|c| (c.tick, c.kind.code(), c.value)).collect(),
                 })
                 .collect(),
         })
@@ -1265,11 +1284,31 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                 .collect();
             notes.insert(ChannelId(cn.channel), v);
         }
+        // Unknown controller kinds (from a newer version) are dropped.
+        let controls = pat
+            .controls
+            .into_iter()
+            .map(|cc| {
+                let v = cc
+                    .points
+                    .iter()
+                    .filter_map(|&(tick, kind, value)| {
+                        Some(gt_core::ControlPoint {
+                            tick,
+                            kind: gt_core::ControlKind::from_code(kind)?,
+                            value,
+                        })
+                    })
+                    .collect();
+                (ChannelId(cc.channel), v)
+            })
+            .collect();
         p.patterns.push(Pattern {
             id: PatternId(pat.id),
             name: pat.name,
             steps: pat.steps,
             notes,
+            controls,
         });
     }
     p.current_pattern = PatternId(d.current_pattern);
@@ -1723,6 +1762,22 @@ mod tests {
         assert!(p.learn_midi(9, 74, pan));
         assert!(p.learn_midi(0, 1, gt_core::MASTER_VOLUME));
         p.channels[0].bend_range = 12.0;
+        let ch0 = p.channels[0].id;
+        p.current_pattern_mut().controls.insert(
+            ch0,
+            vec![
+                gt_core::ControlPoint {
+                    tick: 0,
+                    kind: gt_core::ControlKind::Sustain,
+                    value: 1.0,
+                },
+                gt_core::ControlPoint {
+                    tick: 480,
+                    kind: gt_core::ControlKind::Bend,
+                    value: -0.5,
+                },
+            ],
+        );
         p.midi_routes = vec![
             gt_core::MidiRoute {
                 port: "Keys".into(),

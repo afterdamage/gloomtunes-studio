@@ -38,6 +38,10 @@ pub enum Command {
     ToggleTypingKeyboard,
     /// Arm or disarm recording.
     ToggleRecord,
+    /// Step recording on/off.
+    ToggleStepRecord,
+    /// Turn what was just played into a pattern.
+    CaptureTake,
     /// Metronome on/off.
     ToggleMetronome,
     /// Open the settings window.
@@ -48,9 +52,11 @@ pub enum Command {
 
 impl Command {
     /// Every command, in the order the editor lists them.
-    pub const ALL: [Command; 18] = [
+    pub const ALL: [Command; 20] = [
         Command::PlayPause,
         Command::ToggleRecord,
+        Command::ToggleStepRecord,
+        Command::CaptureTake,
         Command::ToggleMetronome,
         Command::ToggleSongMode,
         Command::ToggleTypingKeyboard,
@@ -87,6 +93,8 @@ impl Command {
             Command::ToggleSongMode => "Pattern / song mode",
             Command::ToggleTypingKeyboard => "Typing keyboard on/off",
             Command::ToggleRecord => "Record",
+            Command::ToggleStepRecord => "Step record",
+            Command::CaptureTake => "Capture last take",
             Command::ToggleMetronome => "Metronome on/off",
             Command::Settings => "Settings",
             Command::Plugins => "Plugin browser",
@@ -111,6 +119,8 @@ impl Command {
             Command::ToggleSongMode => "toggle_song_mode",
             Command::ToggleTypingKeyboard => "toggle_typing_keyboard",
             Command::ToggleRecord => "toggle_record",
+            Command::ToggleStepRecord => "toggle_step_record",
+            Command::CaptureTake => "capture_take",
             Command::ToggleMetronome => "toggle_metronome",
             Command::Settings => "settings",
             Command::Plugins => "plugins",
@@ -158,6 +168,8 @@ impl Command {
             Command::ToggleSongMode => vec![k(none, Key::L)],
             Command::ToggleTypingKeyboard => vec![k(ctrl, Key::T)],
             Command::ToggleRecord => vec![k(ctrl, Key::R)],
+            Command::ToggleStepRecord => vec![k(ctrl_shift, Key::R)],
+            Command::CaptureTake => vec![k(ctrl_shift, Key::T)],
             Command::ToggleMetronome => Vec::new(),
             Command::Settings => vec![k(ctrl, Key::Comma)],
             Command::Plugins => vec![k(ctrl, Key::P)],

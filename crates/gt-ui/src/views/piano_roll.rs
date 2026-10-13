@@ -22,7 +22,7 @@
 //! check is used instead; it is sorted again on release.
 
 use egui::{pos2, vec2, Color32, Pos2, Rect, Response, RichText, Sense, Stroke, Ui};
-use gt_core::{Note, PPQ};
+use gt_core::{ControlKind, ControlPoint, Note, PPQ};
 
 use crate::GloomTheme;
 
@@ -323,6 +323,8 @@ pub struct PianoRollView<'a> {
     pub playhead: Option<i64>,
     /// Name of the edited channel.
     pub channel_name: &'a str,
+    /// The channel's recorded controller data, sorted by tick (drawn in the velocity lane).
+    pub controls: &'a [ControlPoint],
 }
 
 /// Things the app must act on.
@@ -346,6 +348,8 @@ pub enum PianoRollAction {
     Quantize,
     /// Humanize the selection (or all notes) with the state's amounts.
     Humanize,
+    /// Delete the channel's recorded data for one controller, or all of it.
+    ClearControls(Option<ControlKind>),
 }
 
 /// Geometry of the editing area for one frame.
@@ -480,6 +484,7 @@ pub fn piano_roll(
         view.pattern_len,
         view.bar_ticks,
         view.playhead,
+        view.controls,
         sorted,
     );
     actions
@@ -541,6 +546,28 @@ fn toolbar(
                     ui.selectable_value(&mut st.scale, s, s.name());
                 }
             });
+        if !view.controls.is_empty() {
+            ui.menu_button("Controllers", |ui| {
+                for kind in ControlKind::ALL {
+                    let n = view.controls.iter().filter(|c| c.kind == kind).count();
+                    if n > 0
+                        && ui
+                            .button(format!("Clear {} ({n} points)", kind.name()))
+                            .clicked()
+                    {
+                        actions.push(PianoRollAction::ClearControls(Some(kind)));
+                    }
+                }
+                if ui.button("Clear all").clicked() {
+                    actions.push(PianoRollAction::ClearControls(None));
+                }
+            })
+            .response
+            .on_hover_text(
+                "Recorded pitch bend, sustain, mod wheel and aftertouch (drawn in the velocity \
+                 lane)",
+            );
+        }
         if ui
             .add(egui::Button::selectable(st.ghosts, "Ghosts"))
             .on_hover_text("Show other channels' notes in this pattern")
@@ -1108,6 +1135,7 @@ fn paint(
     pattern_len: i64,
     bar_ticks: i64,
     playhead: Option<i64>,
+    controls: &[ControlPoint],
     sorted: bool,
 ) {
     let p = ui.painter_at(area);
@@ -1356,6 +1384,32 @@ fn paint(
         );
         lp.circle_filled(pos2(x + 1.0, lane.bottom() - h), 2.5, c);
     }
+
+    // Recorded controllers: each a held line from its points, over the velocity bars.
+    for kind in ControlKind::ALL {
+        let c = match kind {
+            ControlKind::Bend => theme.warn,
+            ControlKind::Sustain => theme.accent_dim,
+            ControlKind::ModWheel => theme.text,
+            ControlKind::Pressure => theme.text_dim,
+        };
+        let y = |v: f32| {
+            let n = (v - kind.min()) / (1.0 - kind.min());
+            lane.bottom() - 2.0 - (lane.height() - 4.0) * n.clamp(0.0, 1.0)
+        };
+        let mut last: Option<Pos2> = None;
+        for pt in controls.iter().filter(|c| c.kind == kind) {
+            let x = geo.x(pt.tick);
+            let at = pos2(x, y(pt.value));
+            let from = last.unwrap_or(pos2(geo.x(0), y(kind.min().max(0.0))));
+            lp.line_segment([from, pos2(x, from.y)], Stroke::new(1.0, c));
+            lp.line_segment([pos2(x, from.y), at], Stroke::new(1.0, c));
+            last = Some(at);
+        }
+        if let Some(from) = last {
+            lp.line_segment([from, pos2(lane.right(), from.y)], Stroke::new(1.0, c));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1486,6 +1540,7 @@ mod tests {
                         bar_ticks: 3840,
                         playhead: None,
                         channel_name: "Test",
+                        controls: &[],
                     },
                 );
             });
@@ -1656,6 +1711,7 @@ mod tests {
                         bar_ticks: 3840,
                         playhead: Some(1000),
                         channel_name: "Test",
+                        controls: &[],
                     },
                 );
             });

@@ -9,7 +9,11 @@
 //! and MIDI channel). The audio thread plays it one device period after it arrived, at the
 //! same place within the period, so notes keep their timing however the callbacks fall
 //! (ARCHITECTURE.md D109), and routes it to a rack channel by its source ([`LiveRoutes`]).
+//!
+//! Every event sent is also kept in a [`RetroBuffer`], so what was just played can be turned
+//! into a pattern even when nothing was recording (D110).
 
+use std::sync::atomic::{fence, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
@@ -81,6 +85,17 @@ pub enum LiveKind {
         /// Pressure.
         value: f32,
     },
+}
+
+/// What a recorded controller value does, as a live event.
+pub fn control_kind(kind: gt_core::ControlKind, value: f32) -> LiveKind {
+    use gt_core::ControlKind as C;
+    match kind {
+        C::Bend => LiveKind::Bend(value),
+        C::Sustain => LiveKind::Sustain(value >= 0.5),
+        C::ModWheel => LiveKind::ModWheel(value),
+        C::Pressure => LiveKind::Pressure(value),
+    }
 }
 
 /// A live event with its source and arrival time.
@@ -160,12 +175,131 @@ impl LiveRoutes {
     }
 }
 
+/// Events the retroactive buffer holds: minutes of playing, or about a minute of a pitch
+/// wheel moving without pause (2 MiB).
+pub const RETRO_CAPACITY: usize = 1 << 17;
+
+/// The last [`RETRO_CAPACITY`] live events with their arrival times, oldest overwritten first.
+///
+/// One writer at a time (the senders already share a lock); readers never lock. Each slot is
+/// two atomics, the time and the packed event. The writer fills slot `head % capacity` and then
+/// publishes `head + 1`; a reader copies the slots, re-reads `head` and keeps only the entries
+/// no write can have reached meanwhile.
+#[derive(Debug)]
+pub struct RetroBuffer {
+    time: Box<[AtomicU64]>,
+    data: Box<[AtomicU64]>,
+    head: AtomicU64,
+}
+
+impl RetroBuffer {
+    /// An empty buffer for `capacity` events.
+    pub fn new(capacity: usize) -> Self {
+        let slots = || (0..capacity.max(1)).map(|_| AtomicU64::new(0)).collect();
+        Self {
+            time: slots(),
+            data: slots(),
+            head: AtomicU64::new(0),
+        }
+    }
+
+    fn capacity(&self) -> u64 {
+        self.time.len() as u64
+    }
+
+    /// Adds an event that arrived at `at_ns`. Callers must not push from two threads at once.
+    pub fn push(&self, at_ns: u64, e: &LiveEvent) {
+        let h = self.head.load(Ordering::Relaxed);
+        let i = (h % self.capacity()) as usize;
+        // A reader that sees the new slot contents also sees `head` at least at `h`, so it
+        // knows the slot's old entry is gone.
+        fence(Ordering::Release);
+        self.time[i].store(at_ns, Ordering::Relaxed);
+        self.data[i].store(pack(e), Ordering::Relaxed);
+        self.head.store(h + 1, Ordering::Release);
+    }
+
+    /// Every event still held, oldest first, with its arrival time.
+    pub fn snapshot(&self) -> Vec<(u64, LiveEvent)> {
+        let cap = self.capacity();
+        let end = self.head.load(Ordering::Acquire);
+        let start = end.saturating_sub(cap);
+        let mut out: Vec<(u64, u64)> = (start..end)
+            .map(|k| {
+                let i = (k % cap) as usize;
+                (
+                    self.time[i].load(Ordering::Relaxed),
+                    self.data[i].load(Ordering::Relaxed),
+                )
+            })
+            .collect();
+        fence(Ordering::Acquire);
+        // Entries the writer may have overwritten while they were copied.
+        let now = self.head.load(Ordering::Relaxed);
+        let valid = (now + 1).saturating_sub(cap).max(start);
+        out.drain(..(valid - start).min(out.len() as u64) as usize);
+        out.into_iter()
+            .filter_map(|(t, d)| Some((t, unpack(d)?)))
+            .collect()
+    }
+}
+
+/// An event as 64 bits: kind in bits 0..8, port 8..16, channel 16..24, key 24..32 and the
+/// value (velocity, bend, ...) as `f32` bits in 32..64.
+fn pack(e: &LiveEvent) -> u64 {
+    let (tag, key, value) = match e.kind {
+        LiveKind::Note(n) => (1, n.key, n.velocity),
+        LiveKind::Bend(v) => (2, 0, v),
+        LiveKind::Sustain(d) => (3, 0, if d { 1.0 } else { 0.0 }),
+        LiveKind::ModWheel(v) => (4, 0, v),
+        LiveKind::Pressure(v) => (5, 0, v),
+        LiveKind::KeyPressure { key, value } => (6, key, value),
+    };
+    tag | u64::from(e.port) << 8
+        | u64::from(e.channel) << 16
+        | u64::from(key) << 24
+        | u64::from(value.to_bits()) << 32
+}
+
+fn unpack(d: u64) -> Option<LiveEvent> {
+    let key = (d >> 24) as u8;
+    let value = f32::from_bits((d >> 32) as u32);
+    let kind = match d & 0xFF {
+        1 => LiveKind::Note(LiveNote {
+            key: key.min(127),
+            velocity: value,
+        }),
+        2 => LiveKind::Bend(value),
+        3 => LiveKind::Sustain(value > 0.5),
+        4 => LiveKind::ModWheel(value),
+        5 => LiveKind::Pressure(value),
+        6 => LiveKind::KeyPressure { key, value },
+        _ => return None,
+    };
+    Some(LiveEvent {
+        kind,
+        port: (d >> 8) as u8,
+        channel: (d >> 16) as u8 & 0x0F,
+        at_ns: 0,
+    })
+}
+
 /// The sending end of the live queue, shared by every source of live events. Cloning shares
 /// it. A new engine (new device or sample rate) is connected with [`LiveInput::connect`];
-/// until then events are dropped.
-#[derive(Debug, Clone, Default)]
+/// until then events are dropped (but still kept in the retroactive buffer).
+#[derive(Debug, Clone)]
 pub struct LiveInput {
     tx: Arc<Mutex<Option<Producer<LiveEvent>>>>,
+    retro: Arc<RetroBuffer>,
+}
+
+impl Default for LiveInput {
+    fn default() -> Self {
+        Self {
+            tx: Arc::default(),
+            retro: Arc::new(RetroBuffer::new(RETRO_CAPACITY)),
+        }
+    }
 }
 
 impl LiveInput {
@@ -181,8 +315,21 @@ impl LiveInput {
 
     /// Queues an event. False when no engine is connected or the queue is full.
     pub fn send(&self, event: impl Into<LiveEvent>) -> bool {
+        let e = event.into();
         let mut tx = self.tx.lock().unwrap_or_else(PoisonError::into_inner);
-        tx.as_mut().is_some_and(|p| p.push(event.into()).is_ok())
+        // The lock makes this the only writer.
+        let at = if e.at_ns == 0 { clock_ns() } else { e.at_ns };
+        self.retro.push(at, &e);
+        tx.as_mut().is_some_and(|p| p.push(e).is_ok())
+    }
+
+    /// What was played lately, oldest first, each event with its arrival time in `at_ns`.
+    pub fn recent(&self) -> Vec<LiveEvent> {
+        self.retro
+            .snapshot()
+            .into_iter()
+            .map(|(at_ns, e)| LiveEvent { at_ns, ..e })
+            .collect()
     }
 }
 
@@ -212,5 +359,91 @@ mod tests {
         );
         r.set(ROUTE_PORTS, None, Some(1));
         assert_eq!(r.slot(ROUTE_PORTS as u8, 0, Some(7)), Some(7));
+    }
+
+    fn note(key: u8) -> LiveEvent {
+        LiveEvent {
+            kind: LiveKind::Note(LiveNote::on(key, 0.5)),
+            port: 3,
+            channel: 9,
+            at_ns: 0,
+        }
+    }
+
+    #[test]
+    fn the_retro_buffer_keeps_the_latest_events_in_order_after_wrapping() {
+        let b = RetroBuffer::new(8);
+        assert!(b.snapshot().is_empty());
+        for k in 0..5 {
+            b.push(100 + k, &note(k as u8));
+        }
+        let got = b.snapshot();
+        assert_eq!(got.len(), 5);
+        assert_eq!(got[0], (100, note(0)));
+        for k in 5..21 {
+            b.push(100 + k, &note(k as u8));
+        }
+        let got = b.snapshot();
+        // Only the last 7 of 21: the slot the next write will reuse is not trusted.
+        let times: Vec<u64> = got.iter().map(|e| e.0).collect();
+        assert_eq!(times, (114..121).collect::<Vec<_>>());
+        assert_eq!(got[6].1, note(20));
+        // Every kind survives packing.
+        for kind in [
+            LiveKind::Bend(-0.25),
+            LiveKind::Sustain(true),
+            LiveKind::ModWheel(0.75),
+            LiveKind::Pressure(0.5),
+            LiveKind::KeyPressure {
+                key: 61,
+                value: 0.3,
+            },
+            LiveKind::Note(LiveNote::off(64)),
+        ] {
+            let e = LiveEvent { kind, ..note(0) };
+            assert_eq!(unpack(pack(&e)), Some(e));
+        }
+    }
+
+    #[test]
+    fn the_retro_buffer_reads_consistently_while_written() {
+        // The writer stores time = key * 1000 + k; a reader must never see a torn pair.
+        let b = Arc::new(RetroBuffer::new(64));
+        let w = Arc::clone(&b);
+        let writer = std::thread::spawn(move || {
+            for k in 0..200_000_u64 {
+                let key = (k % 128) as u8;
+                w.push(u64::from(key) * 1_000_000 + k, &note(key));
+            }
+        });
+        let mut reads = 0;
+        while !writer.is_finished() || reads == 0 {
+            let got = b.snapshot();
+            for pair in got.windows(2) {
+                assert!(
+                    pair[0].0 % 1_000_000 < pair[1].0 % 1_000_000,
+                    "out of order"
+                );
+            }
+            for (t, e) in got {
+                let LiveKind::Note(n) = e.kind else {
+                    panic!("{e:?}")
+                };
+                assert_eq!(u64::from(n.key), t / 1_000_000, "torn entry");
+            }
+            reads += 1;
+        }
+        writer.join().unwrap();
+        assert_eq!(b.snapshot().len(), 63);
+    }
+
+    #[test]
+    fn sending_keeps_events_even_without_an_engine() {
+        let live = LiveInput::default();
+        assert!(!live.send(LiveNote::on(60, 1.0)));
+        let got = live.recent();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].port, KEYBOARD);
+        assert!(got[0].at_ns > 0, "stamped on arrival");
     }
 }
