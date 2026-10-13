@@ -24,10 +24,10 @@ use gt_ui::param_ui::{self, ParamMarks, ParamRequest};
 use gt_ui::views::{
     add_automation, browser, channel_rack, mixer_view, modulators_panel, piano_roll, playlist,
     plugin_controls, sampler_panel, synth_panel, transport_bar, AudioAction, BrowserAction,
-    BrowserModel, MidiPanelModel, MixerState, MixerView, ModulatorsState, PianoRollAction,
-    PianoRollState, PianoRollView, PlayState, PlaylistAction, PlaylistState, PlaylistView,
-    PluginBrowserState, PluginPanelView, PluginState, RackAction, RackState, RackView,
-    SamplerPanelView, StripMeter, SynthPanelAction, SynthPanelView, TransportAction,
+    BrowserModel, GhostChannel, MidiPanelModel, MixerState, MixerView, ModulatorsState,
+    PianoRollAction, PianoRollState, PianoRollView, PlayState, PlaylistAction, PlaylistState,
+    PlaylistView, PluginBrowserState, PluginPanelView, PluginState, RackAction, RackState,
+    RackView, SamplerPanelView, StripMeter, SynthPanelAction, SynthPanelView, TransportAction,
     TransportModel,
 };
 use gt_ui::views::{FirstRunState, SettingsPage, ShortcutEditorState};
@@ -727,25 +727,27 @@ impl GloomApp {
                     .notes
                     .entry(id)
                     .or_default();
-                roll.selected.resize(notes.len(), false);
+                // The roll's selection starts with this channel's notes (other editable
+                // channels follow); quantize and humanize apply to this channel's.
+                let n = notes.len();
+                let mut sel: Vec<bool> = (0..n)
+                    .map(|i| roll.selected.get(i).copied().unwrap_or(false))
+                    .collect();
                 if action == PianoRollAction::Quantize {
-                    ops::quantize(
-                        notes,
-                        &roll.selected,
-                        roll.snap.ticks(),
-                        roll.quantize_strength,
-                    );
+                    ops::quantize(notes, &sel, roll.snap.ticks(), roll.quantize_strength);
                 } else {
                     self.humanize_seed = self.humanize_seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
                     ops::humanize(
                         notes,
-                        &roll.selected,
+                        &sel,
                         roll.humanize_ticks,
                         roll.humanize_velocity,
                         self.humanize_seed,
                     );
                 }
-                ops::sort_with_selection(notes, &mut roll.selected);
+                ops::sort_with_selection(notes, &mut sel);
+                let keep = n.min(roll.selected.len());
+                roll.selected.splice(..keep, sel);
                 self.tidy_roll_notes();
                 self.push_song();
                 self.pending_edit = Some(if action == PianoRollAction::Quantize {
@@ -1151,12 +1153,29 @@ impl GloomApp {
             .iter()
             .map(|a| a.target.name(&self.project))
             .collect();
+        let names: Vec<(gt_core::ChannelId, String)> = self
+            .project
+            .channels
+            .iter()
+            .map(|c| (c.id, c.name.clone()))
+            .collect();
         let pat = self.project.current_pattern_mut();
         self.roll.set_target(pat.id.0, id.0);
         let pattern_len = pat.length_ticks();
         // Take the edited list out so the other channels can be borrowed as ghosts.
         let mut notes = pat.notes.remove(&id).unwrap_or_default();
-        let ghosts: Vec<&[gt_core::Note]> = pat.notes.values().map(Vec::as_slice).collect();
+        let ghosts: Vec<GhostChannel<'_>> = pat
+            .notes
+            .iter_mut()
+            .filter_map(|(cid, v)| {
+                let name = names.iter().find(|(c, _)| c == cid)?.1.as_str();
+                Some(GhostChannel {
+                    id: cid.0,
+                    name,
+                    notes: v,
+                })
+            })
+            .collect();
         let controls = pat.controls.get(&id).map_or(&[][..], Vec::as_slice);
         let automation = &mut pat.automation;
         let actions = piano_roll(
@@ -1178,6 +1197,7 @@ impl GloomApp {
         if !notes.is_empty() {
             pat.notes.insert(id, notes);
         }
+        pat.notes.retain(|_, v| !v.is_empty());
         actions
     }
 

@@ -137,8 +137,9 @@ impl SamplerVoice {
     /// Glides the read step to `target_step` over `frames` output frames, evenly in
     /// semitones (slide notes and portamento).
     pub fn glide_to(&mut self, target_step: f64, frames: u32) {
-        if frames == 0 || !(target_step > 0.0) {
-            if target_step > 0.0 {
+        let valid = target_step.is_finite() && target_step > 0.0;
+        if frames == 0 || !valid {
+            if valid {
                 self.step = target_step;
             }
             self.glide_left = 0;
