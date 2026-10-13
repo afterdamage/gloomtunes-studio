@@ -44,7 +44,9 @@ pub use live::{
     KEYBOARD, LIVE_CAPACITY, RETRO_CAPACITY, ROUTE_PORTS,
 };
 pub use load::LoadMeter;
-pub use mixer::{create_effect, EffectBox, MixerParams, StripParams, MAX_PDC_FRAMES};
+pub use mixer::{
+    create_effect, create_effect_with, EffectBox, MixerParams, StripParams, MAX_PDC_FRAMES,
+};
 pub use mixer::{freeze_post_fx, Tap};
 pub use plugin::{PluginBox, PluginContext, PluginProcessor, MAX_PLUGINS};
 pub use processor::{AudioProcessor, PREVIEW_GAIN, TEST_TONE_DBFS, TEST_TONE_HZ};

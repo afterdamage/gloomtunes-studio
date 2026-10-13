@@ -5,11 +5,13 @@
 //! planar stereo blocks of any length. Continuous parameters glide (one-pole, about 20 ms) so a
 //! knob drag never clicks; choice parameters switch at once. Effects allocate only in `new`.
 
+mod analyzer;
 mod biquad;
 mod bitcrusher;
 mod chorus;
 mod clipper;
 mod compressor;
+mod convolution;
 mod delay;
 mod distortion;
 mod eq;
@@ -17,18 +19,24 @@ mod filter;
 mod flanger;
 mod gate;
 mod limiter;
+mod multiband;
 mod oversample;
 mod phaser;
+mod pitch;
 mod reverb;
 mod smooth;
+mod stutter;
 mod transient;
+mod vocoder;
 mod width;
 
+pub use analyzer::Analyzer;
 pub use biquad::{Biquad, BiquadCoeffs};
 pub use bitcrusher::Bitcrusher;
 pub use chorus::Chorus;
 pub use clipper::SoftClipper;
 pub use compressor::Compressor;
+pub use convolution::{generate_ir, ConvolutionReverb, Convolver, SplitConvolver};
 pub use delay::{Delay, DELAY_DIVISIONS};
 pub use distortion::Distortion;
 pub use eq::{eq_band_response, BandType, ParamEq, EQ_BANDS};
@@ -36,11 +44,15 @@ pub use filter::{FilterMode, MultiFilter};
 pub use flanger::Flanger;
 pub use gate::Gate;
 pub use limiter::Limiter;
+pub use multiband::Multiband;
 pub use oversample::{Downsampler2x, Upsampler2x};
 pub use phaser::Phaser;
+pub use pitch::{PitchShifter, SCALE_INTERVALS};
 pub use reverb::Reverb;
 pub use smooth::Smooth;
+pub use stutter::{Stutter, STEPS};
 pub use transient::TransientShaper;
+pub use vocoder::Vocoder;
 pub use width::StereoWidth;
 
 /// Note values for tempo-synced modulation, in beats (matches `gt_core::effects::LFO_SYNC`).
@@ -69,6 +81,8 @@ pub struct FxContext<'a> {
     pub bpm: f32,
     /// Key signal for effects with a sidechain input (the compressor), same length as the block.
     pub sidechain: Option<(&'a [f32], &'a [f32])>,
+    /// Song position at the start of the block in quarter notes, while the transport plays.
+    pub beats: Option<f64>,
 }
 
 /// A stereo insert effect. Real-time safe after construction.
@@ -89,6 +103,14 @@ pub trait Effect: Send {
     /// A value for the UI, such as gain reduction in dB (0 when the effect has none).
     fn meter(&self) -> f32 {
         0.0
+    }
+    /// Builds what the effect cannot build on the audio thread, such as a convolution reverb's
+    /// impulse response from `user_ir` (left and right; right may be empty). Called on the UI
+    /// thread after the parameters are set.
+    fn prepare(&mut self, _user_ir: Option<(&[f32], &[f32])>) {}
+    /// The tap a UI reads the signal from, for effects that show it (the analyzer).
+    fn scope(&self) -> Option<std::sync::Arc<crate::analysis::Scope>> {
+        None
     }
 }
 
@@ -204,7 +226,7 @@ pub(crate) mod test_util {
     pub fn run(fx: &mut dyn super::Effect, l: &mut [f32], r: &mut [f32], bpm: f32) {
         let ctx = super::FxContext {
             bpm,
-            sidechain: None,
+            ..Default::default()
         };
         for (cl, cr) in l.chunks_mut(64).zip(r.chunks_mut(64)) {
             fx.process(cl, cr, &ctx);
@@ -248,6 +270,12 @@ mod tests {
             Box::new(Bitcrusher::new(sr)),
             Box::new(SoftClipper::new(sr)),
             Box::new(TransientShaper::new(sr)),
+            Box::new(Multiband::new(sr)),
+            Box::new(Analyzer::new(sr)),
+            Box::new(ConvolutionReverb::new(sr)),
+            Box::new(PitchShifter::new(sr)),
+            Box::new(Vocoder::new(sr)),
+            Box::new(Stutter::new(sr)),
         ];
         for mut fx in effects {
             for extreme in [f32::NEG_INFINITY, -1e9, 1e9, f32::NAN] {

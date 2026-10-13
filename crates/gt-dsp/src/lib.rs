@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod adsr;
+pub mod analysis;
 mod blep;
 mod click;
 pub mod drums;

@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use gt_core::{BuiltInSample, ClipKind, Project, SampleData, SampleSource, Tick, FX_SLOTS};
 use gt_engine::{
-    create, create_effect, AudioProcessor, ChannelParams, EngineCommand, EngineConfig,
+    create, create_effect_with, AudioProcessor, ChannelParams, EngineCommand, EngineConfig,
     EngineHandle, LoopRegion, MixerParams, ModPlan, PluginBox, SongSnapshot,
 };
 
@@ -527,13 +527,20 @@ fn load_engine(
     for (si, strip) in project.mixer.strips.iter().enumerate() {
         for k in 0..FX_SLOTS {
             if let Some(slot) = &strip.slots[k] {
+                // The user's impulse response; a file that does not load leaves the built-in.
+                let user = (gt_core::effects::IMPULSE_RESPONSES.len() - 1) as f32;
+                let file = slot
+                    .file
+                    .as_deref()
+                    .filter(|_| slot.get("ir") == Some(user))
+                    .and_then(|f| gt_project::load_sample(f, rate).ok());
                 send(
                     h,
                     p,
                     EngineCommand::SetEffect {
                         strip: si as u8,
                         slot: k as u8,
-                        effect: Some(create_effect(slot, rate as f32)),
+                        effect: Some(create_effect_with(slot, rate as f32, file.as_ref())),
                     },
                 );
             }

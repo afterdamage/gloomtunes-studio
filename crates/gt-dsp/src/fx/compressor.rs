@@ -194,6 +194,7 @@ mod tests {
         let ctx = FxContext {
             bpm: 120.0,
             sidechain: Some((&key, &key)),
+            beats: None,
         };
         for (a, b) in l.chunks_mut(64).zip(r.chunks_mut(64)) {
             c.process(a, b, &ctx);

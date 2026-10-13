@@ -133,7 +133,7 @@ fn process_does_not_allocate() {
         run(&mut p, 100);
         h.collect_garbage();
 
-        // The demo mix (sends, sidechain, limiter) plus every effect kind on inserts 10 and 11
+        // The demo mix (sends, sidechain, limiter) plus every effect kind on inserts 10 to 12
         // (some at a partial slot mix), then parameter sweeps and bypass toggles while playing.
         let mut mix = Project::demo().mixer;
         for (k, kind) in EffectKind::ALL.into_iter().enumerate() {

@@ -267,6 +267,7 @@ mod tests {
             let ctx = FxContext {
                 bpm: 120.0,
                 sidechain: Some((&key, &key)),
+                beats: None,
             };
             g.process(&mut l, &mut r, &ctx);
             out = rms(&l) / rms(&quiet);

@@ -1,18 +1,21 @@
 //! The eframe application: owns the device layer, the project document and the transport
 //! settings, and draws the UI.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gt_core::effects::IMPULSE_RESPONSES;
 use gt_core::{
-    ClipKind, EffectKind, Instrument, ModSourceKind, Modulator, ParamId, PluginInstanceId,
-    PluginKind, Project, SampleSource, SigChange, TempoPoint, Tick, TimeSigMap, FX_SLOTS,
-    MAX_CHANNELS, ROOT_KEY, STEP_TICKS, STRIPS,
+    ClipKind, EffectKind, EffectSlot, Instrument, ModSourceKind, Modulator, ParamId,
+    PluginInstanceId, PluginKind, Project, SampleData, SampleSource, SigChange, TempoPoint, Tick,
+    TimeSigMap, FX_SLOTS, MAX_CHANNELS, ROOT_KEY, STEP_TICKS, STRIPS,
 };
+use gt_dsp::analysis::Scope;
 use gt_engine::{
-    create_effect, ChannelParams, EngineCommand, LoopRegion, MixerParams, ModPlan, ParamDest,
+    create_effect_with, ChannelParams, EngineCommand, LoopRegion, MixerParams, ModPlan, ParamDest,
     SongSnapshot, TransportState,
 };
 use gt_plugin_host::{PluginHost, PluginStatus};
@@ -62,6 +65,7 @@ enum MainView {
 struct SentEffect {
     kind: EffectKind,
     params: Vec<f32>,
+    file: Option<PathBuf>,
 }
 
 pub struct GloomApp {
@@ -117,6 +121,10 @@ pub struct GloomApp {
     strip_meters: Vec<[MeterBallistics; 2]>,
     strip_view: Vec<StripMeter>,
     fx_meters: Vec<[f32; FX_SLOTS]>,
+    /// Signal taps of the effects that have one (analyzers), by strip and slot.
+    scopes: Vec<[Option<Arc<Scope>>; FX_SLOTS]>,
+    /// Audio files loaded for effects (convolution responses), at the engine rate.
+    effect_files: HashMap<PathBuf, Arc<SampleData>>,
 
     playlist: PlaylistState,
     /// Effect parameters the last song automates and the last modulation plan modulates. The
@@ -303,6 +311,8 @@ impl GloomApp {
             strip_meters: vec![Default::default(); STRIPS],
             strip_view: vec![StripMeter::default(); STRIPS],
             fx_meters: vec![[0.0; FX_SLOTS]; STRIPS],
+            scopes: vec![Default::default(); STRIPS],
+            effect_files: HashMap::new(),
             playlist: PlaylistState::default(),
             lane_fx: Vec::new(),
             mod_fx: Vec::new(),
@@ -852,9 +862,19 @@ impl GloomApp {
                             effect: None,
                         }) {
                             self.sent_fx[strip][k] = None;
+                            self.scopes[strip][k] = None;
                         }
                     }
-                    (Some(w), Some(h)) if w.kind == h.kind => {
+                    (Some(w), Some(h))
+                        if w.kind == h.kind
+                            && w.file == h.file
+                            && !w
+                                .params
+                                .iter()
+                                .zip(&h.params)
+                                .enumerate()
+                                .any(|(i, (a, b))| a != b && w.kind.rebuilds(i)) =>
+                    {
                         for (i, (&a, &b)) in w.params.iter().zip(&h.params).enumerate() {
                             if a != b
                                 && self.try_send(EngineCommand::SetEffectParam {
@@ -871,19 +891,50 @@ impl GloomApp {
                         }
                     }
                     (Some(w), _) => {
-                        let effect = create_effect(&w, rate);
+                        let file = self.effect_file(&w, rate as u32);
+                        let effect = create_effect_with(&w, rate, file.as_deref());
+                        let scope = effect.0.scope();
                         if self.try_send(EngineCommand::SetEffect {
                             strip: strip as u8,
                             slot: k as u8,
                             effect: Some(effect),
                         }) {
+                            self.scopes[strip][k] = scope;
                             self.sent_fx[strip][k] = Some(SentEffect {
                                 kind: w.kind,
                                 params: w.params,
+                                file: w.file,
                             });
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// The audio file an effect slot uses, loaded at `rate` (a convolution reverb set to its
+    /// user response). A file that fails to load is reported and the effect falls back to
+    /// its built-in response.
+    fn effect_file(&mut self, slot: &EffectSlot, rate: u32) -> Option<Arc<SampleData>> {
+        let path = slot.file.as_ref()?;
+        let user = slot
+            .get("ir")
+            .is_some_and(|v| v as usize == IMPULSE_RESPONSES.len() - 1);
+        if !user {
+            return None;
+        }
+        if let Some(d) = self.effect_files.get(path) {
+            return Some(Arc::clone(d));
+        }
+        match gt_project::load_sample(path, rate) {
+            Ok(d) => {
+                let d = Arc::new(d);
+                self.effect_files.insert(path.clone(), Arc::clone(&d));
+                Some(d)
+            }
+            Err(e) => {
+                self.toast(format!("Could not load {}: {e}", path.display()));
+                None
             }
         }
     }
@@ -2235,7 +2286,11 @@ impl eframe::App for GloomApp {
                             let p = strip.slots.get(k)?.as_ref()?.plugin.as_ref()?;
                             Some(plugin_view(&self.plugins, &self.project, p.instance))
                         });
+                        let scope = self.mixer_state.slot.and_then(|k| {
+                            self.scopes[self.mixer_state.selected.min(STRIPS - 1)][k].as_deref()
+                        });
                         let view = MixerView {
+                            scope,
                             meters: &self.strip_view,
                             fx_meters: &self.fx_meters,
                             sample_rate,
@@ -2268,6 +2323,18 @@ impl eframe::App for GloomApp {
         }
         if mixer_changed {
             self.pending_edit = Some("Mixer");
+        }
+        if let Some((strip, k)) = self.mixer_state.file_request.take() {
+            let d = rfd::FileDialog::new().add_filter("Audio", &gt_project::AUDIO_EXTENSIONS);
+            if let Some(path) = d.pick_file() {
+                if let Some(Some(slot)) = self.project.mixer.strips[strip].slots.get_mut(k) {
+                    slot.file = Some(path);
+                    *slot = slot
+                        .clone()
+                        .with("ir", (IMPULSE_RESPONSES.len() - 1) as f32);
+                    self.pending_edit = Some("Mixer");
+                }
+            }
         }
         if let Some(target) = self.mixer_state.plugin_request.take() {
             self.show_plugins = true;

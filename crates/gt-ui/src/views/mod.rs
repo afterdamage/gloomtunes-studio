@@ -1,5 +1,6 @@
 //! Top-level views (panels).
 
+mod analyzer;
 mod audio_panel;
 mod browser;
 mod channel_rack;
@@ -15,6 +16,7 @@ mod settings;
 mod synth_panel;
 mod transport_bar;
 
+pub use analyzer::{analyzer_panel, AnalyzerState};
 pub use audio_panel::{
     audio_panel, cpu_meter, AudioAction, AudioPanelModel, CpuLoad, BUFFER_SIZES, CPU_WARN,
 };
