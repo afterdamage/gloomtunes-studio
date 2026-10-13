@@ -326,7 +326,9 @@ impl Instance for AuPlugin {
         ids.truncate(MAX_PLUGIN_PARAMS);
         let mut infos = Vec::new();
         let mut values = Vec::new();
-        self.params.clear();
+        // Ranges are kept from the first read: some follow the sample rate (a filter up to
+        // Nyquist), and saved normalized values must keep meaning the same plain values.
+        let known = std::mem::take(&mut self.params);
         for id in ids {
             // SAFETY: as above.
             let p = unsafe {
@@ -358,7 +360,9 @@ impl Instance for AuPlugin {
                     .collect();
                 String::from_utf8_lossy(&bytes).into_owned()
             });
-            let (min, max) = if p.minValue.is_finite() && p.maxValue.is_finite() {
+            let (min, max) = if let Some(k) = known.iter().find(|k| k.id == id) {
+                (k.min, k.max)
+            } else if p.minValue.is_finite() && p.maxValue.is_finite() {
                 (p.minValue, p.maxValue.max(p.minValue))
             } else {
                 (0.0, 1.0)
