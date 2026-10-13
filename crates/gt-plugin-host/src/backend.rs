@@ -22,6 +22,9 @@ use crate::processor::ParamOut;
 pub(crate) enum Entry {
     Clap(PluginEntry),
     Vst3(Rc<crate::vst3::Module>),
+    /// Audio Units are created from the system's registry (macOS).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Au,
 }
 
 impl Entry {
@@ -36,6 +39,8 @@ impl Entry {
                 entry.map(Self::Clap).map_err(|e| e.to_string())
             }
             PluginFormat::Vst3 => crate::vst3::Module::load(path).map(|m| Self::Vst3(Rc::new(m))),
+            PluginFormat::Au if cfg!(target_os = "macos") => Ok(Self::Au),
+            PluginFormat::Au => Err("Audio Units exist on macOS only".to_owned()),
         }
     }
 
@@ -50,6 +55,10 @@ impl Entry {
                 e, info, signals,
             )?)),
             Self::Vst3(m) => Ok(Box::new(crate::vst3::Vst3Plugin::create(m, info, signals)?)),
+            #[cfg(target_os = "macos")]
+            Self::Au => Ok(Box::new(crate::au::AuPlugin::create(info, signals)?)),
+            #[cfg(not(target_os = "macos"))]
+            Self::Au => Err(format!("{} is an Audio Unit (macOS only)", info.name)),
         }
     }
 }

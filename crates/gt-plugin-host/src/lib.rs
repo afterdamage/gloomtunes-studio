@@ -17,6 +17,8 @@
 
 #![deny(unsafe_code)]
 
+#[cfg(target_os = "macos")]
+mod au;
 mod backend;
 pub mod catalog;
 mod guard;

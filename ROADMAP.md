@@ -579,6 +579,9 @@ sound identical; the golden export test stays.
 - Multi-output instruments and MIDI out (D116): each extra stereo output of a plugin
   instrument can play into its own insert, and the notes a plugin sends (arpeggiators) can
   play another channel, a block later.
+- Audio Units on macOS (D117): AUv2 effects and instruments are scanned, played, automated,
+  saved and preset-loaded like the other formats. Limits: no AU editor windows (sliders only),
+  no AU extra outputs or MIDI out, no AUv3.
 
 ---
 

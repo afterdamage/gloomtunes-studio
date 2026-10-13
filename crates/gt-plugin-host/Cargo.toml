@@ -34,6 +34,11 @@ x11rb.workspace = true
 objc2.workspace = true
 objc2-app-kit = { workspace = true, features = ["std", "NSGraphics", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = { workspace = true, features = ["std", "NSGeometry", "NSString"] }
+# Audio Unit hosting (D117): Apple's AudioToolbox through the objc2 bindings (Zlib OR
+# Apache-2.0 OR MIT).
+objc2-audio-toolbox = { version = "0.3", default-features = false, features = ["std", "bitflags", "AUComponent", "AudioComponent", "AudioUnitProperties", "MusicDevice", "objc2-core-audio-types", "objc2-core-foundation"] }
+objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "bitflags", "CoreAudioBaseTypes"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray", "CFBase", "CFData", "CFError", "CFPropertyList", "CFString"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
@@ -43,3 +48,4 @@ clack-host = { workspace = true, features = ["clack-plugin"] }
 gt-test-plugin = { path = "../gt-test-plugin" }
 gt-test-vst3 = { path = "../gt-test-vst3" }
 clack-plugin.workspace = true
+

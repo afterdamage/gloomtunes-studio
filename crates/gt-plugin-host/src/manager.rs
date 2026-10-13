@@ -206,7 +206,20 @@ impl PluginHost {
                     let _ = tx.send(ScanMsg::Progress(done, total, name));
                     waker();
                 };
-                let cat = catalog::rescan(&old, &files, &skip, &scan, &progress);
+                #[allow(unused_mut)]
+                let mut cat = catalog::rescan(&old, &files, &skip, &scan, &progress);
+                // Audio Units are listed by the system, not found as files (D117).
+                #[cfg(target_os = "macos")]
+                cat.files.push(catalog::CatalogFile {
+                    path: PathBuf::from(crate::au::PATH_PREFIX),
+                    size: 0,
+                    modified: 0,
+                    plugins: crate::au::list()
+                        .into_iter()
+                        .filter(|p| skip(&p.path).is_none())
+                        .collect(),
+                    error: None,
+                });
                 if let Err(e) = cat.save(&cache) {
                     log::warn!("cannot save the plugin list: {e}");
                 }

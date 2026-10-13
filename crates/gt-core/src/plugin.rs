@@ -22,6 +22,8 @@ pub enum PluginFormat {
     Clap,
     /// VST3 (Prompt 18, D113).
     Vst3,
+    /// Audio Unit v2, macOS only (Prompt 18, D117).
+    Au,
 }
 
 impl PluginFormat {
@@ -30,6 +32,7 @@ impl PluginFormat {
         match self {
             Self::Clap => "clap",
             Self::Vst3 => "vst3",
+            Self::Au => "au",
         }
     }
 
@@ -38,6 +41,7 @@ impl PluginFormat {
         match key {
             "clap" => Some(Self::Clap),
             "vst3" => Some(Self::Vst3),
+            "au" => Some(Self::Au),
             _ => None,
         }
     }
@@ -47,6 +51,7 @@ impl PluginFormat {
         match self {
             Self::Clap => "CLAP",
             Self::Vst3 => "VST3",
+            Self::Au => "AU",
         }
     }
 }

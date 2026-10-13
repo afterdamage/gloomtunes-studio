@@ -42,6 +42,9 @@ pub(crate) enum Source {
     /// A VST3 program: the program-change parameter (index in the parameter list) and its
     /// normalized value.
     Vst3Program { index: usize, value: f32 },
+    /// An Audio Unit factory preset, by number.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    AuPreset(i32),
 }
 
 /// Turns a name into something safe as a file or folder name.

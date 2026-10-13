@@ -108,18 +108,23 @@ impl Catalog {
     /// vendor) is left out: the CLAP one is preferred.
     pub fn plugins(&self) -> Vec<&PluginInfo> {
         let key = |p: &PluginInfo| (p.name.to_lowercase(), p.vendor.to_lowercase());
-        let clap: std::collections::HashSet<(String, String)> = self
-            .files
-            .iter()
-            .flat_map(|f| &f.plugins)
-            .filter(|p| p.format == PluginFormat::Clap)
-            .map(key)
-            .collect();
+        // CLAP first, then VST3, then AU: a plugin shipped in several formats is offered once.
+        let rank = |f: PluginFormat| match f {
+            PluginFormat::Clap => 0,
+            PluginFormat::Vst3 => 1,
+            PluginFormat::Au => 2,
+        };
+        let mut best: std::collections::HashMap<(String, String), u8> =
+            std::collections::HashMap::new();
+        for p in self.files.iter().flat_map(|f| &f.plugins) {
+            let r = best.entry(key(p)).or_insert(u8::MAX);
+            *r = (*r).min(rank(p.format));
+        }
         let mut all: Vec<&PluginInfo> = self
             .files
             .iter()
             .flat_map(|f| &f.plugins)
-            .filter(|p| p.format == PluginFormat::Clap || !clap.contains(&key(p)))
+            .filter(|p| best.get(&key(p)) == Some(&rank(p.format)))
             .collect();
         all.sort_by_cached_key(|p| key(p));
         all
@@ -215,7 +220,7 @@ fn is_bundle(path: &Path) -> bool {
     let ok = match format_of(path) {
         Some(PluginFormat::Vst3) => true,
         Some(PluginFormat::Clap) => cfg!(target_os = "macos"),
-        None => false,
+        Some(PluginFormat::Au) | None => false,
     };
     ok && path.join("Contents").is_dir()
 }
