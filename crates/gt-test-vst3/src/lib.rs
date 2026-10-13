@@ -548,10 +548,10 @@ impl IAudioProcessorTrait for Processor {
                 }
             }
             Kind::Tone => {
-                let Some(main) = outs.first().and_then(&chans) else {
+                let Some(main) = outs.first().and_then(chans) else {
                     return kResultOk;
                 };
-                let sub = outs.get(1).and_then(&chans);
+                let sub = outs.get(1).and_then(chans);
                 let (main, mut sub) = (main, sub);
                 // Events are sorted by offset; render up to each one.
                 let events = ComRef::from_raw(d.inputEvents);
