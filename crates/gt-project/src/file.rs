@@ -566,6 +566,14 @@ struct ZoneDto {
     tune: f32,
     #[serde(default = "unity")]
     gain: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    start: f32,
+    #[serde(default = "unity", skip_serializing_if = "is_one")]
+    end: f32,
+}
+
+fn is_one(v: &f32) -> bool {
+    *v == 1.0
 }
 
 fn unity() -> f32 {
@@ -594,6 +602,8 @@ struct Sampler2Dto {
     glide_ms: f32,
     voices: u8,
     stretch_beats: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    slice_beats: f32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1078,7 +1088,8 @@ fn sampler2_dto(
         && s.legato == d.legato
         && s.glide_ms == d.glide_ms
         && s.voices == d.voices
-        && s.stretch_beats == d.stretch_beats;
+        && s.stretch_beats == d.stretch_beats
+        && s.slice_beats == d.slice_beats;
     (!plain).then(|| Sampler2Dto {
         interp: s.interp.key().to_owned(),
         reverse: s.reverse,
@@ -1112,6 +1123,8 @@ fn sampler2_dto(
                 vel_hi: z.vel_hi,
                 tune: z.tune,
                 gain: z.gain,
+                start: z.start,
+                end: z.end,
             })
             .collect(),
         round_robin: s.round_robin,
@@ -1120,6 +1133,7 @@ fn sampler2_dto(
         glide_ms: s.glide_ms,
         voices: s.voices,
         stretch_beats: s.stretch_beats,
+        slice_beats: s.slice_beats,
     })
 }
 
@@ -1587,6 +1601,8 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                                 vel_hi: z.vel_hi,
                                 tune: z.tune,
                                 gain: z.gain,
+                                start: z.start,
+                                end: z.end,
                             })
                         })
                         .collect();
@@ -1596,6 +1612,7 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                     s.glide_ms = x.glide_ms;
                     s.voices = x.voices;
                     s.stretch_beats = x.stretch_beats;
+                    s.slice_beats = x.slice_beats;
                 }
                 Instrument::Sampler(SamplerSettings {
                     sample: src.and_then(|s| sample(s, &mut warnings)),
@@ -2584,7 +2601,8 @@ mod tests {
         let id = p.add_drum_channel("Kit").unwrap();
         let i = p.channel_index(id).unwrap();
         let k = p.channels[i].drums_mut().unwrap();
-        k.banks.push(vec![Pad::default(); gt_core::pads::PADS_PER_BANK]);
+        k.banks
+            .push(vec![Pad::default(); gt_core::pads::PADS_PER_BANK]);
         let pad = &mut k.banks[1][5];
         pad.name = "Hat".into();
         pad.set_layers(vec![

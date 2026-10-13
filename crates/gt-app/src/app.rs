@@ -446,7 +446,7 @@ impl GloomApp {
         let get = |src: &gt_core::SampleSource| lib.get(src).map(|l| Arc::clone(&l.data));
         let fitted = ch
             .sampler()
-            .and_then(|s| self.stretch.fitted(&self.project, s, &get));
+            .and_then(|s| self.stretch.fitted(&self.project, s, get));
         let (sample, zones) = gt_engine::zones::channel_sources(ch, get, fitted);
         self.send(EngineCommand::SetChannelSample {
             slot: i as u16,
@@ -557,6 +557,24 @@ impl GloomApp {
     }
 
     /// Acts on the drum pad panel: resend the kit, play a pad, load samples.
+    /// Writes the notes that replay channel `i`'s sliced loop into the current pattern,
+    /// replacing the channel's notes there.
+    fn export_slices(&mut self, i: usize) {
+        let Some(ch) = self.project.channels.get(i) else {
+            return;
+        };
+        let gt_core::Instrument::Sampler(s) = &ch.instrument else {
+            return;
+        };
+        let notes = gt_core::sampler::slice_notes(&s.zones, f64::from(s.slice_beats));
+        let id = ch.id;
+        if notes.is_empty() {
+            return;
+        }
+        self.project.current_pattern_mut().notes.insert(id, notes);
+        self.pending_edit = Some("Export slices");
+    }
+
     fn on_drum_panel(&mut self, out: gt_ui::views::DrumPadOut) {
         let i = self.rack.selected;
         let (bank, pad) = (self.drum_state.bank, self.drum_state.pad);
@@ -634,7 +652,10 @@ impl GloomApp {
         let pads: Vec<gt_core::Pad> = rest.banks.into_iter().flatten().collect();
         for (k, p) in pads.into_iter().enumerate() {
             let at = start + k;
-            let (b, n) = (at / gt_core::pads::PADS_PER_BANK, at % gt_core::pads::PADS_PER_BANK);
+            let (b, n) = (
+                at / gt_core::pads::PADS_PER_BANK,
+                at % gt_core::pads::PADS_PER_BANK,
+            );
             if b >= gt_core::pads::MAX_BANKS {
                 break;
             }
@@ -2356,6 +2377,7 @@ impl eframe::App for GloomApp {
                                 seconds: loaded.map(|l| l.data.seconds()),
                                 status: status.as_deref(),
                                 channel,
+                                data: loaded.map(|l| &*l.data),
                             };
                             let out = sampler_panel(ui, &theme, &mut ch.name, s, view);
                             sampler_out = out;
@@ -2409,6 +2431,9 @@ impl eframe::App for GloomApp {
             self.pending_edit = Some("Instrument settings");
         }
         self.on_drum_panel(drum_out);
+        if sampler_out.export_pattern {
+            self.export_slices(self.rack.selected);
+        }
         if sampler_out.load_folder {
             if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                 let files = gt_project::list_audio_files(&dir);

@@ -391,14 +391,17 @@ impl ChannelSlot {
         let glide_frames = (sp.glide_ms.max(0.0) * 0.001 * self.sr) as u32;
         let mut first = true;
         for &zone in &picked[..n] {
-            let (root, tune, zgain, rate, frames, zpan, zenv, choke) = match &self.zones {
+            let (root, tune, zgain, rate, frames, zpan, zenv, choke, part) = match &self.zones {
                 Some(m) if zone != MAIN_ZONE => {
                     let z = &m.zones[usize::from(zone)];
                     let env = z.env.map(|a| {
                         AdsrParams::new(self.sr, a.attack_ms, a.decay_ms, a.sustain, a.release_ms)
                     });
                     let (rate, frames) = (z.data.sample_rate, z.data.frames());
-                    (z.root, z.tune, z.gain, rate, frames, z.pan, env, z.choke)
+                    let part = z.region.unwrap_or((p.start, p.end));
+                    (
+                        z.root, z.tune, z.gain, rate, frames, z.pan, env, z.choke, part,
+                    )
                 }
                 _ => match &self.sample {
                     Some(s) => (
@@ -410,6 +413,7 @@ impl ChannelSlot {
                         0.0,
                         None,
                         0,
+                        (p.start, p.end),
                     ),
                     None => continue,
                 },
@@ -469,7 +473,7 @@ impl ChannelSlot {
                     }
                 }
             }
-            let region = VoiceRegion::from_fractions(frames, p.start, p.end, p.looped);
+            let region = VoiceRegion::from_fractions(frames, part.0, part.1, p.looped);
             let v = velocity.clamp(0.0, 1.0);
             // Velocity to amplitude: squared, a common curve that spreads soft hits more evenly
             // in loudness than a linear map.

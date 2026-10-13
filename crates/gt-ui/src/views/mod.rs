@@ -4,6 +4,7 @@ mod analyzer;
 mod audio_panel;
 mod browser;
 mod channel_rack;
+mod drum_pads;
 mod input_panel;
 mod midi_panel;
 mod mixer;
@@ -12,7 +13,6 @@ mod piano_roll;
 mod playlist;
 mod plugins;
 mod sampler_panel;
-mod drum_pads;
 mod settings;
 mod synth_panel;
 mod transport_bar;
@@ -23,6 +23,7 @@ pub use audio_panel::{
 };
 pub use browser::{browser, BrowserAction, BrowserEntry, BrowserModel};
 pub use channel_rack::{channel_rack, RackAction, RackState, RackView};
+pub use drum_pads::{drum_pads, DrumPadOut, DrumPadState};
 pub use input_panel::{
     input_menu, input_panel, offered_inputs, InputAction, InputPanelModel, PairMode,
 };
@@ -44,7 +45,6 @@ pub use plugins::{
     plugin_browser, plugin_controls, PluginAction, PluginBrowserAction, PluginBrowserState,
     PluginBrowserView, PluginEntry, PluginPanelView, PluginState,
 };
-pub use drum_pads::{drum_pads, DrumPadOut, DrumPadState};
 pub use sampler_panel::{sampler_panel, SamplerPanelOut, SamplerPanelView};
 pub use settings::{
     first_run, perf_panel, privacy_panel, settings_tabs, shortcut_editor, theme_editor,

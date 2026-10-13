@@ -163,6 +163,9 @@ pub struct SamplerSettings {
     /// Time-stretch mode: fit `sample` to this many beats at the song tempo, keeping its pitch
     /// (0: off; plays resampled).
     pub stretch_beats: f32,
+    /// Beat slicer: length of the sliced loop in beats (0: not sliced). Its zones are the
+    /// slices, on keys from [`crate::sampler::FIRST_SLICE_KEY`] up.
+    pub slice_beats: f32,
 }
 
 impl Default for SamplerSettings {
@@ -188,6 +191,7 @@ impl Default for SamplerSettings {
             glide_ms: 0.0,
             voices: SamplerSettings::MAX_VOICES,
             stretch_beats: 0.0,
+            slice_beats: 0.0,
         }
     }
 }
@@ -938,6 +942,7 @@ impl Project {
                     s.glide_ms = fin(s.glide_ms, 0.0, 5000.0, 0.0);
                     s.voices = s.voices.clamp(1, SamplerSettings::MAX_VOICES);
                     s.stretch_beats = fin(s.stretch_beats, 0.0, 256.0, 0.0);
+                    s.slice_beats = fin(s.slice_beats, 0.0, 256.0, 0.0);
                 }
                 Instrument::Synth(p) => p.sanitize(),
                 Instrument::Plugin(p) => p.sanitize(),

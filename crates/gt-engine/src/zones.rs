@@ -36,6 +36,9 @@ pub struct Zone {
     pub choke: u8,
     /// Separate output: 1 + index into [`ZoneMap::routes`] (0: the channel's own).
     pub aux: u8,
+    /// Part of the sample played (fractions; a slice), or `None` for the channel's
+    /// start and end.
+    pub region: Option<(f32, f32)>,
 }
 
 impl Zone {
@@ -54,6 +57,7 @@ impl Zone {
             env: None,
             choke: 0,
             aux: 0,
+            region: None,
         }
     }
 
@@ -105,6 +109,7 @@ impl ZoneMap {
                         vel_hi: z.vel_hi,
                         tune: z.tune,
                         gain: z.gain,
+                        region: (z.start > 0.0 || z.end < 1.0).then_some((z.start, z.end)),
                         ..Zone::new(Arc::new(SampleData::default()), 0)
                     })
                 })
@@ -153,6 +158,7 @@ impl ZoneMap {
                     env: Some(pad.adsr),
                     choke: pad.choke,
                     aux,
+                    region: None,
                 });
             }
         }
@@ -313,5 +319,11 @@ mod tests {
         .unwrap();
         assert_eq!(m.zones.len(), 1);
         assert_eq!(m.zones[0].root, 70);
+        assert_eq!(m.zones[0].region, None);
+        // Slices keep their part of the sample.
+        s.zones = gt_core::sampler::slice_zones(&SampleSource::File("l.wav".into()), &[0, 8], 16);
+        let m = ZoneMap::build(&s, |_| Some(data())).unwrap();
+        assert_eq!(m.zones[1].region, Some((0.5, 1.0)));
+        assert_eq!(m.zones[0].region, Some((0.0, 0.5)));
     }
 }

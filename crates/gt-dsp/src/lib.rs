@@ -22,6 +22,7 @@ pub mod onsets;
 mod osc;
 mod ramp;
 mod sampler;
+pub mod slicer;
 pub mod stretch;
 pub mod synth;
 

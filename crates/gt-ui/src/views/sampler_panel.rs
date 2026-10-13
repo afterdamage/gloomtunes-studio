@@ -1,11 +1,12 @@
 //! Settings of the selected sampler channel: sample, waveform with start/end, pitch, loop mode
 //! and the ADSR envelope; Sampler 2 (Prompt 23): quality, reverse, keys, voices, glide,
-//! time-stretch, multi-sample zones, the filter with its envelope and two LFOs.
+//! time-stretch, multi-sample zones, the filter with its envelope and two LFOs, and the beat
+//! slicer.
 
 use egui::{pos2, vec2, RichText, Sense, Stroke, Ui};
 use gt_core::{
-    ChannelId, ChannelParam, Interp, LfoShape, LfoTarget, LoopMode, ParamId, SamplerFilterMode,
-    SamplerSettings,
+    ChannelId, ChannelParam, Interp, LfoShape, LfoTarget, LoopMode, ParamId, SampleData,
+    SamplerFilterMode, SamplerSettings,
 };
 
 use crate::param_ui::{param_live, param_menu};
@@ -28,6 +29,8 @@ pub struct SamplerPanelView<'a> {
     pub status: Option<&'a str>,
     /// The channel, so knobs get the automation and modulation menu.
     pub channel: Option<ChannelId>,
+    /// The loaded sample, for the beat slicer.
+    pub data: Option<&'a SampleData>,
 }
 
 /// What the panel changed.
@@ -39,6 +42,8 @@ pub struct SamplerPanelOut {
     pub reload: bool,
     /// The user asked to load a folder as a multi-sample instrument.
     pub load_folder: bool,
+    /// Write the sliced loop's pattern into the current pattern.
+    pub export_pattern: bool,
 }
 
 /// Draws the panel. Returns true when a sound parameter changed.
@@ -154,6 +159,10 @@ pub fn sampler_panel(
     });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
+        slicer_row(ui, theme, s, view.data, &mut out);
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
         changed |= filter_row(ui, theme, s, &menu);
         ui.separator();
         for (i, l) in s.lfos.iter_mut().enumerate() {
@@ -238,6 +247,7 @@ fn playback_row(
             .clicked()
         {
             s.zones.clear();
+            s.slice_beats = 0.0;
             out.reload = true;
         }
     }
@@ -272,6 +282,127 @@ fn playback_row(
         .on_hover_text("Mono glide time between notes")
         .changed();
     changed
+}
+
+/// How the beat slicer cuts (kept in egui memory).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SlicerUi {
+    grid: bool,
+    sensitivity: f32,
+    per_beat: u32,
+}
+
+impl Default for SlicerUi {
+    fn default() -> Self {
+        Self {
+            grid: false,
+            sensitivity: 0.5,
+            per_beat: 2,
+        }
+    }
+}
+
+/// The beat slicer: cut the loaded loop on its transients or a grid into zones on keys from
+/// C3, and write the pattern that replays it.
+fn slicer_row(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    s: &mut SamplerSettings,
+    data: Option<&SampleData>,
+    out: &mut SamplerPanelOut,
+) {
+    let id = ui.id().with("slicer");
+    let mut st: SlicerUi = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    ui.label(RichText::new("Slicer").color(theme.text_dim));
+    for (grid, label, tip) in [
+        (false, "Transients", "Cut where the hits start"),
+        (true, "Grid", "Cut every fraction of a beat"),
+    ] {
+        if ui
+            .add(egui::Button::selectable(st.grid == grid, label))
+            .on_hover_text(tip)
+            .clicked()
+        {
+            st.grid = grid;
+        }
+    }
+    if st.grid {
+        egui::ComboBox::from_id_salt("slice_grid")
+            .width(60.0)
+            .selected_text(format!("1/{}", st.per_beat * 4))
+            .show_ui(ui, |ui| {
+                for d in [1, 2, 4, 8] {
+                    ui.selectable_value(&mut st.per_beat, d, format!("1/{}", d * 4));
+                }
+            });
+    } else {
+        ui.add(
+            egui::Slider::new(&mut st.sensitivity, 0.0..=1.0)
+                .show_value(false)
+                .text("Sensitivity"),
+        )
+        .on_hover_text("Higher finds quieter hits");
+    }
+    let source = s.sample.clone();
+    let can = data.is_some_and(|d| d.frames() > 0) && source.is_some();
+    if ui
+        .add_enabled(can, egui::Button::new("Slice"))
+        .on_hover_text("Cut the loop into slices on keys from C3 up (replaces the zones)")
+        .clicked()
+    {
+        if let (Some(d), Some(src)) = (data, source) {
+            let mono: Vec<f32> = d
+                .left()
+                .iter()
+                .zip(d.right())
+                .map(|(l, r)| 0.5 * (l + r))
+                .collect();
+            let beats = gt_dsp::slicer::loop_beats(&mono, d.sample_rate);
+            let starts = if st.grid {
+                gt_dsp::slicer::grid_slices(mono.len(), beats, st.per_beat)
+            } else {
+                gt_dsp::slicer::transient_slices(&mono, d.sample_rate, st.sensitivity, 0.03)
+            };
+            s.zones = gt_core::sampler::slice_zones(&src, &starts, mono.len());
+            s.slice_beats = beats as f32;
+            s.round_robin = false;
+            s.stretch_beats = 0.0;
+            // A slice cuts the one before, so a faster tempo never overlaps them.
+            s.mono = true;
+            s.legato = false;
+            out.reload = true;
+            out.changed = true;
+        }
+    }
+    if s.slice_beats > 0.0 && !s.zones.is_empty() {
+        ui.label(RichText::new(format!(
+            "{} slices, {} beats",
+            s.zones.len(),
+            s.slice_beats
+        )));
+        if ui
+            .add(
+                egui::DragValue::new(&mut s.slice_beats)
+                    .range(1.0..=256.0)
+                    .speed(0.1)
+                    .suffix(" beats"),
+            )
+            .on_hover_text("Length of the loop (detected; fix it if the tempo guess is off)")
+            .changed()
+        {
+            out.changed = true;
+        }
+        if ui
+            .button("Export pattern")
+            .on_hover_text(
+                "Write the notes that replay the loop at the song tempo into the current pattern",
+            )
+            .clicked()
+        {
+            out.export_pattern = true;
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(id, st));
 }
 
 fn zone_summary(s: &SamplerSettings) -> String {

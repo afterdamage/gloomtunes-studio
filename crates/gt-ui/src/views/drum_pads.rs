@@ -102,7 +102,9 @@ fn pad_grid(
                     let fill = if pad.layers.is_empty() {
                         theme.bg_deep
                     } else {
-                        theme.accent.gamma_multiply(if selected { 0.55 } else { 0.25 })
+                        theme
+                            .accent
+                            .gamma_multiply(if selected { 0.55 } else { 0.25 })
                     };
                     let painter = ui.painter_at(rect);
                     painter.rect_filled(rect, f32::from(theme.radius), fill);
@@ -180,7 +182,11 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
                         l.vel_lo * 100.0,
                         l.vel_hi * 100.0
                     ));
-                if ui.small_button("✕").on_hover_text("Remove this layer").clicked() {
+                if ui
+                    .small_button("✕")
+                    .on_hover_text("Remove this layer")
+                    .clicked()
+                {
                     remove = Some(i);
                 }
             });
@@ -200,7 +206,11 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
             ui.label(dim("Empty: load a sample"));
         }
         ui.horizontal(|ui| {
-            if ui.button("Load…").on_hover_text("Replace the pad's sample").clicked() {
+            if ui
+                .button("Load…")
+                .on_hover_text("Replace the pad's sample")
+                .clicked()
+            {
                 out.load = Some(false);
             }
             if !pad.layers.is_empty()
@@ -237,9 +247,14 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
             ui.label(dim("Output"));
             egui::ComboBox::from_id_salt("pad_output")
                 .width(80.0)
-                .selected_text(pad.output.map_or("Channel".to_owned(), |o| format!("Insert {o}")))
+                .selected_text(
+                    pad.output
+                        .map_or("Channel".to_owned(), |o| format!("Insert {o}")),
+                )
                 .show_ui(ui, |ui| {
-                    out.changed |= ui.selectable_value(&mut pad.output, None, "Channel").changed();
+                    out.changed |= ui
+                        .selectable_value(&mut pad.output, None, "Channel")
+                        .changed();
                     for o in 1..=INSERTS {
                         out.changed |= ui
                             .selectable_value(&mut pad.output, Some(o), format!("Insert {o}"))
@@ -263,24 +278,44 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
     })
     .changed();
     let a = &mut pad.adsr;
-    out.changed |= labeled_knob(ui, theme, "Attack", &mut a.attack_ms, 0.0..=500.0, 0.0, |v| {
-        format!("Attack {v:.0} ms")
-    })
+    out.changed |= labeled_knob(
+        ui,
+        theme,
+        "Attack",
+        &mut a.attack_ms,
+        0.0..=500.0,
+        0.0,
+        |v| format!("Attack {v:.0} ms"),
+    )
     .changed();
-    out.changed |= labeled_knob(ui, theme, "Decay", &mut a.decay_ms, 0.0..=2000.0, 0.0, |v| {
-        if v == 0.0 {
-            "Decay off".to_owned()
-        } else {
-            format!("Decay {v:.0} ms")
-        }
-    })
+    out.changed |= labeled_knob(
+        ui,
+        theme,
+        "Decay",
+        &mut a.decay_ms,
+        0.0..=2000.0,
+        0.0,
+        |v| {
+            if v == 0.0 {
+                "Decay off".to_owned()
+            } else {
+                format!("Decay {v:.0} ms")
+            }
+        },
+    )
     .changed();
     out.changed |= labeled_knob(ui, theme, "Sustain", &mut a.sustain, 0.0..=1.0, 1.0, |v| {
         format!("Sustain {:.0} %", v * 100.0)
     })
     .changed();
-    out.changed |= labeled_knob(ui, theme, "Release", &mut a.release_ms, 0.0..=2000.0, 30.0, |v| {
-        format!("Release {v:.0} ms")
-    })
+    out.changed |= labeled_knob(
+        ui,
+        theme,
+        "Release",
+        &mut a.release_ms,
+        0.0..=2000.0,
+        30.0,
+        |v| format!("Release {v:.0} ms"),
+    )
     .changed();
 }

@@ -2,7 +2,8 @@
 //! two LFOs, key zones and velocity layers, and how a folder of samples maps onto keys.
 
 use crate::modulation::LfoShape;
-use crate::project::{Adsr, SampleSource};
+use crate::project::{Adsr, Note, SampleSource};
+use crate::time::PPQ;
 
 /// How the sampler reads between stored frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
@@ -219,6 +220,10 @@ pub struct KeyZone {
     pub tune: f32,
     /// Linear gain.
     pub gain: f32,
+    /// Start of the part played, fraction of the sample (slices).
+    pub start: f32,
+    /// End of the part played, fraction of the sample.
+    pub end: f32,
 }
 
 impl KeyZone {
@@ -233,6 +238,8 @@ impl KeyZone {
             vel_hi: 1.0,
             tune: 0.0,
             gain: 1.0,
+            start: 0.0,
+            end: 1.0,
         }
     }
 
@@ -258,6 +265,16 @@ impl KeyZone {
         };
         self.gain = if self.gain.is_finite() {
             self.gain.clamp(0.0, 4.0)
+        } else {
+            1.0
+        };
+        self.start = if self.start.is_finite() {
+            self.start.clamp(0.0, 0.999)
+        } else {
+            0.0
+        };
+        self.end = if self.end.is_finite() {
+            self.end.clamp(self.start + 0.0001, 1.0)
         } else {
             1.0
         };
@@ -381,7 +398,7 @@ pub fn map_folder(files: &[(SampleSource, String)]) -> Vec<KeyZone> {
         .iter()
         .map(|(s, n)| (s, n.as_str(), key_in_name(n)))
         .collect();
-    items.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    items.sort_by_key(|a| a.1.to_lowercase());
     if items.iter().all(|i| i.2.is_none()) {
         let mut k = 60u8;
         for i in &mut items {
@@ -444,6 +461,46 @@ pub fn map_folder(files: &[(SampleSource, String)]) -> Vec<KeyZone> {
     zones
 }
 
+/// Key of a sliced loop's first slice.
+pub const FIRST_SLICE_KEY: u8 = 48;
+/// Most slices of a loop (keys up to 127).
+pub const MAX_SLICES: usize = 128 - FIRST_SLICE_KEY as usize;
+
+/// Zones for the slices of `sample` (`frames` long) that start at `starts` (frames, rising):
+/// slice `k` plays on key [`FIRST_SLICE_KEY`]` + k` at its original pitch, from its start to
+/// the next slice's.
+pub fn slice_zones(sample: &SampleSource, starts: &[usize], frames: usize) -> Vec<KeyZone> {
+    let frames = frames.max(1) as f64;
+    let n = starts.len().min(MAX_SLICES);
+    (0..n)
+        .map(|k| {
+            let key = FIRST_SLICE_KEY + k as u8;
+            let end = starts.get(k + 1).map_or(frames, |&e| e as f64);
+            KeyZone {
+                key_lo: key,
+                key_hi: key,
+                start: (starts[k] as f64 / frames) as f32,
+                end: (end / frames) as f32,
+                ..KeyZone::new(sample.clone(), key)
+            }
+        })
+        .collect()
+}
+
+/// A pattern that replays a sliced loop `beats` long: one note per slice zone, at the slice's
+/// place in the loop and as long as it. At any tempo each slice starts on its beat.
+pub fn slice_notes(zones: &[KeyZone], beats: f64) -> Vec<Note> {
+    let ticks = beats * PPQ as f64;
+    zones
+        .iter()
+        .map(|z| {
+            let start = (f64::from(z.start) * ticks).round() as i64;
+            let end = (f64::from(z.end) * ticks).round() as i64;
+            Note::new(start, (end - start).max(1), z.root, 0.8)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,5 +561,29 @@ mod tests {
         let z = map_folder(&[src("b.wav"), src("a.wav")]);
         assert_eq!((z[0].root, z[1].root), (60, 61));
         assert!(z[0].matches(0, 0.5) && z[1].matches(127, 0.5));
+    }
+
+    #[test]
+    fn slices_map_to_keys_and_replay_on_the_beat() {
+        let src = SampleSource::File("loop.wav".into());
+        let z = slice_zones(&src, &[0, 24_000, 60_000], 96_000);
+        assert_eq!(z.len(), 3);
+        assert_eq!(
+            (z[1].key_lo, z[1].root),
+            (FIRST_SLICE_KEY + 1, FIRST_SLICE_KEY + 1)
+        );
+        assert_eq!((z[1].start, z[1].end), (0.25, 0.625));
+        assert_eq!(z[2].end, 1.0);
+        let n = slice_notes(&z, 4.0);
+        assert_eq!(
+            n.iter()
+                .map(|n| (n.start, n.length, n.key))
+                .collect::<Vec<_>>(),
+            [
+                (0, PPQ, 48),
+                (PPQ, PPQ * 3 / 2, 49),
+                (PPQ * 5 / 2, PPQ * 3 / 2, 50)
+            ]
+        );
     }
 }
