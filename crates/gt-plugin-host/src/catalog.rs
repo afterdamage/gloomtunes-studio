@@ -1,5 +1,5 @@
-//! Finding plugins: the CLAP search folders, scanning a plugin file in a separate process, and
-//! the scan cache.
+//! Finding plugins: the CLAP and VST3 search folders, scanning a plugin file in a separate
+//! process, and the scan cache.
 //!
 //! Loading a plugin file runs its code, and a broken plugin can crash the process that loads
 //! it. So the plugin list is built by running this program again for each new or changed file
@@ -14,20 +14,23 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use clack_host::prelude::PluginEntry;
-use gt_core::PluginKind;
+use gt_core::{PluginFormat, PluginKind};
 use serde::{Deserialize, Serialize};
 
 /// The command-line switch that makes the program scan one file and exit.
 pub const SCAN_SWITCH: &str = "--scan-clap";
 /// A scan taking longer than this is treated as a hang.
 const SCAN_TIMEOUT: Duration = Duration::from_secs(20);
-/// Folder depth searched below each CLAP folder.
+/// Folder depth searched below each plugin folder.
 const MAX_DEPTH: usize = 6;
 
 /// One plugin in a plugin file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PluginInfo {
-    /// The plugin's id.
+    /// The plugin's format (older catalogs only had CLAP).
+    #[serde(default, with = "format_key")]
+    pub format: PluginFormat,
+    /// The plugin's id (a VST3 class id in hex).
     pub id: String,
     /// Display name.
     pub name: String,
@@ -40,7 +43,8 @@ pub struct PluginInfo {
     /// One-line description.
     #[serde(default)]
     pub description: String,
-    /// CLAP feature tags ("instrument", "audio-effect", "reverb" ...).
+    /// CLAP feature tags ("instrument", "audio-effect", "reverb" ...); VST3 sub-categories
+    /// are mapped onto them.
     #[serde(default)]
     pub features: Vec<String>,
     /// The file it is in.
@@ -100,10 +104,24 @@ impl Catalog {
         std::fs::write(path, json)
     }
 
-    /// Every plugin, sorted by name.
+    /// Every plugin, sorted by name. A VST3 plugin that also ships as CLAP (same name and
+    /// vendor) is left out: the CLAP one is preferred.
     pub fn plugins(&self) -> Vec<&PluginInfo> {
-        let mut all: Vec<&PluginInfo> = self.files.iter().flat_map(|f| &f.plugins).collect();
-        all.sort_by_cached_key(|p| (p.name.to_lowercase(), p.vendor.to_lowercase()));
+        let key = |p: &PluginInfo| (p.name.to_lowercase(), p.vendor.to_lowercase());
+        let clap: std::collections::HashSet<(String, String)> = self
+            .files
+            .iter()
+            .flat_map(|f| &f.plugins)
+            .filter(|p| p.format == PluginFormat::Clap)
+            .map(key)
+            .collect();
+        let mut all: Vec<&PluginInfo> = self
+            .files
+            .iter()
+            .flat_map(|f| &f.plugins)
+            .filter(|p| p.format == PluginFormat::Clap || !clap.contains(&key(p)))
+            .collect();
+        all.sort_by_cached_key(|p| key(p));
         all
     }
 
@@ -129,10 +147,12 @@ impl Catalog {
     }
 }
 
-/// The folders searched for CLAP plugins: those in `CLAP_PATH`, then the standard ones
+/// The folders searched for plugins: those in `CLAP_PATH`, then the standard CLAP ones
 /// (`~/.clap`, `/usr/lib/clap` and `/usr/local/lib/clap` on Linux; `Common Files\CLAP` and
 /// `%LOCALAPPDATA%\Programs\Common\CLAP` on Windows; `~/Library/Audio/Plug-Ins/CLAP` and
-/// `/Library/Audio/Plug-Ins/CLAP` on macOS).
+/// `/Library/Audio/Plug-Ins/CLAP` on macOS), then the standard VST3 ones (`~/.vst3`,
+/// `/usr/lib/vst3` and `/usr/local/lib/vst3`; `Common Files\VST3`;
+/// `~/Library/Audio/Plug-Ins/VST3` and `/Library/Audio/Plug-Ins/VST3`).
 pub fn standard_folders() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("CLAP_PATH")
         .map(|p| std::env::split_paths(&p).collect())
@@ -149,29 +169,58 @@ pub fn standard_folders() -> Vec<PathBuf> {
                     .join("CLAP"),
             );
         }
+        if let Some(common) = std::env::var_os("COMMONPROGRAMFILES") {
+            dirs.push(PathBuf::from(common).join("VST3"));
+        }
     } else if cfg!(target_os = "macos") {
-        if let Some(home) = std::env::var_os("HOME") {
-            dirs.push(PathBuf::from(home).join("Library/Audio/Plug-Ins/CLAP"));
+        for format in ["CLAP", "VST3"] {
+            if let Some(home) = std::env::var_os("HOME") {
+                dirs.push(
+                    PathBuf::from(home)
+                        .join("Library/Audio/Plug-Ins")
+                        .join(format),
+                );
+            }
+            dirs.push(PathBuf::from("/Library/Audio/Plug-Ins").join(format));
         }
-        dirs.push(PathBuf::from("/Library/Audio/Plug-Ins/CLAP"));
     } else {
-        if let Some(home) = std::env::var_os("HOME") {
-            dirs.push(PathBuf::from(home).join(".clap"));
+        for format in ["clap", "vst3"] {
+            if let Some(home) = std::env::var_os("HOME") {
+                dirs.push(PathBuf::from(home).join(format!(".{format}")));
+            }
+            dirs.push(PathBuf::from("/usr/lib").join(format));
+            dirs.push(PathBuf::from("/usr/local/lib").join(format));
         }
-        dirs.push(PathBuf::from("/usr/lib/clap"));
-        dirs.push(PathBuf::from("/usr/local/lib/clap"));
     }
     dirs.retain(|d| !d.as_os_str().is_empty());
     dirs.dedup();
     dirs
 }
 
-/// A macOS plugin bundle: a `.clap` folder holding `Contents`, loaded as one plugin file.
-fn is_bundle(path: &Path) -> bool {
-    cfg!(target_os = "macos") && path.join("Contents").is_dir()
+/// The format a plugin file is in, from its extension.
+pub fn format_of(path: &Path) -> Option<PluginFormat> {
+    let ext = path.extension()?;
+    if ext.eq_ignore_ascii_case("clap") {
+        Some(PluginFormat::Clap)
+    } else if ext.eq_ignore_ascii_case("vst3") {
+        Some(PluginFormat::Vst3)
+    } else {
+        None
+    }
 }
 
-/// Every `.clap` file (or bundle, on macOS) in `dirs` and their subfolders, sorted.
+/// A plugin bundle: a folder holding `Contents`, loaded as one plugin file (`.vst3` bundles on
+/// every system, `.clap` bundles on macOS).
+fn is_bundle(path: &Path) -> bool {
+    let ok = match format_of(path) {
+        Some(PluginFormat::Vst3) => true,
+        Some(PluginFormat::Clap) => cfg!(target_os = "macos"),
+        None => false,
+    };
+    ok && path.join("Contents").is_dir()
+}
+
+/// Every `.clap` and `.vst3` file or bundle in `dirs` and their subfolders, sorted.
 pub fn find_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
     fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         let Ok(rd) = std::fs::read_dir(dir) else {
@@ -179,12 +228,10 @@ pub fn find_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
         };
         for entry in rd.flatten() {
             let path = entry.path();
-            let is_clap = path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("clap"));
+            let known = format_of(&path).is_some();
             // Follows links, so linked plugin files and folders count.
             let meta = std::fs::metadata(&path);
-            if is_clap && meta.as_ref().is_ok_and(|m| m.is_file() || is_bundle(&path)) {
+            if known && meta.as_ref().is_ok_and(|m| m.is_file() || is_bundle(&path)) {
                 out.push(path);
             } else if depth < MAX_DEPTH && meta.is_ok_and(|m| m.is_dir()) {
                 walk(&path, depth + 1, out);
@@ -203,6 +250,10 @@ pub fn find_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
 /// Lists the plugins in a file by loading it into this process. Only for the scan process
 /// ([`scan_child_main`]) and tests: a broken plugin can crash the caller.
 pub fn scan_in_process(path: &Path) -> Result<Vec<PluginInfo>, String> {
+    if format_of(path) == Some(PluginFormat::Vst3) {
+        let module = crate::vst3::Module::load(path)?;
+        return Ok(module.list(path));
+    }
     // SAFETY: loading a plugin file runs its initialization code; that is the point of this
     // function, which runs in a throwaway process.
     #[allow(unsafe_code)]
@@ -223,6 +274,7 @@ pub(crate) fn list_entry(entry: &PluginEntry, path: &Path) -> Vec<PluginInfo> {
         .plugin_descriptors()
         .filter_map(|d| {
             Some(PluginInfo {
+                format: PluginFormat::Clap,
                 id: d.id()?.to_str().ok()?.to_owned(),
                 name: text(d.name()),
                 vendor: text(d.vendor()),
@@ -236,6 +288,22 @@ pub(crate) fn list_entry(entry: &PluginEntry, path: &Path) -> Vec<PluginInfo> {
             })
         })
         .collect()
+}
+
+/// `PluginFormat` as its file key in the catalog.
+mod format_key {
+    use gt_core::PluginFormat;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(f: &PluginFormat, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(f.key())
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PluginFormat, D::Error> {
+        let key = String::deserialize(d)?;
+        PluginFormat::from_key(&key)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown plugin format {key}")))
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -325,7 +393,8 @@ pub fn scan_with_child(exe: &Path, file: &Path) -> Result<Vec<PluginInfo>, Strin
 }
 
 /// Size and modification time of a file. For a bundle, the total size and newest time of the
-/// binaries in `Contents/MacOS`, since the bundle folder itself rarely changes on an update.
+/// binaries in its binary folder (`Contents/MacOS`, `Contents/x86_64-linux` ...), since the
+/// bundle folder itself rarely changes on an update.
 fn stamp(path: &Path) -> Option<(u64, u64)> {
     let secs = |m: &std::fs::Metadata| {
         m.modified()
@@ -338,10 +407,11 @@ fn stamp(path: &Path) -> Option<(u64, u64)> {
         return Some((m.len(), secs(&m)));
     }
     let (mut size, mut modified) = (0, secs(&m));
-    for entry in std::fs::read_dir(path.join("Contents").join("MacOS"))
-        .ok()?
-        .flatten()
-    {
+    let bin = match format_of(path) {
+        Some(PluginFormat::Vst3) => crate::vst3::binary_path(path)?.parent()?.to_owned(),
+        _ => path.join("Contents").join("MacOS"),
+    };
+    for entry in std::fs::read_dir(bin).ok()?.flatten() {
         if let Ok(m) = entry.metadata() {
             size += m.len();
             modified = modified.max(secs(&m));
@@ -401,6 +471,7 @@ mod tests {
 
     fn info(id: &str, name: &str, path: &str, features: &[&str]) -> PluginInfo {
         PluginInfo {
+            format: format_of(Path::new(path)).unwrap_or_default(),
             id: id.to_owned(),
             name: name.to_owned(),
             vendor: String::new(),
@@ -504,5 +575,47 @@ mod tests {
         );
         assert!(cat.find("q", Path::new("/a.clap")).is_none());
         assert_eq!(cat.plugins()[0].kind(), PluginKind::Effect);
+    }
+
+    #[test]
+    fn a_plugin_shipped_as_clap_and_vst3_is_offered_once_as_clap() {
+        let file = |path: &str, plugins| CatalogFile {
+            path: PathBuf::from(path),
+            size: 1,
+            modified: 1,
+            plugins,
+            error: None,
+        };
+        let cat = Catalog {
+            files: vec![
+                file(
+                    "/s.clap",
+                    vec![info("org.s", "Synth", "/s.clap", &["instrument"])],
+                ),
+                file(
+                    "/S.vst3",
+                    vec![
+                        info("ABCD", "SYNTH", "/S.vst3", &["instrument"]),
+                        info("EF01", "Delay", "/S.vst3", &["audio-effect"]),
+                    ],
+                ),
+            ],
+        };
+        let names: Vec<(&str, PluginFormat)> = cat
+            .plugins()
+            .iter()
+            .map(|p| (p.name.as_str(), p.format))
+            .collect();
+        assert_eq!(
+            names,
+            vec![("Delay", PluginFormat::Vst3), ("Synth", PluginFormat::Clap)]
+        );
+        // The format survives the cache file; older caches without it read as CLAP.
+        let json = serde_json::to_string(&cat).unwrap();
+        assert!(json.contains("\"format\":\"vst3\""));
+        assert_eq!(serde_json::from_str::<Catalog>(&json).unwrap(), cat);
+        let old: PluginInfo =
+            serde_json::from_str(r#"{"id":"a","name":"A","path":"/a.clap"}"#).unwrap();
+        assert_eq!(old.format, PluginFormat::Clap);
     }
 }

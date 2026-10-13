@@ -170,6 +170,10 @@ impl Native {
         unsafe { Window::from_win32_hwnd(self.hwnd) }
     }
 
+    pub(super) fn raw_handle(&self) -> *mut std::ffi::c_void {
+        self.hwnd
+    }
+
     pub(super) fn poll(&mut self) -> WindowEvents {
         // SAFETY: the state lives until the window is destroyed, which only `drop` does.
         let state = unsafe { &*self.state };

@@ -92,11 +92,14 @@ impl GloomApp {
             .iter()
             .map(|p| PluginEntry {
                 name: p.name.clone(),
-                vendor: p.vendor.clone(),
+                vendor: match p.format {
+                    gt_core::PluginFormat::Clap => p.vendor.clone(),
+                    f => format!("{} · {}", p.vendor, f.label()),
+                },
                 kind: p.kind(),
                 details: [
                     p.description.as_str(),
-                    &format!("{} {}", p.id, p.version),
+                    &format!("{} · {} {}", p.format.label(), p.id, p.version),
                     &p.path.display().to_string(),
                 ]
                 .iter()

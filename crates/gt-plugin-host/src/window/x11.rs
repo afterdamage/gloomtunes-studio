@@ -118,6 +118,10 @@ impl Native {
         Window::from_x11_handle(std::os::raw::c_ulong::from(self.window))
     }
 
+    pub(super) fn raw_handle(&self) -> *mut std::ffi::c_void {
+        self.window as usize as *mut std::ffi::c_void
+    }
+
     pub(super) fn poll(&mut self) -> WindowEvents {
         let mut out = WindowEvents::default();
         while let Ok(Some(event)) = self.conn.poll_for_event() {

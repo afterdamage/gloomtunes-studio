@@ -568,6 +568,11 @@ sound identical; the golden export test stays.
   - Limits: one line per parameter per pattern; lines are drawn with straight segments
     (curves only by recording or in clips).
 
+### Prompt 18: VST3 hosting and plugin hosting 2
+- VST3 (D113): scanned, loaded, played, automated, saved and edited (editor windows on all
+  three systems) exactly like CLAP; a plugin shipped in both formats is offered as CLAP.
+  Limits: `moduleinfo.json` is not read, so every bundle is loaded once to scan it.
+
 ---
 
 ## v1.0 scope

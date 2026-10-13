@@ -14,11 +14,14 @@ use std::sync::Arc;
 /// Most parameters mirrored per plugin. Larger plugins have the rest left out of automation.
 pub const MAX_PLUGIN_PARAMS: usize = 4096;
 
-/// Plugin formats. Only CLAP is hosted; VST3 is designed but not built (ARCHITECTURE.md §2.6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Plugin formats (ARCHITECTURE.md §2.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum PluginFormat {
     /// CLAP.
+    #[default]
     Clap,
+    /// VST3 (Prompt 18, D113).
+    Vst3,
 }
 
 impl PluginFormat {
@@ -26,12 +29,25 @@ impl PluginFormat {
     pub fn key(self) -> &'static str {
         match self {
             Self::Clap => "clap",
+            Self::Vst3 => "vst3",
         }
     }
 
     /// The format with a file key.
     pub fn from_key(key: &str) -> Option<Self> {
-        (key == "clap").then_some(Self::Clap)
+        match key {
+            "clap" => Some(Self::Clap),
+            "vst3" => Some(Self::Vst3),
+            _ => None,
+        }
+    }
+
+    /// Name shown to users.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Clap => "CLAP",
+            Self::Vst3 => "VST3",
+        }
     }
 }
 

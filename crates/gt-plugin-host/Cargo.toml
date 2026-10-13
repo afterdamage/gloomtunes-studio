@@ -1,6 +1,6 @@
 [package]
 name = "gt-plugin-host"
-description = "GloomTunes Studio: CLAP plugin scanning, loading and hosting."
+description = "GloomTunes Studio: CLAP and VST3 plugin scanning, loading and hosting."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,6 +21,8 @@ rtrb.workspace = true
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+vst3.workspace = true
+libloading.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -39,4 +41,5 @@ windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Graphic
 [dev-dependencies]
 clack-host = { workspace = true, features = ["clack-plugin"] }
 gt-test-plugin = { path = "../gt-test-plugin" }
+gt-test-vst3 = { path = "../gt-test-vst3" }
 clack-plugin.workspace = true

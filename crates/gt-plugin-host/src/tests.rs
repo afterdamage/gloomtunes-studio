@@ -5,11 +5,10 @@ use std::sync::Arc;
 
 use clack_host::prelude::PluginEntry;
 use gt_core::{EffectKind, EffectSlot, PluginKind, Project, MASTER};
-use gt_engine::{
-    ChannelParams, EngineCommand, EngineConfig, MixerParams, PluginContext, PluginProcessor,
-};
+use gt_engine::{ChannelParams, EngineCommand, EngineConfig, MixerParams, PluginContext};
 use gt_test_plugin::{TestEntry, GAIN_ID, TONE_ID};
 
+use crate::backend::{Entry, Instance};
 use crate::catalog::{list_entry, PluginInfo};
 use crate::host::Signals;
 use crate::instance::LoadedPlugin;
@@ -141,7 +140,7 @@ fn host() -> PluginHost {
     let _ = std::fs::remove_dir_all(&dir);
     let (mut h, report) = PluginHost::new(&dir, PathBuf::from("gloomtunes"), Arc::new(|| {}));
     assert!(report.is_empty());
-    h.insert_entry(Path::new(FILE), entry());
+    h.insert_entry(Path::new(FILE), Entry::Clap(entry()));
     h
 }
 

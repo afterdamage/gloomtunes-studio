@@ -1,7 +1,8 @@
-//! CLAP plugin hosting for GloomTunes Studio (Step 11, ARCHITECTURE.md §2.6).
+//! CLAP and VST3 plugin hosting for GloomTunes Studio (Step 11, Prompt 18; ARCHITECTURE.md
+//! §2.6).
 //!
-//! * [`catalog`]: the CLAP search folders, scanning plugin files in a separate process, and
-//!   the scan cache.
+//! * [`catalog`]: the plugin search folders, scanning plugin files in a separate process, and
+//!   the scan cache. A plugin that ships as both CLAP and VST3 is offered as CLAP.
 //! * [`PluginHost`]: runs plugin instances on the UI thread in step with the project and the
 //!   engine: loading with saved state, parameter sync both ways, restarts, main-thread
 //!   callbacks, timers and file descriptors, editor windows, and fresh instances for export.
@@ -16,6 +17,7 @@
 
 #![deny(unsafe_code)]
 
+mod backend;
 pub mod catalog;
 mod guard;
 mod host;
@@ -24,6 +26,7 @@ mod manager;
 mod processor;
 #[cfg(test)]
 mod tests;
+mod vst3;
 mod window;
 
 pub use catalog::{Catalog, CatalogFile, PluginInfo, SCAN_SWITCH};

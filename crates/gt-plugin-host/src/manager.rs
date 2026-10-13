@@ -14,17 +14,14 @@ use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use clack_extensions::gui::{GuiConfiguration, GuiSize, PluginGui};
-use clack_host::prelude::PluginEntry;
 use gt_core::{ParamId, PluginInstanceId, PluginKind, PluginRef, Project};
 use gt_engine::{EngineCommand, EngineHandle, PluginBox, MAX_PLUGINS};
 
+use crate::backend::{Entry, Instance};
 use crate::catalog::{self, Catalog, PluginInfo};
 use crate::guard::{CrashReport, Guard};
 use crate::host::{Signals, Waker};
-use crate::instance::LoadedPlugin;
 use crate::processor::ParamOut;
-use crate::window::HostWindow;
 
 /// Saved states kept for plugins taken out of the project, so undo brings them back as they
 /// were.
@@ -56,17 +53,9 @@ enum ScanMsg {
     Done(Catalog),
 }
 
-/// An open plugin editor.
-struct Editor {
-    gui: PluginGui,
-    /// Our window, for an embedded editor (none for a floating one).
-    window: Option<HostWindow>,
-    resizable: bool,
-}
-
 /// A running instance.
 pub(crate) struct Live {
-    plugin: LoadedPlugin,
+    plugin: Box<dyn Instance>,
     /// Entry in the engine's plugin table.
     slot: u8,
     /// The engine has its processor.
@@ -79,7 +68,6 @@ pub(crate) struct Live {
     failed: bool,
     /// Deactivation is needed before the next activation (restart or new engine).
     restart: bool,
-    editor: Option<Editor>,
 }
 
 /// What a sync changed in the document.
@@ -103,11 +91,11 @@ pub struct PluginHost {
     catalog: Catalog,
     folders: Vec<PathBuf>,
     scan: Option<ScanJob>,
-    entries: HashMap<PathBuf, PluginEntry>,
+    entries: HashMap<PathBuf, Entry>,
     pub(crate) live: BTreeMap<PluginInstanceId, Live>,
     unavailable: BTreeMap<PluginInstanceId, String>,
-    pub(crate) retiring: Vec<LoadedPlugin>,
-    exporting: Vec<LoadedPlugin>,
+    pub(crate) retiring: Vec<Box<dyn Instance>>,
+    exporting: Vec<Box<dyn Instance>>,
     states: VecDeque<(PluginInstanceId, Arc<[u8]>)>,
     sample_rate: Option<u32>,
     notices: Vec<String>,
@@ -254,22 +242,19 @@ impl PluginHost {
 
     /// Uses an already loaded entry for `path` (tests load the test plugin in process).
     #[cfg(test)]
-    pub(crate) fn insert_entry(&mut self, path: &Path, entry: PluginEntry) {
+    pub(crate) fn insert_entry(&mut self, path: &Path, entry: Entry) {
         self.entries.insert(path.to_owned(), entry);
     }
 
-    fn entry(&mut self, path: &Path, name: &str) -> Result<(), String> {
+    fn entry(&mut self, info: &PluginInfo) -> Result<(), String> {
+        let path = &info.path;
         if let Some(why) = self.guard.quarantined(path) {
             return Err(format!("{} is quarantined ({why})", path.display()));
         }
         if !self.entries.contains_key(path) {
-            let loaded = self.guard.run(path, name, "loading", || {
-                // SAFETY: loading runs the plugin file's initialization code. The in-flight
-                // marker quarantines the file if that crashes the app.
-                #[allow(unsafe_code)]
-                unsafe {
-                    PluginEntry::load(path)
-                }
+            // The in-flight marker quarantines the file if its initialization crashes the app.
+            let loaded = self.guard.run(path, &info.name, "loading", || {
+                Entry::load(path, info.format)
             });
             let entry = loaded.map_err(|e| format!("cannot load {}: {e}", path.display()))?;
             self.entries.insert(path.to_owned(), entry);
@@ -277,12 +262,12 @@ impl PluginHost {
         Ok(())
     }
 
-    fn create(&mut self, info: &PluginInfo) -> Result<LoadedPlugin, String> {
+    fn create(&mut self, info: &PluginInfo) -> Result<Box<dyn Instance>, String> {
         let signals = Signals::new(Arc::clone(&self.waker));
-        self.entry(&info.path, &info.name)?;
+        self.entry(info)?;
         let entry = &self.entries[&info.path];
         self.guard.run(&info.path, &info.name, "creating", || {
-            LoadedPlugin::create(entry, info, signals)
+            entry.create(info, signals)
         })
     }
 
@@ -292,6 +277,7 @@ impl PluginHost {
             .find(&p.id, &p.path)
             .cloned()
             .unwrap_or_else(|| PluginInfo {
+                format: p.format,
                 id: p.id.clone(),
                 name: p.name.clone(),
                 vendor: p.vendor.clone(),
@@ -309,7 +295,7 @@ impl PluginHost {
         (0..MAX_PLUGINS as u8).find(|s| !self.live.values().any(|l| l.slot == *s))
     }
 
-    fn make_live(&mut self, id: PluginInstanceId, plugin: LoadedPlugin) -> Result<(), String> {
+    fn make_live(&mut self, id: PluginInstanceId, plugin: Box<dyn Instance>) -> Result<(), String> {
         let slot = self
             .free_slot()
             .ok_or_else(|| format!("at most {MAX_PLUGINS} plugins can run at once"))?;
@@ -324,7 +310,6 @@ impl PluginHost {
                 out: None,
                 failed: false,
                 restart: false,
-                editor: None,
             },
         );
         Ok(())
@@ -342,6 +327,7 @@ impl PluginHost {
             info.kind(),
             info.path.clone(),
         );
+        p.format = info.format;
         p.params = Arc::from(params);
         p.values = values;
         p.sanitize();
@@ -382,7 +368,7 @@ impl PluginHost {
         let Some(mut live) = self.live.remove(&id) else {
             return;
         };
-        Self::close_editor_of(&mut live);
+        live.plugin.close_editor();
         if let Some(state) = live.plugin.save_state() {
             if self.states.len() >= STATE_CACHE {
                 self.states.pop_front();
@@ -514,7 +500,7 @@ impl PluginHost {
         self.guard.set_in_use(
             self.live
                 .values()
-                .map(|l| l.plugin.info.path.clone())
+                .map(|l| l.plugin.info().path.clone())
                 .collect(),
         );
         out
@@ -544,10 +530,7 @@ impl PluginHost {
 
     fn handle_signals(&mut self, project: &mut Project, out: &mut SyncOutcome) {
         for (&id, l) in self.live.iter_mut() {
-            let s = Arc::clone(&l.plugin.signals);
-            if Signals::take(&s.callback) {
-                l.plugin.instance.call_on_main_thread_callback();
-            }
+            let s = Arc::clone(l.plugin.signals());
             if Signals::take(&s.restart) | Signals::take(&s.latency) {
                 l.restart = true;
             }
@@ -595,7 +578,7 @@ impl PluginHost {
                 if !l.plugin.try_deactivate() {
                     continue; // wait for the engine to hand the processor back
                 }
-                let info = &l.plugin.info;
+                let info = l.plugin.info();
                 let (path, name) = (info.path.clone(), info.name.clone());
                 let plugin = &mut l.plugin;
                 let activated = self
@@ -606,7 +589,7 @@ impl PluginHost {
                         l.out = Some(rx);
                         l.pending = Some(Box::new(PluginBox {
                             instance: id,
-                            processor: Box::new(processor),
+                            processor,
                         }));
                         // Everything is sent fresh to the new processor.
                         l.sent.clear();
@@ -650,6 +633,7 @@ impl PluginHost {
                         break;
                     }
                     *sent = v;
+                    l.plugin.host_changed(i, v);
                     budget -= 1;
                 }
             }
@@ -667,13 +651,27 @@ impl PluginHost {
             let Some(p) = project.plugin_by_instance_mut(id) else {
                 continue;
             };
-            while let Ok(ParamOut { index, value }) = rx.pop() {
-                let i = index as usize;
+            // Changes the processor made (CLAP's output events, VST3's output parameter
+            // changes) are already in the processor; editor edits (VST3) are not and go to
+            // the engine with the next frame.
+            let reported = std::iter::from_fn(|| rx.pop().ok())
+                .map(|ParamOut { index, value }| (index as usize, value, true));
+            let edits: Vec<(usize, f32, bool)> = l
+                .plugin
+                .take_edits()
+                .into_iter()
+                .map(|(i, v)| (i, v, false))
+                .collect();
+            let changes: Vec<(usize, f32, bool)> = reported.chain(edits).collect();
+            for (i, value, in_processor) in changes {
                 if let Some(v) = p.values.get_mut(i) {
                     let snapped = p.params[i].snap(value);
                     *v = snapped;
-                    if let Some(s) = l.sent.get_mut(i) {
-                        *s = snapped;
+                    if in_processor {
+                        if let Some(s) = l.sent.get_mut(i) {
+                            *s = snapped;
+                        }
+                        l.plugin.plugin_reported(i, snapped);
                     }
                     out.mirrored = true;
                     let param = ParamId::plugin_param(owner, p, p.params[i].id);
@@ -688,22 +686,7 @@ impl PluginHost {
     fn run_main_thread_work(&mut self) {
         let now = Instant::now();
         for l in self.live.values_mut() {
-            let inst = &mut l.plugin.instance;
-            let (ext, due) = inst.access_handler(|h| h.due_timers(now));
-            if let Some(ext) = ext {
-                for id in due {
-                    ext.on_timer(&inst.plugin_handle(), id);
-                }
-            }
-            #[cfg(unix)]
-            {
-                let (ext, fds) = inst.access_handler(|h| (h.fd_ext.get(), h.fds.borrow().clone()));
-                if let Some(ext) = ext {
-                    for (fd, flags) in ready_fds(&fds) {
-                        ext.on_fd(&inst.plugin_handle(), fd, flags);
-                    }
-                }
-            }
+            l.plugin.main_thread_work(now);
         }
     }
 
@@ -712,20 +695,7 @@ impl PluginHost {
         let now = Instant::now();
         let mut next = None::<Duration>;
         for l in self.live.values() {
-            let t = l.plugin.instance.access_handler(|h| {
-                #[cfg(unix)]
-                let fds = !h.fds.borrow().is_empty();
-                #[cfg(not(unix))]
-                let fds = false;
-                (h.next_timer(now), fds)
-            });
-            let mut want = t.0;
-            if t.1 || l.editor.is_some() {
-                want = Some(want.map_or(Duration::from_millis(16), |w| {
-                    w.min(Duration::from_millis(16))
-                }));
-            }
-            if let Some(w) = want {
+            if let Some(w) = l.plugin.next_frame(now) {
                 next = Some(next.map_or(w, |n| n.min(w)));
             }
         }
@@ -741,14 +711,12 @@ impl PluginHost {
 
     /// True if the plugin has an editor of its own.
     pub fn has_editor(&self, id: PluginInstanceId) -> bool {
-        self.live
-            .get(&id)
-            .is_some_and(|l| l.plugin.gui_ext.is_some())
+        self.live.get(&id).is_some_and(|l| l.plugin.has_editor())
     }
 
     /// True if its editor is open.
     pub fn editor_open(&self, id: PluginInstanceId) -> bool {
-        self.live.get(&id).is_some_and(|l| l.editor.is_some())
+        self.live.get(&id).is_some_and(|l| l.plugin.editor_open())
     }
 
     /// Opens (or raises) the plugin's editor: embedded in a window of ours, or floating in
@@ -757,82 +725,24 @@ impl PluginHost {
         let Some(l) = self.live.get_mut(&id) else {
             return Err("the plugin is not loaded".to_owned());
         };
-        if let Some(ed) = l.editor.as_mut() {
-            if let Some(w) = ed.window.as_mut() {
-                w.raise();
-            }
-            return Ok(());
-        }
-        let gui = l
-            .plugin
-            .gui_ext
-            .ok_or_else(|| format!("{} has no editor", l.plugin.info.name))?;
-        let api = HostWindow::api().ok_or("plugin editors are not supported here")?;
-        let embedded = GuiConfiguration {
-            api_type: api,
-            is_floating: false,
-        };
-        let floating = GuiConfiguration {
-            api_type: api,
-            is_floating: true,
-        };
-        let (path, name) = (l.plugin.info.path.clone(), l.plugin.info.name.clone());
+        let info = l.plugin.info();
+        let (path, name) = (info.path.clone(), info.name.clone());
         let plugin = &mut l.plugin;
-        let editor = self.guard.run(&path, &name, "opening the editor of", || {
-            open_editor(plugin, gui, embedded, floating, title)
-        })?;
-        l.editor = Some(editor);
-        Ok(())
-    }
-
-    fn close_editor_of(l: &mut Live) {
-        if let Some(ed) = l.editor.take() {
-            ed.gui.destroy(&l.plugin.instance.plugin_handle());
-            drop(ed.window);
-        }
+        self.guard.run(&path, &name, "opening the editor of", || {
+            plugin.open_editor(title)
+        })
     }
 
     /// Closes the plugin's editor.
     pub fn close_editor(&mut self, id: PluginInstanceId) {
         if let Some(l) = self.live.get_mut(&id) {
-            Self::close_editor_of(l);
+            l.plugin.close_editor();
         }
     }
 
     fn poll_editors(&mut self) {
         for l in self.live.values_mut() {
-            let Some(ed) = l.editor.as_mut() else {
-                continue;
-            };
-            let h = l.plugin.instance.plugin_handle();
-            let mut close = Signals::take(&l.plugin.signals.gui_closed);
-            if let Some(size) = l.plugin.signals.take_resize() {
-                if let Some(w) = ed.window.as_mut() {
-                    w.resize(size.width, size.height, ed.resizable);
-                    let _ = ed.gui.set_size(&h, size);
-                }
-            }
-            if let Some(w) = ed.window.as_mut() {
-                let ev = w.poll();
-                close |= ev.close;
-                if let Some((width, height)) = ev.resized {
-                    let want = GuiSize { width, height };
-                    if ed.resizable {
-                        let size = ed.gui.adjust_size(&h, want).unwrap_or(want);
-                        let _ = ed.gui.set_size(&h, size);
-                        if size != want {
-                            w.resize(size.width, size.height, true);
-                        }
-                    } else if let Some(size) = ed.gui.get_size(&h) {
-                        if size != want {
-                            w.resize(size.width, size.height, false);
-                        }
-                    }
-                }
-            }
-            if close {
-                Self::close_editor_of(l);
-            }
+            l.plugin.poll_editor();
         }
     }
 
@@ -883,8 +793,7 @@ impl PluginHost {
             match self.guard.run(&info.path, &info.name, "starting", || {
                 plugin.activate(sample_rate)
             }) {
-                Ok((processor, _)) => {
-                    let mut processor: Box<dyn gt_engine::PluginProcessor> = Box::new(processor);
+                Ok((mut processor, _)) => {
                     // Values edited since the state was saved.
                     for (i, &v) in p.values.iter().enumerate() {
                         processor.set_param(i as u32, v);
@@ -910,118 +819,8 @@ impl PluginHost {
     /// dropped (after the engine).
     pub fn shutdown(&mut self) {
         for l in self.live.values_mut() {
-            Self::close_editor_of(l);
+            l.plugin.close_editor();
         }
         self.guard.clean_exit();
     }
-}
-
-fn open_editor(
-    plugin: &mut LoadedPlugin,
-    gui: PluginGui,
-    embedded: GuiConfiguration,
-    floating: GuiConfiguration,
-    title: &str,
-) -> Result<Editor, String> {
-    let h = plugin.instance.plugin_handle();
-    let name = plugin.info.name.clone();
-    if gui.is_api_supported(&h, embedded) {
-        gui.create(&h, embedded)
-            .map_err(|e| format!("{name} could not open its editor: {e}"))?;
-        let _ = gui.set_scale(&h, 1.0);
-        let size = gui.get_size(&h).unwrap_or(GuiSize {
-            width: 640,
-            height: 480,
-        });
-        let resizable = gui.can_resize(&h);
-        let window = match HostWindow::open(title, size.width, size.height, resizable) {
-            Ok(w) => w,
-            Err(e) => {
-                gui.destroy(&h);
-                return Err(format!("cannot open a window for {name}: {e}"));
-            }
-        };
-        // SAFETY: the window lives in the editor record and is dropped only after
-        // `gui.destroy` (see `close_editor_of`).
-        #[allow(unsafe_code)]
-        let parented = unsafe { gui.set_parent(&h, window.clap_window()) };
-        if let Err(e) = parented {
-            gui.destroy(&h);
-            return Err(format!("{name} could not open its editor: {e}"));
-        }
-        let _ = gui.show(&h);
-        Ok(Editor {
-            gui,
-            window: Some(window),
-            resizable,
-        })
-    } else if gui.is_api_supported(&h, floating) {
-        gui.create(&h, floating)
-            .map_err(|e| format!("{name} could not open its editor: {e}"))?;
-        if let Ok(t) = std::ffi::CString::new(title) {
-            gui.suggest_title(&h, &t);
-        }
-        let _ = gui.show(&h);
-        Ok(Editor {
-            gui,
-            window: None,
-            resizable: false,
-        })
-    } else {
-        Err(format!("{name}'s editor cannot run on this system"))
-    }
-}
-
-/// File descriptors that are ready, with what they are ready for (a zero-timeout poll).
-#[cfg(unix)]
-fn ready_fds(
-    fds: &[(std::os::fd::RawFd, clack_extensions::posix_fd::FdFlags)],
-) -> Vec<(std::os::fd::RawFd, clack_extensions::posix_fd::FdFlags)> {
-    use clack_extensions::posix_fd::FdFlags;
-    if fds.is_empty() {
-        return Vec::new();
-    }
-    let mut polls: Vec<libc::pollfd> = fds
-        .iter()
-        .map(|&(fd, flags)| libc::pollfd {
-            fd,
-            events: (if flags.contains(FdFlags::READ) {
-                libc::POLLIN
-            } else {
-                0
-            }) | (if flags.contains(FdFlags::WRITE) {
-                libc::POLLOUT
-            } else {
-                0
-            }) | (if flags.contains(FdFlags::ERROR) {
-                libc::POLLERR
-            } else {
-                0
-            }),
-            revents: 0,
-        })
-        .collect();
-    // SAFETY: `polls` is a valid array of pollfd of the given length; zero timeout.
-    #[allow(unsafe_code)]
-    let n = unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as libc::nfds_t, 0) };
-    if n <= 0 {
-        return Vec::new();
-    }
-    polls
-        .iter()
-        .filter(|p| p.revents != 0)
-        .map(|p| {
-            let mut f = FdFlags::empty();
-            if p.revents & libc::POLLIN != 0 {
-                f |= FdFlags::READ;
-            }
-            if p.revents & libc::POLLOUT != 0 {
-                f |= FdFlags::WRITE;
-            }
-            if p.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
-                f |= FdFlags::ERROR;
-            }
-            (p.fd, f)
-        })
-        .collect()
 }
