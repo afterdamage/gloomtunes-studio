@@ -350,6 +350,8 @@ pub(crate) struct Vst3Processor {
     setup: Setup,
     queue: rtrb::Producer<ParamOut>,
     held: [bool; 128],
+    /// Release velocity each key's note-off carries.
+    off_vel: [f32; 128],
     processing: bool,
     /// MIDI the plugin sent in the last block (notes and controllers), and how much.
     midi: [(u32, [u8; 3]); MIDI_OUT],
@@ -397,6 +399,7 @@ impl Vst3Processor {
             setup,
             queue,
             held: [false; 128],
+            off_vel: [0.0; 128],
             processing: false,
             midi: [(0, [0; 3]); MIDI_OUT],
             midi_len: 0,
@@ -415,6 +418,12 @@ impl Vst3Processor {
     }
 
     fn note(&mut self, offset: u32, key: u8, velocity: f32, on: bool) {
+        self.note_tuned(offset, key, velocity, on, 0.0);
+    }
+
+    /// A note-on or note-off; `cents` tunes a note-on. Note ids are the key, so a note
+    /// expression can name the note.
+    fn note_tuned(&mut self, offset: u32, key: u8, velocity: f32, on: bool, cents: f32) {
         if !self.setup.note_input {
             return;
         }
@@ -425,10 +434,10 @@ impl Vst3Processor {
             e.__field0.noteOn = NoteOnEvent {
                 channel: 0,
                 pitch: i16::from(key),
-                tuning: 0.0,
+                tuning: cents,
                 velocity: velocity.clamp(0.0, 1.0),
                 length: 0,
-                noteId: -1,
+                noteId: i32::from(key),
             };
             e
         } else {
@@ -436,8 +445,8 @@ impl Vst3Processor {
             e.__field0.noteOff = NoteOffEvent {
                 channel: 0,
                 pitch: i16::from(key),
-                velocity: 0.0,
-                noteId: -1,
+                velocity: velocity.clamp(0.0, 1.0),
+                noteId: i32::from(key),
                 tuning: 0.0,
             };
             e
@@ -625,14 +634,43 @@ impl PluginProcessor for Vst3Processor {
         self.note(offset, key, velocity, true);
     }
 
+    fn note_on_expr(&mut self, offset: u32, key: u8, velocity: f32, e: &gt_engine::NoteExpr) {
+        let key = key & 0x7F;
+        self.note_tuned(offset, key, velocity, true, e.fine);
+        self.off_vel[usize::from(key)] = e.release.clamp(0.0, 1.0);
+        if !self.setup.note_input {
+            return;
+        }
+        use NoteExpressionTypeIDs_::*;
+        for (kind, value, plain) in [
+            (kPanTypeID, (e.pan + 1.0) * 0.5, 0.5),
+            (kBrightnessTypeID, e.mod_x, 0.5),
+        ] {
+            if value == plain {
+                continue;
+            }
+            let mut ev = Self::event(
+                offset,
+                Event_::EventTypes_::kNoteExpressionValueEvent as u32,
+            );
+            ev.__field0.noteExpressionValue = NoteExpressionValueEvent {
+                typeId: kind as NoteExpressionTypeID,
+                noteId: i32::from(key),
+                value: f64::from(value.clamp(0.0, 1.0)),
+            };
+            self.in_events.push(ev);
+        }
+    }
+
     fn note_off(&mut self, offset: u32, key: u8) {
-        self.note(offset, key, 0.0, false);
+        let vel = std::mem::take(&mut self.off_vel[usize::from(key & 0x7F)]);
+        self.note(offset, key, vel, false);
     }
 
     fn release_all(&mut self, offset: u32) {
         for key in 0..128u8 {
             if self.held[usize::from(key)] {
-                self.note(offset, key, 0.0, false);
+                self.note_off(offset, key);
             }
         }
     }

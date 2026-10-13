@@ -260,6 +260,77 @@ pub struct Note {
     pub key: u8,
     /// Velocity from 0 to 1.
     pub velocity: f32,
+    /// Stereo position, -1 (left) to 1 (right); 0 is centre.
+    pub pan: f32,
+    /// Release velocity, 0 to 1; 0.5 is neutral (instruments shorten their release above it
+    /// and lengthen it below).
+    pub release: f32,
+    /// Fine pitch in cents, -100 to 100.
+    pub fine: f32,
+    /// Generic modulation values the instrument maps to destinations, 0 to 1; 0.5 is neutral.
+    pub mod_x: f32,
+    /// Second generic modulation value, 0 to 1; 0.5 is neutral.
+    pub mod_y: f32,
+    /// A slide note: instead of starting a voice it glides the previous note to its key over
+    /// its own length.
+    pub slide: bool,
+    /// Portamento: the note starts at the previous note's pitch and glides to its own.
+    pub porta: bool,
+    /// Muted notes stay in the pattern but do not play.
+    pub muted: bool,
+    /// Colour group, 0 to [`Note::COLORS`] - 1.
+    pub color: u8,
+}
+
+impl Note {
+    /// Number of note colour groups.
+    pub const COLORS: u8 = 16;
+    /// Neutral release velocity and mod X/Y values.
+    pub const NEUTRAL: f32 = 0.5;
+
+    /// A plain note: centred, neutral expression values, no slide.
+    pub fn new(start: i64, length: i64, key: u8, velocity: f32) -> Self {
+        Self {
+            start,
+            length,
+            key,
+            velocity,
+            pan: 0.0,
+            release: Self::NEUTRAL,
+            fine: 0.0,
+            mod_x: Self::NEUTRAL,
+            mod_y: Self::NEUTRAL,
+            slide: false,
+            porta: false,
+            muted: false,
+            color: 0,
+        }
+    }
+
+    /// True when every per-note value besides start, length, key and velocity is neutral.
+    pub fn is_plain(&self) -> bool {
+        let n = Self::new(self.start, self.length, self.key, self.velocity);
+        *self == n
+    }
+
+    /// Clamps every per-note value into its range (non-finite values become neutral).
+    pub fn sanitize(&mut self) {
+        let fix = |v: f32, lo: f32, hi: f32, neutral: f32| {
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                neutral
+            }
+        };
+        self.length = self.length.max(1);
+        self.velocity = fix(self.velocity, 0.0, 1.0, DEFAULT_VELOCITY);
+        self.pan = fix(self.pan, -1.0, 1.0, 0.0);
+        self.release = fix(self.release, 0.0, 1.0, Self::NEUTRAL);
+        self.fine = fix(self.fine, -100.0, 100.0, 0.0);
+        self.mod_x = fix(self.mod_x, 0.0, 1.0, Self::NEUTRAL);
+        self.mod_y = fix(self.mod_y, 0.0, 1.0, Self::NEUTRAL);
+        self.color = self.color.min(Self::COLORS - 1);
+    }
 }
 
 /// A pattern: notes for any number of channels, played as a loop of `steps` 1/16 notes.
@@ -345,15 +416,7 @@ impl Pattern {
             false
         } else {
             let i = notes.partition_point(|n| n.start <= at);
-            notes.insert(
-                i,
-                Note {
-                    start: at,
-                    length: STEP_TICKS,
-                    key: ROOT_KEY,
-                    velocity: DEFAULT_VELOCITY,
-                },
-            );
+            notes.insert(i, Note::new(at, STEP_TICKS, ROOT_KEY, DEFAULT_VELOCITY));
             true
         }
     }
@@ -478,11 +541,8 @@ impl Project {
         p.current_pattern_mut().notes.insert(
             bass,
             line.iter()
-                .map(|&(step, len, key, velocity)| Note {
-                    start: step * STEP_TICKS,
-                    length: len * STEP_TICKS,
-                    key,
-                    velocity,
+                .map(|&(step, len, key, velocity)| {
+                    Note::new(step * STEP_TICKS, len * STEP_TICKS, key, velocity)
                 })
                 .collect(),
         );
@@ -1172,12 +1232,10 @@ mod tests {
         let c = p.add_channel("c", None).unwrap();
         let pat = p.current_pattern_mut();
         assert_eq!(pat.length_ticks(), 16 * STEP_TICKS);
-        pat.notes.entry(c).or_default().push(Note {
-            start: 16 * STEP_TICKS + 100,
-            length: 240,
-            key: 64,
-            velocity: 0.5,
-        });
+        pat.notes
+            .entry(c)
+            .or_default()
+            .push(Note::new(16 * STEP_TICKS + 100, 240, 64, 0.5));
         assert_eq!(pat.length_ticks(), 32 * STEP_TICKS);
         pat.steps = 32;
         assert_eq!(pat.length_ticks(), 32 * STEP_TICKS);

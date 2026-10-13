@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use gt_core::{Tick, MAX_CHANNELS, ROOT_KEY};
-use gt_dsp::{db_to_gain, Click, LinearRamp, SineOsc};
+use gt_dsp::{db_to_gain, Click, LinearRamp, NoteExpr, SineOsc};
 use rtrb::{Consumer, Producer};
 
 use crate::channel::ChannelSlot;
@@ -537,17 +537,18 @@ impl AudioProcessor {
                     slot: s,
                     key,
                     velocity,
-                } if usize::from(s) == slot => {
-                    self.plugins.note_on(index, e.offset, key, velocity);
+                    expr,
                 }
-                EventKind::Chase {
+                | EventKind::Chase {
                     slot: s,
                     key,
                     velocity,
                     held: true,
+                    expr,
                     ..
                 } if usize::from(s) == slot => {
-                    self.plugins.note_on(index, e.offset, key, velocity);
+                    self.plugins
+                        .note_on_expr(index, e.offset, key, velocity, &expr);
                 }
                 EventKind::NoteOff { slot: s, key } if usize::from(s) == slot => {
                     self.plugins.note_off(index, e.offset, key);
@@ -668,19 +669,25 @@ impl AudioProcessor {
             ch.render_voices(&mut sl[cursor..at], &mut sr[cursor..at]);
             cursor = at;
             match e.kind {
-                EventKind::NoteOn { key, velocity, .. } => {
+                EventKind::NoteOn {
+                    key,
+                    velocity,
+                    expr,
+                    ..
+                } => {
                     self.voice_age += 1;
-                    ch.note_on(key, velocity, self.voice_age);
+                    ch.note_on_expr(key, velocity, self.voice_age, expr);
                 }
                 EventKind::Chase {
                     key,
                     velocity,
                     into_s,
                     held,
+                    expr,
                     ..
                 } => {
                     self.voice_age += 1;
-                    ch.chase(key, velocity, into_s, held, self.voice_age);
+                    ch.chase(key, velocity, into_s, held, self.voice_age, expr);
                 }
                 EventKind::NoteOff { key, .. } => ch.note_off(key),
                 EventKind::Wrap => ch.release_all(),
@@ -1447,6 +1454,7 @@ impl AudioProcessor {
                     slot,
                     key: n.key,
                     velocity: n.velocity,
+                    expr: NoteExpr::default(),
                 }));
                 self.live_held[h] = slot + 1;
                 played = Some(slot);

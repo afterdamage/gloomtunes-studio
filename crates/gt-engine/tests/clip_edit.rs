@@ -7,7 +7,8 @@ use gt_core::{
     AudioEdit, ClipKind, Fade, FadeCurve, Project, SampleData, SampleSource, TempoMap, Tick,
 };
 use gt_engine::{
-    create, ChannelParams, EngineCommand, EngineConfig, NoteKind, NoteSpan, SongEvent, SongSnapshot,
+    create, ChannelParams, EngineCommand, EngineConfig, NoteExpr, NoteKind, NoteSpan, SongEvent,
+    SongSnapshot,
 };
 
 const SR: u32 = 48_000;
@@ -170,6 +171,7 @@ fn a_one_shot_already_sounding_is_chased_at_its_offset() {
         slot: 0,
         key: 60,
         velocity: 1.0,
+        expr: NoteExpr::default(),
     }];
     let song = || SongSnapshot {
         length: 7680,
@@ -179,7 +181,11 @@ fn a_one_shot_already_sounding_is_chased_at_its_offset() {
                 tick: 0,
                 slot: 0,
                 key: 60,
-                kind: NoteKind::On { velocity: 1.0 },
+                kind: NoteKind::On {
+                    velocity: 1.0,
+                    expr: NoteExpr::default(),
+                    len: 240,
+                },
             },
             SongEvent {
                 tick: 240,

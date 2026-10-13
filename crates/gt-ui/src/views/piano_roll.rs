@@ -952,12 +952,12 @@ fn grid_input(
             }
             None if st.tool == Tool::Draw && !mods.command => {
                 let key = geo.key(p.y) as u8;
-                let note = Note {
-                    start: st.snap.floor(geo.tick(p.x)).max(0),
-                    length: st.last_length.max(1),
+                let note = Note::new(
+                    st.snap.floor(geo.tick(p.x)).max(0),
+                    st.last_length.max(1),
                     key,
-                    velocity: st.last_velocity,
-                };
+                    st.last_velocity,
+                );
                 st.selected.iter_mut().for_each(|s| *s = false);
                 notes.push(note);
                 st.selected.push(true);
@@ -1565,12 +1565,7 @@ mod tests {
     use super::*;
 
     fn n(start: i64, length: i64, key: u8) -> Note {
-        Note {
-            start,
-            length,
-            key,
-            velocity: 0.8,
-        }
+        Note::new(start, length, key, 0.8)
     }
 
     #[test]
@@ -1790,12 +1785,7 @@ mod tests {
         assert!(a.contains(&PianoRollAction::AuditionOff { key: 64 }));
         assert_eq!(
             h.notes,
-            [Note {
-                start: 480,
-                length: 240,
-                key: 64,
-                velocity: gt_core::project::DEFAULT_VELOCITY
-            }]
+            [Note::new(480, 240, 64, gt_core::project::DEFAULT_VELOCITY)]
         );
 
         // Drag it one beat later and two semitones up.

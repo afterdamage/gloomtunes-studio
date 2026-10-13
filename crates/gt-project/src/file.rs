@@ -2,7 +2,7 @@
 //! audio files the project uses.
 //!
 //! ```text
-//! project.json          { "format": "gloomtunes-project", "schema_version": 3, "project": {...} }
+//! project.json          { "format": "gloomtunes-project", "schema_version": 5, "project": {...} }
 //! samples/<hash>-<name> embedded copies of the audio files, byte for byte (optional)
 //! plugins/<hash>.bin    the saved state of each third-party plugin, as the plugin wrote it
 //! ```
@@ -596,8 +596,106 @@ struct ChannelControlsDto {
 #[derive(Serialize, Deserialize)]
 struct ChannelNotesDto {
     channel: u32,
-    /// `[start, length, key, velocity]` per note.
-    notes: Vec<(i64, i64, u8, f32)>,
+    /// `[start, length, key, velocity]` per plain note, an object for a note with per-note
+    /// values (schema 5).
+    notes: Vec<NoteDto>,
+}
+
+/// A note in the file: the compact array when every per-note value is neutral.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum NoteDto {
+    Plain((i64, i64, u8, f32)),
+    Full(FullNoteDto),
+}
+
+fn is_zero(v: &f32) -> bool {
+    *v == 0.0
+}
+
+fn neutral() -> f32 {
+    Note::NEUTRAL
+}
+
+fn is_neutral(v: &f32) -> bool {
+    *v == Note::NEUTRAL
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
+}
+
+#[derive(Serialize, Deserialize)]
+struct FullNoteDto {
+    start: i64,
+    length: i64,
+    key: u8,
+    velocity: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pan: f32,
+    #[serde(default = "neutral", skip_serializing_if = "is_neutral")]
+    release: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    fine: f32,
+    #[serde(default = "neutral", skip_serializing_if = "is_neutral")]
+    mod_x: f32,
+    #[serde(default = "neutral", skip_serializing_if = "is_neutral")]
+    mod_y: f32,
+    #[serde(default, skip_serializing_if = "is_false")]
+    slide: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    porta: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    muted: bool,
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    color: u8,
+}
+
+impl NoteDto {
+    fn of(n: &Note) -> Self {
+        if n.is_plain() {
+            return Self::Plain((n.start, n.length, n.key, n.velocity));
+        }
+        Self::Full(FullNoteDto {
+            start: n.start,
+            length: n.length,
+            key: n.key,
+            velocity: n.velocity,
+            pan: n.pan,
+            release: n.release,
+            fine: n.fine,
+            mod_x: n.mod_x,
+            mod_y: n.mod_y,
+            slide: n.slide,
+            porta: n.porta,
+            muted: n.muted,
+            color: n.color,
+        })
+    }
+
+    fn note(&self) -> Note {
+        let mut n = match *self {
+            Self::Plain((start, length, key, velocity)) => Note::new(start, length, key, velocity),
+            Self::Full(ref f) => Note {
+                pan: f.pan,
+                release: f.release,
+                fine: f.fine,
+                mod_x: f.mod_x,
+                mod_y: f.mod_y,
+                slide: f.slide,
+                porta: f.porta,
+                muted: f.muted,
+                color: f.color,
+                ..Note::new(f.start, f.length, f.key, f.velocity)
+            },
+        };
+        n.sanitize();
+        n
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -914,10 +1012,7 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                 .filter(|(_, v)| !v.is_empty())
                 .map(|(ch, v)| ChannelNotesDto {
                     channel: ch.0,
-                    notes: v
-                        .iter()
-                        .map(|n| (n.start, n.length, n.key, n.velocity))
-                        .collect(),
+                    notes: v.iter().map(NoteDto::of).collect(),
                 })
                 .collect(),
             controls: pat
@@ -1316,16 +1411,7 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
     for pat in d.patterns {
         let mut notes = BTreeMap::new();
         for cn in pat.notes {
-            let v: Vec<Note> = cn
-                .notes
-                .iter()
-                .map(|&(start, length, key, velocity)| Note {
-                    start,
-                    length,
-                    key,
-                    velocity,
-                })
-                .collect();
+            let v: Vec<Note> = cn.notes.iter().map(NoteDto::note).collect();
             notes.insert(ChannelId(cn.channel), v);
         }
         // Unknown controller kinds (from a newer version) are dropped.
@@ -2207,6 +2293,38 @@ mod tests {
         let back = from_value(v, None).unwrap().project;
         assert_eq!(back.mixer.strips[2].slots[0], Some(slot));
         assert_eq!(back.mixer.strips[2].slots[1].as_ref().unwrap().mix, 1.0);
+    }
+
+    #[test]
+    fn per_note_values_round_trip_and_old_notes_read_neutral() {
+        let mut p = Project::demo();
+        let (ch, notes) = p.patterns[0].notes.iter_mut().next().unwrap();
+        let ch = *ch;
+        let plain = notes[0];
+        notes[1].pan = -0.5;
+        notes[1].fine = 25.0;
+        notes[1].mod_x = 0.9;
+        notes[1].slide = true;
+        notes[1].muted = true;
+        notes[1].color = 3;
+        let full = notes[1];
+        let v = to_value(&p, None, &HashMap::new());
+        let list = &v["project"]["patterns"][0]["notes"][0]["notes"];
+        // A plain note stays a compact array; only set values are written.
+        assert!(list[0].is_array());
+        assert_eq!(list[1]["fine"], 25.0);
+        assert!(list[1].get("mod_y").is_none());
+        // A version 4 file (arrays only) reads with neutral values.
+        let mut old = v.clone();
+        old["schema_version"] = 4.into();
+        old["project"]["patterns"][0]["notes"][0]["notes"][1] =
+            serde_json::json!([full.start, full.length, full.key, full.velocity]);
+        let back = from_value(old, None).unwrap().project;
+        let n = back.patterns[0].notes[&ch][1];
+        assert!(n.is_plain());
+        let back = from_value(v, None).unwrap().project;
+        assert_eq!(back.patterns[0].notes[&ch][0], plain);
+        assert_eq!(back.patterns[0].notes[&ch][1], full);
     }
 
     #[test]

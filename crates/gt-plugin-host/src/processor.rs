@@ -153,6 +153,8 @@ pub(crate) struct ClapProcessor {
     in_bufs: Vec<Vec<[f32; RENDER_QUANTUM]>>,
     out_bufs: Vec<Vec<[f32; RENDER_QUANTUM]>>,
     held: [bool; 128],
+    /// Release velocity each key's note-off carries.
+    off_vel: [f32; 128],
     effect: bool,
     latency: usize,
     steady: u64,
@@ -192,6 +194,7 @@ impl ClapProcessor {
             out_bufs: bufs(&layout.outputs),
             layout,
             held: [false; 128],
+            off_vel: [0.0; 128],
             effect,
             latency,
             steady: 0,
@@ -224,7 +227,7 @@ impl ClapProcessor {
             if on {
                 self.push(&NoteOnEvent::new(offset, pckn, f64::from(velocity)));
             } else {
-                self.push(&NoteOffEvent::new(offset, pckn, 0.0));
+                self.push(&NoteOffEvent::new(offset, pckn, f64::from(velocity)));
             }
         }
     }
@@ -358,14 +361,45 @@ impl PluginProcessor for ClapProcessor {
         self.note(offset, key, velocity, true);
     }
 
+    fn note_on_expr(&mut self, offset: u32, key: u8, velocity: f32, e: &gt_engine::NoteExpr) {
+        self.note(offset, key, velocity, true);
+        let key = key & 0x7F;
+        self.off_vel[usize::from(key)] = e.release.clamp(0.0, 1.0);
+        let Some((port, false)) = self.layout.note_port else {
+            return;
+        };
+        let offset = offset.min(RENDER_QUANTUM as u32 - 1);
+        let pckn = Pckn::new(port, 0u16, u16::from(key), Match::All);
+        let neutral = gt_engine::NoteExpr::default();
+        for (kind, value, plain) in [
+            (
+                NoteExpressionType::Tuning,
+                e.fine / 100.0,
+                neutral.fine / 100.0,
+            ),
+            (NoteExpressionType::Pan, (e.pan + 1.0) * 0.5, 0.5),
+            (NoteExpressionType::Brightness, e.mod_x, neutral.mod_x),
+        ] {
+            if value != plain {
+                self.push(&NoteExpressionEvent::new(
+                    offset,
+                    pckn,
+                    kind,
+                    f64::from(value),
+                ));
+            }
+        }
+    }
+
     fn note_off(&mut self, offset: u32, key: u8) {
-        self.note(offset, key, 0.0, false);
+        let vel = std::mem::take(&mut self.off_vel[usize::from(key & 0x7F)]);
+        self.note(offset, key, vel, false);
     }
 
     fn release_all(&mut self, offset: u32) {
         for key in 0..128u8 {
             if self.held[usize::from(key)] {
-                self.note(offset, key, 0.0, false);
+                self.note_off(offset, key);
             }
         }
     }

@@ -36,6 +36,7 @@ pub use command::{EngineCommand, EngineEvent, Garbage, LoopRegion, TransportStat
 pub use control::{ModPlan, ParamDest};
 pub use denormal::DenormalGuard;
 pub use gt_core::MAX_CHANNELS;
+pub use gt_dsp::{Glide, NoteExpr};
 pub use input::{
     CalibrationSink, InputFeed, InputRoute, InputRoutes, RecMark, RecordSink, MAX_RECORD_LANES,
 };

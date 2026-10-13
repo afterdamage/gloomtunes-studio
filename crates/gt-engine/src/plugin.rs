@@ -65,6 +65,12 @@ pub trait PluginProcessor: Send {
     fn process(&mut self, l: &mut [f32], r: &mut [f32], ctx: &PluginContext) -> bool;
     /// Queues a note start at frame `offset` of the next block.
     fn note_on(&mut self, offset: u32, key: u8, velocity: f32);
+    /// Queues a note start with per-note values (Prompt 21). Plugins that take note
+    /// expressions get pan, tuning and brightness (mod X) with it, and the release velocity
+    /// with its note-off; the rest play a plain note.
+    fn note_on_expr(&mut self, offset: u32, key: u8, velocity: f32, _e: &gt_dsp::NoteExpr) {
+        self.note_on(offset, key, velocity);
+    }
     /// Queues a note release.
     fn note_off(&mut self, offset: u32, key: u8);
     /// Queues releases of every held note.
@@ -181,6 +187,22 @@ impl PluginTable {
     pub(crate) fn note_on(&mut self, index: Option<u8>, offset: u32, key: u8, velocity: f32) {
         if let Some(e) = self.live(index) {
             e.plugin.processor.note_on(offset, key, velocity);
+        }
+    }
+
+    pub(crate) fn note_on_expr(
+        &mut self,
+        index: Option<u8>,
+        offset: u32,
+        key: u8,
+        velocity: f32,
+        e: &gt_dsp::NoteExpr,
+    ) {
+        if let Some(entry) = self.live(index) {
+            entry
+                .plugin
+                .processor
+                .note_on_expr(offset, key, velocity, e);
         }
     }
 
