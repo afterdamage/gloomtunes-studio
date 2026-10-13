@@ -5,7 +5,9 @@
 //! test in gt-engine checks that the two agree. Indexes and keys never change once released.
 
 use crate::param::ParamCurve::{Exp, Linear, Power, Stepped};
-use crate::param::ParamUnit::{self, Choice, Db, Hz, Ms, Percent, Plain, Ratio, Seconds};
+use crate::param::ParamUnit::{
+    self, Cents, Choice, Db, Hz, Ms, Percent, Plain, Ratio, Seconds, Semitones,
+};
 use crate::param::{ParamCurve, ParamInfo};
 use crate::plugin::PluginRef;
 
@@ -42,6 +44,18 @@ pub enum EffectKind {
     Clipper,
     /// Transient shaper.
     Transient,
+    /// Multiband compressor and maximizer.
+    Multiband,
+    /// Spectrum, oscilloscope, correlation and tuner (passes audio through).
+    Analyzer,
+    /// Convolution reverb.
+    Convolution,
+    /// Pitch shifter and pitch correction.
+    PitchShift,
+    /// Channel vocoder.
+    Vocoder,
+    /// Tempo-synced stutter and gate.
+    Stutter,
     /// A third-party effect plugin (its parameters live in [`EffectSlot::plugin`]).
     Plugin,
 }
@@ -114,6 +128,34 @@ const RATE_SYNC: &[&str] = &[
 const PHASER_STAGES: &[&str] = &["2", "4", "6", "8", "10", "12"];
 const CLIP_CURVES: &[&str] = &["Tanh", "Cubic", "Arctan", "Hard"];
 const OVERSAMPLING: &[&str] = &["Off", "2x", "4x"];
+const MULTIBAND_BANDS: &[&str] = &["3", "4"];
+/// Convolution responses, indexed by value: the generated ones, then the user's own file.
+pub const IMPULSE_RESPONSES: &[&str] = &["Room", "Hall", "Plate", "Spring", "User file"];
+const PITCH_MODES: &[&str] = &["Shift", "Correct"];
+/// Note names for a scale root.
+pub const NOTE_NAMES: &[&str] = &[
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+];
+/// Pitch-correction scales (matches `gt_dsp::fx::SCALE_INTERVALS`; the piano roll's scales).
+pub const PITCH_SCALES: &[&str] = &[
+    "Chromatic",
+    "Major",
+    "Minor",
+    "Harmonic minor",
+    "Dorian",
+    "Phrygian",
+    "Mixolydian",
+    "Major pentatonic",
+    "Minor pentatonic",
+    "Blues",
+];
+const VOCODER_BANDS: &[&str] = &["8", "12", "16", "24", "32"];
+const VOCODER_CARRIERS: &[&str] = &["Saw", "Noise", "Sidechain"];
+/// What a stutter step does, indexed by value.
+pub const STUTTER_STEPS: &[&str] = &["Off", "On", "Repeat", "Half"];
+const STUTTER_LENGTHS: &[&str] = &["1/32", "1/16", "1/8", "1/4"];
+/// Steps in the stutter pattern.
+pub const STUTTER_PATTERN: usize = 16;
 
 /// Number of EQ bands.
 pub const EQ_BANDS: usize = 8;
@@ -294,6 +336,151 @@ static TRANSIENT: [ParamInfo; 3] = [
     info("output", "Output", (-24.0, 12.0, 0.0), Linear, Db),
 ];
 
+macro_rules! mb_band {
+    ($n:literal, $threshold:expr) => {
+        [
+            info(
+                concat!("b", $n, ".threshold"),
+                concat!("Thresh ", $n),
+                (-60.0, 0.0, $threshold),
+                Linear,
+                Db,
+            ),
+            info(
+                concat!("b", $n, ".ratio"),
+                concat!("Ratio ", $n),
+                (1.0, 20.0, 2.0),
+                Exp,
+                Ratio,
+            ),
+            info(
+                concat!("b", $n, ".gain"),
+                concat!("Gain ", $n),
+                (-24.0, 24.0, 0.0),
+                Linear,
+                Db,
+            ),
+        ]
+    };
+}
+
+const fn multiband_table(
+    bands: [[ParamInfo; 3]; 4],
+    head: [ParamInfo; 4],
+    tail: [ParamInfo; 5],
+) -> [ParamInfo; 21] {
+    let mut out = [head[0]; 21];
+    let mut i = 0;
+    while i < 4 {
+        out[i] = head[i];
+        let mut j = 0;
+        while j < 3 {
+            out[4 + i * 3 + j] = bands[i][j];
+            j += 1;
+        }
+        i += 1;
+    }
+    let mut k = 0;
+    while k < 5 {
+        out[16 + k] = tail[k];
+        k += 1;
+    }
+    out
+}
+
+static MULTIBAND: [ParamInfo; 21] = multiband_table(
+    [
+        mb_band!(1, -18.0),
+        mb_band!(2, -18.0),
+        mb_band!(3, -18.0),
+        mb_band!(4, -18.0),
+    ],
+    [
+        choice("bands", "Bands", MULTIBAND_BANDS, 0.0),
+        info("x.low", "Low split", (20.0, 1000.0, 120.0), Exp, Hz),
+        info("x.mid", "Mid split", (200.0, 5000.0, 1000.0), Exp, Hz),
+        info("x.high", "High split", (1000.0, 16_000.0, 2500.0), Exp, Hz),
+    ],
+    [
+        info("attack", "Attack", (0.1, 200.0, 10.0), Exp, Ms),
+        info("release", "Release", (5.0, 2000.0, 150.0), Exp, Ms),
+        choice("limiter", "Limiter", OFF_ON, 1.0),
+        info("drive", "Drive", (0.0, 24.0, 0.0), Linear, Db),
+        info("ceiling", "Ceiling", (-12.0, 0.0, -0.3), Linear, Db),
+    ],
+);
+
+static ANALYZER: [ParamInfo; 2] = [
+    info("slope", "Slope", (0.0, 6.0, 4.5), Linear, Plain),
+    choice("hold", "Peak hold", OFF_ON, 1.0),
+];
+
+static CONVOLUTION: [ParamInfo; 7] = [
+    choice("ir", "Response", IMPULSE_RESPONSES, 0.0),
+    info("length", "Length", (0.1, 1.0, 1.0), Linear, Percent),
+    info("predelay", "Pre-delay", (0.0, 200.0, 0.0), Power(2.0), Ms),
+    info("lowcut", "Low cut", (20.0, 1000.0, 20.0), Exp, Hz),
+    info("highcut", "High cut", (1000.0, 20_000.0, 20_000.0), Exp, Hz),
+    info("width", "Width", (0.0, 1.0, 1.0), Linear, Percent),
+    info("mix", "Mix", (0.0, 1.0, 0.3), Linear, Percent),
+];
+
+static PITCH: [ParamInfo; 8] = [
+    choice("mode", "Mode", PITCH_MODES, 0.0),
+    info("semitones", "Pitch", (-24.0, 24.0, 0.0), Stepped, Semitones),
+    info("cents", "Fine", (-100.0, 100.0, 0.0), Linear, Cents),
+    choice("formant", "Keep formants", OFF_ON, 0.0),
+    choice("root", "Root", NOTE_NAMES, 0.0),
+    choice("scale", "Scale", PITCH_SCALES, 0.0),
+    info("speed", "Speed", (0.0, 500.0, 20.0), Power(2.0), Ms),
+    info("mix", "Mix", (0.0, 1.0, 1.0), Linear, Percent),
+];
+
+static VOCODER: [ParamInfo; 9] = [
+    choice("bands", "Bands", VOCODER_BANDS, 2.0),
+    choice("carrier", "Carrier", VOCODER_CARRIERS, 0.0),
+    info("pitch", "Pitch", (30.0, 1000.0, 110.0), Exp, Hz),
+    info("width", "Width", (0.25, 2.0, 1.0), Exp, Plain),
+    info("attack", "Attack", (0.1, 100.0, 2.0), Exp, Ms),
+    info("release", "Release", (5.0, 1000.0, 50.0), Exp, Ms),
+    info("shift", "Shift", (-12.0, 12.0, 0.0), Linear, Semitones),
+    info("mix", "Mix", (0.0, 1.0, 1.0), Linear, Percent),
+    info("output", "Output", (-24.0, 24.0, 0.0), Linear, Db),
+];
+
+macro_rules! steps {
+    ($($n:literal),*) => {
+        [$(choice(concat!("s", $n), concat!("Step ", $n), STUTTER_STEPS, 1.0)),*]
+    };
+}
+
+const fn stutter_table(
+    steps: [ParamInfo; STUTTER_PATTERN],
+    tail: [ParamInfo; 3],
+) -> [ParamInfo; 19] {
+    let mut out = [tail[0]; 19];
+    let mut i = 0;
+    while i < STUTTER_PATTERN {
+        out[i] = steps[i];
+        i += 1;
+    }
+    let mut k = 0;
+    while k < 3 {
+        out[STUTTER_PATTERN + k] = tail[k];
+        k += 1;
+    }
+    out
+}
+
+static STUTTER: [ParamInfo; 19] = stutter_table(
+    steps!(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
+    [
+        choice("length", "Step", STUTTER_LENGTHS, 1.0),
+        info("smooth", "Smooth", (0.0, 20.0, 3.0), Linear, Ms),
+        info("mix", "Mix", (0.0, 1.0, 1.0), Linear, Percent),
+    ],
+);
+
 /// The wet/dry mix every effect slot has ([`EffectSlot::mix`]).
 pub static SLOT_MIX: ParamInfo = info("slot.mix", "Slot mix", (0.0, 1.0, 1.0), Linear, Percent);
 
@@ -441,11 +628,125 @@ static TRANSIENT_PRESETS: [EffectPreset; 3] = [
     preset("Room boost", &[("sustain", 9.0)]),
 ];
 
+static MULTIBAND_PRESETS: [EffectPreset; 3] = [
+    preset("Gentle glue", &[("limiter", 0.0)]),
+    preset(
+        "Loud master",
+        &[
+            ("b1.threshold", -24.0),
+            ("b2.threshold", -20.0),
+            ("b4.threshold", -22.0),
+            ("b1.ratio", 3.0),
+            ("b2.ratio", 2.5),
+            ("b4.ratio", 3.0),
+            ("drive", 6.0),
+            ("ceiling", -0.3),
+        ],
+    ),
+    preset(
+        "Tame the lows",
+        &[
+            ("bands", 1.0),
+            ("x.low", 200.0),
+            ("b1.threshold", -30.0),
+            ("b1.ratio", 4.0),
+            ("limiter", 0.0),
+        ],
+    ),
+];
+static CONVOLUTION_PRESETS: [EffectPreset; 4] = [
+    preset("Small room", &[("length", 0.6), ("mix", 0.2)]),
+    preset(
+        "Concert hall",
+        &[("ir", 1.0), ("predelay", 20.0), ("lowcut", 120.0)],
+    ),
+    preset(
+        "Vocal plate",
+        &[
+            ("ir", 2.0),
+            ("length", 0.7),
+            ("lowcut", 200.0),
+            ("mix", 0.25),
+        ],
+    ),
+    preset("Surf spring", &[("ir", 3.0), ("mix", 0.4)]),
+];
+static PITCH_PRESETS: [EffectPreset; 5] = [
+    preset("Octave down", &[("semitones", -12.0)]),
+    preset("Fifth up (blend)", &[("semitones", 7.0), ("mix", 0.5)]),
+    preset(
+        "Chipmunk, same vowels",
+        &[("semitones", 7.0), ("formant", 1.0)],
+    ),
+    preset(
+        "Natural correction",
+        &[("mode", 1.0), ("scale", 1.0), ("speed", 80.0)],
+    ),
+    preset(
+        "Hard tune",
+        &[("mode", 1.0), ("scale", 1.0), ("speed", 0.0)],
+    ),
+];
+static VOCODER_PRESETS: [EffectPreset; 3] = [
+    preset("Robot voice", &[("bands", 3.0), ("pitch", 98.0)]),
+    preset("Whisper", &[("carrier", 1.0), ("bands", 4.0)]),
+    preset(
+        "Sidechain synth",
+        &[("carrier", 2.0), ("bands", 4.0), ("release", 30.0)],
+    ),
+];
+static STUTTER_PRESETS: [EffectPreset; 4] = [
+    preset(
+        "Trance gate",
+        &[
+            ("s2", 0.0),
+            ("s4", 0.0),
+            ("s6", 0.0),
+            ("s8", 0.0),
+            ("s10", 0.0),
+            ("s12", 0.0),
+            ("s14", 0.0),
+            ("s16", 0.0),
+        ],
+    ),
+    preset(
+        "Stutter fill",
+        &[
+            ("s10", 2.0),
+            ("s11", 2.0),
+            ("s12", 2.0),
+            ("s14", 2.0),
+            ("s15", 2.0),
+            ("s16", 2.0),
+            ("length", 0.0),
+        ],
+    ),
+    preset(
+        "Half-time drop",
+        &[
+            ("s9", 3.0),
+            ("s10", 3.0),
+            ("s11", 3.0),
+            ("s12", 3.0),
+            ("s13", 3.0),
+            ("s14", 3.0),
+            ("s15", 3.0),
+            ("s16", 3.0),
+            ("length", 2.0),
+        ],
+    ),
+    preset(
+        "Off-beat chop",
+        &[("s1", 0.0), ("s5", 0.0), ("s9", 0.0), ("s13", 0.0)],
+    ),
+];
+
 impl EffectKind {
     /// Every built-in kind, in menu order.
-    pub const ALL: [EffectKind; 15] = [
+    pub const ALL: [EffectKind; 21] = [
         Self::Eq,
         Self::Compressor,
+        Self::Multiband,
         Self::Gate,
         Self::Limiter,
         Self::Clipper,
@@ -455,11 +756,27 @@ impl EffectKind {
         Self::Bitcrusher,
         Self::Delay,
         Self::Reverb,
+        Self::Convolution,
         Self::Chorus,
         Self::Flanger,
         Self::Phaser,
         Self::Width,
+        Self::PitchShift,
+        Self::Vocoder,
+        Self::Stutter,
+        Self::Analyzer,
     ];
+
+    /// True if changing parameter `index` needs the effect built again (on the UI thread):
+    /// the convolution reverb's response and its length.
+    pub fn rebuilds(self, index: usize) -> bool {
+        self == Self::Convolution && index < 2
+    }
+
+    /// True if the effect can use an audio file ([`EffectSlot::file`]).
+    pub fn uses_file(self) -> bool {
+        self == Self::Convolution
+    }
 
     /// Built-in presets (none for the older effects yet).
     pub fn presets(self) -> &'static [EffectPreset] {
@@ -471,6 +788,11 @@ impl EffectKind {
             Self::Bitcrusher => &BITCRUSHER_PRESETS,
             Self::Clipper => &CLIPPER_PRESETS,
             Self::Transient => &TRANSIENT_PRESETS,
+            Self::Multiband => &MULTIBAND_PRESETS,
+            Self::Convolution => &CONVOLUTION_PRESETS,
+            Self::PitchShift => &PITCH_PRESETS,
+            Self::Vocoder => &VOCODER_PRESETS,
+            Self::Stutter => &STUTTER_PRESETS,
             _ => &[],
         }
     }
@@ -493,6 +815,12 @@ impl EffectKind {
             Self::Bitcrusher => "bitcrusher",
             Self::Clipper => "clipper",
             Self::Transient => "transient",
+            Self::Multiband => "multiband",
+            Self::Analyzer => "analyzer",
+            Self::Convolution => "convolution",
+            Self::PitchShift => "pitch",
+            Self::Vocoder => "vocoder",
+            Self::Stutter => "stutter",
             Self::Plugin => "plugin",
         }
     }
@@ -515,6 +843,12 @@ impl EffectKind {
             Self::Bitcrusher => "Bitcrusher",
             Self::Clipper => "Soft Clipper",
             Self::Transient => "Transient Shaper",
+            Self::Multiband => "Multiband Maximizer",
+            Self::Analyzer => "Analyzer",
+            Self::Convolution => "Convolution Reverb",
+            Self::PitchShift => "Pitch Shifter",
+            Self::Vocoder => "Vocoder",
+            Self::Stutter => "Stutter / Gate",
             Self::Plugin => "Plugin",
         }
     }
@@ -545,6 +879,12 @@ impl EffectKind {
             Self::Bitcrusher => &BITCRUSHER,
             Self::Clipper => &CLIPPER,
             Self::Transient => &TRANSIENT,
+            Self::Multiband => &MULTIBAND,
+            Self::Analyzer => &ANALYZER,
+            Self::Convolution => &CONVOLUTION,
+            Self::PitchShift => &PITCH,
+            Self::Vocoder => &VOCODER,
+            Self::Stutter => &STUTTER,
             Self::Plugin => &[],
         }
     }
@@ -564,6 +904,8 @@ pub struct EffectSlot {
     pub mix: f32,
     /// The plugin, when `kind` is [`EffectKind::Plugin`].
     pub plugin: Option<Box<PluginRef>>,
+    /// An audio file the effect uses (a convolution reverb's own impulse response).
+    pub file: Option<std::path::PathBuf>,
 }
 
 impl EffectSlot {
@@ -575,6 +917,7 @@ impl EffectSlot {
             params: kind.params().iter().map(|p| p.default).collect(),
             mix: 1.0,
             plugin: None,
+            file: None,
         }
     }
 
@@ -586,6 +929,7 @@ impl EffectSlot {
             params: Vec::new(),
             mix: 1.0,
             plugin: Some(Box::new(plugin)),
+            file: None,
         }
     }
 
@@ -624,6 +968,9 @@ impl EffectSlot {
         };
         if self.kind != EffectKind::Plugin {
             self.plugin = None;
+        }
+        if !self.kind.uses_file() {
+            self.file = None;
         }
         if let Some(p) = &mut self.plugin {
             p.sanitize();
@@ -672,6 +1019,13 @@ mod tests {
         assert_eq!(EffectKind::Eq.params().len(), 33);
         assert_eq!(EffectKind::Eq.params()[13].key, "b4.freq");
         assert_eq!(EffectKind::Eq.params()[32].key, "output");
+        let mb = EffectKind::Multiband.params();
+        assert_eq!(mb[4].key, "b1.threshold");
+        assert_eq!(mb[15].key, "b4.gain");
+        assert_eq!(mb[16].key, "attack");
+        let st = EffectKind::Stutter.params();
+        assert_eq!(st[15].key, "s16");
+        assert_eq!(st[16].key, "length");
     }
 
     #[test]

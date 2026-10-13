@@ -2,15 +2,17 @@
 //! strip its routing, send levels and effect slots, with an editor for the selected effect.
 
 use egui::{pos2, vec2, Color32, RichText, Sense, Shape, Stroke, Ui};
-use gt_core::effects::{EQ_BANDS, SLOT_MIX};
+use gt_core::effects::{EQ_BANDS, IMPULSE_RESPONSES, SLOT_MIX, STUTTER_PATTERN, STUTTER_STEPS};
 use gt_core::mixer::FIRST_SEND;
 use gt_core::{
     EffectKind, EffectSlot, Mixer, MixerStrip, ParamId, PluginOwner, StripKind, StripParam,
     FX_SLOTS, MASTER, SENDS, STRIPS,
 };
+use gt_dsp::analysis::Scope;
 use gt_dsp::fx::{eq_band_response, BandType};
 
 use crate::param_ui::{param_live, param_menu};
+use crate::views::analyzer::{analyzer_panel, AnalyzerState};
 use crate::views::plugins::{plugin_controls, PluginAction, PluginPanelView};
 use crate::widgets::{fader, format_gain, format_pan, knob, param_knob, stereo_meter};
 use crate::GloomTheme;
@@ -31,6 +33,10 @@ pub struct MixerState {
     pub plugin_request: Option<(usize, usize)>,
     /// What the user asked of the open slot's plugin this frame.
     pub plugin_actions: Vec<PluginAction>,
+    /// The user asked to choose an audio file for this (strip, slot): the app opens a picker.
+    pub file_request: Option<(usize, usize)>,
+    /// The open analyzer's display state.
+    pub analyzer: AnalyzerState,
 }
 
 impl Default for MixerState {
@@ -41,6 +47,8 @@ impl Default for MixerState {
             eq_band: 2,
             plugin_request: None,
             plugin_actions: Vec::new(),
+            file_request: None,
+            analyzer: AnalyzerState::default(),
         }
     }
 }
@@ -78,6 +86,8 @@ pub struct MixerView<'a> {
     pub plugin: Option<&'a PluginPanelView>,
     /// Device inputs an insert can take.
     pub inputs: &'a [gt_core::AudioInput],
+    /// The signal tap of the open slot's effect, when it has one (the analyzer).
+    pub scope: Option<&'a Scope>,
 }
 
 /// Strips in display order: master first, then inserts, then sends.
@@ -539,11 +549,126 @@ fn detail(
                     &mut state.eq_band,
                     view.sample_rate,
                 )
-            } else {
+            } else if slot.kind == EffectKind::Analyzer {
+                if let Some(scope) = view.scope {
+                    let slope = slot.params[0];
+                    let hold = slot.params[1] >= 0.5;
+                    analyzer_panel(ui, theme, scope, slope, hold, &mut state.analyzer);
+                }
                 knobs(ui, theme, (i, k), slot, 0..slot.kind.params().len())
+            } else if slot.kind == EffectKind::Stutter {
+                let steps = step_editor(ui, theme, slot);
+                steps
+                    | knobs(
+                        ui,
+                        theme,
+                        (i, k),
+                        slot,
+                        STUTTER_PATTERN..slot.kind.params().len(),
+                    )
+            } else {
+                let mut c = knobs(ui, theme, (i, k), slot, 0..slot.kind.params().len());
+                if slot.kind.uses_file() {
+                    c |= file_row(ui, theme, slot, || state.file_request = Some((i, k)));
+                }
+                c
             };
         }
     }
+    changed
+}
+
+/// The convolution reverb's own response: the file in use and a button to choose one.
+fn file_row(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    slot: &mut EffectSlot,
+    mut pick: impl FnMut(),
+) -> bool {
+    let user = (IMPULSE_RESPONSES.len() - 1) as f32;
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        if ui
+            .small_button("Load response…")
+            .on_hover_text("Use your own impulse response (a WAV, FLAC, MP3 or OGG file)")
+            .clicked()
+        {
+            pick();
+        }
+        match &slot.file {
+            Some(f) => {
+                let name = f
+                    .file_name()
+                    .map_or_else(|| f.display().to_string(), |n| n.to_string_lossy().into());
+                let using = slot.get("ir") == Some(user);
+                let text = RichText::new(name).small().color(if using {
+                    theme.text
+                } else {
+                    theme.text_dim
+                });
+                ui.label(text).on_hover_text(f.display().to_string());
+                if !using && ui.small_button("Use").clicked() {
+                    *slot = slot.clone().with("ir", user);
+                    changed = true;
+                }
+            }
+            None => {
+                ui.label(
+                    RichText::new("built-in responses only")
+                        .small()
+                        .color(theme.text_dim),
+                );
+            }
+        }
+    });
+    changed
+}
+
+/// The stutter's 16 steps: click cycles off, on, repeat and half; right-click turns a step off.
+fn step_editor(ui: &mut Ui, theme: &GloomTheme, slot: &mut EffectSlot) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for step in 0..STUTTER_PATTERN {
+            let v = slot.params[step].round() as usize;
+            let (fill, label) = match v {
+                0 => (theme.bg_deep, ""),
+                2 => (theme.accent_dim, "R"),
+                3 => (theme.accent_dim, "½"),
+                _ => (theme.accent, ""),
+            };
+            let (rect, resp) = ui.allocate_exact_size(vec2(19.0, 24.0), Sense::click());
+            let p = ui.painter_at(rect);
+            // A gap every four steps marks the beats.
+            let r = rect.shrink2(vec2(if step % 4 == 3 { 2.0 } else { 0.5 }, 0.0));
+            p.rect_filled(r, theme.radius, fill);
+            p.rect_stroke(
+                r,
+                theme.radius,
+                Stroke::new(1.0, theme.stroke),
+                egui::StrokeKind::Inside,
+            );
+            p.text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                egui::FontId::proportional(11.0),
+                theme.text,
+            );
+            let resp = resp.on_hover_text(format!(
+                "Step {}: {}. Click to change, right-click for off.",
+                step + 1,
+                STUTTER_STEPS[v.min(STUTTER_STEPS.len() - 1)]
+            ));
+            if resp.clicked() {
+                slot.params[step] = ((v + 1) % STUTTER_STEPS.len()) as f32;
+                changed = true;
+            } else if resp.secondary_clicked() {
+                slot.params[step] = 0.0;
+                changed = true;
+            }
+        }
+    });
     changed
 }
 

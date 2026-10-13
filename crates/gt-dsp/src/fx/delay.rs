@@ -224,6 +224,7 @@ mod tests {
         let ctx = FxContext {
             bpm: 120.0,
             sidechain: None,
+            beats: None,
         };
         let (mut a, mut b) = (vec![0.0; 64], vec![0.0; 64]);
         d.process(&mut a, &mut b, &ctx);

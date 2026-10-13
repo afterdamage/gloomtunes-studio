@@ -635,6 +635,12 @@ struct EffectDto {
     /// Slot wet/dry mix (Prompt 19); left out at 100 %.
     #[serde(default = "full_mix", skip_serializing_if = "is_full_mix")]
     mix: f32,
+    /// The effect's audio file (a convolution response, Prompt 20): relative to the project
+    /// file when it could be, and absolute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_absolute: Option<String>,
 }
 
 fn full_mix() -> f32 {
@@ -964,6 +970,11 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                             .collect(),
                         plugin: e.plugin.as_deref().map(plugin_dto),
                         mix: e.mix,
+                        file: e
+                            .file
+                            .as_deref()
+                            .and_then(|f| dir.and_then(|d| relative_path(d, f))),
+                        file_absolute: e.file.as_ref().map(|f| f.to_string_lossy().into_owned()),
                     })
                 })
                 .collect(),
@@ -1393,6 +1404,19 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                 let mut e = EffectSlot::new(kind);
                 e.enabled = ed.enabled;
                 e.mix = ed.mix;
+                // The relative path wins when the file is there (the folder moved).
+                let relative = ed
+                    .file
+                    .filter(|f| !f.is_empty())
+                    .and_then(|f| dir.map(|d| d.join(from_slashes(&f))));
+                let absolute = ed
+                    .file_absolute
+                    .filter(|f| !f.is_empty())
+                    .map(PathBuf::from);
+                e.file = match (relative, absolute) {
+                    (Some(r), _) if r.exists() => Some(r),
+                    (r, a) => a.or(r),
+                };
                 e.sanitize();
                 for (key, v) in &ed.params {
                     e = e.with(key, *v);
@@ -2183,6 +2207,39 @@ mod tests {
         let back = from_value(v, None).unwrap().project;
         assert_eq!(back.mixer.strips[2].slots[0], Some(slot));
         assert_eq!(back.mixer.strips[2].slots[1].as_ref().unwrap().mix, 1.0);
+    }
+
+    #[test]
+    fn a_convolution_response_file_follows_the_project_folder() {
+        let dir = temp_dir("ir");
+        std::fs::create_dir_all(dir.join("a/irs")).unwrap();
+        std::fs::write(dir.join("a/irs/church.wav"), b"RIFF").unwrap();
+        let mut p = Project::demo();
+        let mut slot = EffectSlot::new(EffectKind::Convolution).with("ir", 4.0);
+        slot.file = Some(dir.join("a/irs/church.wav"));
+        p.mixer.strips[3].slots[0] = Some(slot);
+        // Another kind never keeps a file.
+        let mut eq = EffectSlot::new(EffectKind::Eq);
+        eq.file = Some(dir.join("x.wav"));
+        p.mixer.strips[3].slots[1] = Some(eq);
+        let v = to_value(&p, Some(&dir.join("a")), &HashMap::new());
+        assert_eq!(
+            v["project"]["mixer"][3]["slots"][0]["file"],
+            "irs/church.wav"
+        );
+        std::fs::rename(dir.join("a"), dir.join("b")).unwrap();
+        let back = from_value(v, Some(&dir.join("b"))).unwrap().project;
+        let s = back.mixer.strips[3].slots[0].as_ref().unwrap();
+        assert_eq!(
+            s.file.as_deref(),
+            Some(dir.join("b/irs/church.wav").as_path())
+        );
+        assert_eq!(s.get("ir"), Some(4.0));
+        assert!(back.mixer.strips[3].slots[1]
+            .as_ref()
+            .unwrap()
+            .file
+            .is_none());
     }
 
     #[test]

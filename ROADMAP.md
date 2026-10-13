@@ -592,6 +592,18 @@ sound identical; the golden export test stays.
   the same as bypass.
 - Limits: LFOs run free rather than locked to the song position; slot mix is not automatable.
 
+### Prompt 20: Effects pack II
+- Multiband maximizer (3 or 4 Linkwitz-Riley bands that sum flat, per-band compression, output
+  limiter with drive) and convolution reverb (non-uniform partitioned FFT, generated room,
+  hall, plate and spring responses, or your own audio file) (D120).
+- Analyzer (spectrum with peak hold and slope, oscilloscope, correlation, chromatic tuner, all
+  computed in the UI), pitch shifter (phase vocoder, formant option, scale-snapping pitch
+  correction), vocoder (8 to 32 bands, saw, noise or sidechain carrier) and a tempo-synced
+  stutter/gate with a 16-step editor (D121).
+- CPU benchmarks for every effect in `gt-dsp/benches/fx.rs`.
+- Limits: no note-by-note pitch editing; no vocoder sibilance path; user responses are not
+  embedded when a project's files are collected.
+
 ---
 
 ## v1.0 scope

@@ -12,8 +12,9 @@ use gt_core::mixer::FIRST_SEND;
 use gt_core::PluginInstanceId;
 use gt_core::{EffectKind, EffectSlot, Mixer, FX_SLOTS, MASTER, SENDS, STRIPS};
 use gt_dsp::fx::{
-    Bitcrusher, Chorus, Compressor, Delay, Distortion, Effect, Flanger, FxContext, Gate, Limiter,
-    MultiFilter, ParamEq, Phaser, Reverb, SoftClipper, StereoWidth, TransientShaper,
+    Analyzer, Bitcrusher, Chorus, Compressor, ConvolutionReverb, Delay, Distortion, Effect,
+    Flanger, FxContext, Gate, Limiter, MultiFilter, Multiband, ParamEq, Phaser, PitchShifter,
+    Reverb, SoftClipper, StereoWidth, Stutter, TransientShaper, Vocoder,
 };
 use gt_dsp::LinearRamp;
 
@@ -22,8 +23,10 @@ use crate::{Telemetry, RENDER_QUANTUM};
 
 const Q: usize = RENDER_QUANTUM;
 /// Longest delay compensation per routing edge, in frames. Larger path differences are clamped
-/// (the only built-in effect with latency, the limiter, needs 1.5 ms: 288 frames at 192 kHz).
-pub const MAX_PDC_FRAMES: usize = 512;
+/// (the most latent built-in effect, the pitch shifter, needs 2048 frames). The lines are
+/// allocated zeroed and an unused one is never written, so the memory of the many idle lines
+/// is never touched.
+pub const MAX_PDC_FRAMES: usize = 4096;
 /// Fader, pan and send changes glide over this time.
 const RAMP_S: f32 = 0.01;
 /// Effect bypass crossfade.
@@ -43,6 +46,16 @@ impl std::fmt::Debug for EffectBox {
 /// Builds the DSP for an effect slot at `sample_rate`, with the slot's parameter values applied
 /// and smoothing settled. Allocates: call on the UI thread.
 pub fn create_effect(slot: &EffectSlot, sample_rate: f32) -> EffectBox {
+    create_effect_with(slot, sample_rate, None)
+}
+
+/// [`create_effect`] with the audio of the slot's file ([`EffectSlot::file`], loaded at
+/// `sample_rate`), for effects that use one.
+pub fn create_effect_with(
+    slot: &EffectSlot,
+    sample_rate: f32,
+    file: Option<&gt_core::SampleData>,
+) -> EffectBox {
     let sr = sample_rate;
     let mut fx: Box<dyn Effect> = match slot.kind {
         EffectKind::Eq => Box::new(ParamEq::new(sr)),
@@ -60,12 +73,24 @@ pub fn create_effect(slot: &EffectSlot, sample_rate: f32) -> EffectBox {
         EffectKind::Bitcrusher => Box::new(Bitcrusher::new(sr)),
         EffectKind::Clipper => Box::new(SoftClipper::new(sr)),
         EffectKind::Transient => Box::new(TransientShaper::new(sr)),
+        EffectKind::Multiband => Box::new(Multiband::new(sr)),
+        EffectKind::Analyzer => Box::new(Analyzer::new(sr)),
+        EffectKind::Convolution => Box::new(ConvolutionReverb::new(sr)),
+        EffectKind::PitchShift => Box::new(PitchShifter::new(sr)),
+        EffectKind::Vocoder => Box::new(Vocoder::new(sr)),
+        EffectKind::Stutter => Box::new(Stutter::new(sr)),
         // Plugins run from the plugin table (`EngineCommand::SetPlugin`), not from a box.
         EffectKind::Plugin => Box::new(Passthrough),
     };
     for (i, &v) in slot.params.iter().enumerate() {
         fx.set_param(i, v);
     }
+    let channels = file.map(|f| f.channels.as_slice()).unwrap_or_default();
+    let user = channels.first().map(|l| {
+        let r = channels.get(1).unwrap_or(l);
+        (l.as_slice(), r.as_slice())
+    });
+    fx.prepare(user);
     fx.reset();
     EffectBox(fx)
 }
@@ -218,8 +243,13 @@ impl PdcDelay {
         let d = d.min(MAX_PDC_FRAMES - 1);
         if d != self.delay {
             self.delay = d;
-            self.l.fill(0.0);
-            self.r.fill(0.0);
+            // Only the `d` frames read next can hold stale audio.
+            let n = self.l.len();
+            for i in 0..d {
+                let at = (self.pos + n - d + i) % n;
+                self.l[at] = 0.0;
+                self.r[at] = 0.0;
+            }
         }
     }
 
@@ -862,6 +892,7 @@ impl MixerEngine {
         let ctx = FxContext {
             bpm,
             sidechain: has_key.then_some((&self.key_l[..], &self.key_r[..])),
+            beats: pctx.playing.then_some(pctx.beats),
         };
         for (k, slot) in st.fx.iter_mut().enumerate() {
             if slot.effect.is_none() && slot.plugin.is_none() {
@@ -968,6 +999,7 @@ mod tests {
             let ctx = FxContext {
                 bpm: 120.0,
                 sidechain: None,
+                beats: None,
             };
             for (a, b) in l.chunks_mut(64).zip(r.chunks_mut(64)) {
                 fx.0.process(a, b, &ctx);
