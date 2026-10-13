@@ -32,8 +32,8 @@ pub use midi_panel::{
 pub use mixer::{mixer_view, MixerState, MixerView, StripMeter};
 pub use modulators::{modulators_panel, ModulatorsState};
 pub use piano_roll::{
-    group_color, key_name, piano_roll, stretch_notes, GhostChannel, NoteProp, PianoRollAction,
-    PianoRollState, PianoRollView, ScaleKind, Snap, Tool,
+    group_color, key_name, piano_roll, stretch_notes, GhostChannel, Lane, LaneDraw, NoteProp,
+    PianoRollAction, PianoRollState, PianoRollView, ScaleKind, Snap, Tool,
 };
 pub use playlist::{
     add_automation, playlist, AudioLookup, BounceKind, PlaylistAction, PlaylistSnap, PlaylistState,

@@ -2296,6 +2296,41 @@ mod tests {
     }
 
     #[test]
+    fn event_lane_data_round_trips() {
+        let mut p = Project::demo();
+        let ch = *p.patterns[0].notes.keys().next().unwrap();
+        let target = gt_core::ParamId::strip_pan(1);
+        let pat = &mut p.patterns[0];
+        pat.notes.get_mut(&ch).unwrap()[0].release = 0.3;
+        let controls = vec![
+            gt_core::ControlPoint {
+                tick: 0,
+                kind: gt_core::ControlKind::Bend,
+                value: 0.25,
+            },
+            gt_core::ControlPoint {
+                tick: 240,
+                kind: gt_core::ControlKind::Cc(74),
+                value: 0.75,
+            },
+        ];
+        pat.controls.insert(ch, controls.clone());
+        pat.automation.push(gt_core::Automation {
+            target,
+            points: vec![
+                gt_core::AutoPoint::new(0, 0.1),
+                gt_core::AutoPoint::new(960, 0.9),
+            ],
+        });
+        let v = to_value(&p, None, &HashMap::new());
+        let back = from_value(v, None).unwrap().project;
+        let pat = &back.patterns[0];
+        assert_eq!(pat.controls[&ch], controls);
+        assert_eq!(pat.automation, p.patterns[0].automation);
+        assert_eq!(pat.notes[&ch][0].release, 0.3);
+    }
+
+    #[test]
     fn per_note_values_round_trip_and_old_notes_read_neutral() {
         let mut p = Project::demo();
         let (ch, notes) = p.patterns[0].notes.iter_mut().next().unwrap();
