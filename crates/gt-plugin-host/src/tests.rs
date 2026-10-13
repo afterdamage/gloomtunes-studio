@@ -5,11 +5,10 @@ use std::sync::Arc;
 
 use clack_host::prelude::PluginEntry;
 use gt_core::{EffectKind, EffectSlot, PluginKind, Project, MASTER};
-use gt_engine::{
-    ChannelParams, EngineCommand, EngineConfig, MixerParams, PluginContext, PluginProcessor,
-};
+use gt_engine::{ChannelParams, EngineCommand, EngineConfig, MixerParams, PluginContext};
 use gt_test_plugin::{TestEntry, GAIN_ID, TONE_ID};
 
+use crate::backend::{Entry, Instance};
 use crate::catalog::{list_entry, PluginInfo};
 use crate::host::Signals;
 use crate::instance::LoadedPlugin;
@@ -141,7 +140,7 @@ fn host() -> PluginHost {
     let _ = std::fs::remove_dir_all(&dir);
     let (mut h, report) = PluginHost::new(&dir, PathBuf::from("gloomtunes"), Arc::new(|| {}));
     assert!(report.is_empty());
-    h.insert_entry(Path::new(FILE), entry());
+    h.insert_entry(Path::new(FILE), Entry::Clap(entry()));
     h
 }
 
@@ -303,4 +302,84 @@ fn a_failed_plugin_runs_again_with_the_values_edited_while_it_was_bypassed() {
     audio.process(&mut buf);
     host.sync(&mut project, Some(&mut eng), false);
     assert_eq!(host.status(id), PluginStatus::Running);
+}
+
+#[test]
+fn values_are_written_in_the_plugins_own_units() {
+    let mut p = loaded(GAIN_ID);
+    p.read_params();
+    // Normalized 0.25 of 0..2 is a gain of 0.5, about -6 dB.
+    assert_eq!(p.value_text(0, 0.25).as_deref(), Some("-6.0 dB"));
+    assert_eq!(p.value_text(1, 0.5).as_deref(), Some("NaN"));
+    assert_eq!(p.value_text(9, 0.5), None);
+
+    let mut host = host();
+    let mut project = Project::empty();
+    let tone = host.instantiate(&info(TONE_ID)).unwrap();
+    let id = tone.instance;
+    project.add_plugin_channel("Tone", tone).unwrap();
+    host.sync(&mut project, None, false);
+    let texts = host.param_texts(id);
+    assert_eq!(texts[0].as_deref(), Some("50 %"));
+    assert_eq!(texts[1].as_deref(), Some("Sine"));
+    project.plugin_by_instance_mut(id).unwrap().values[1] = 1.0;
+    host.sync(&mut project, None, false);
+    assert_eq!(host.param_texts(id)[1].as_deref(), Some("Square"));
+}
+
+#[test]
+fn factory_and_user_presets_load_into_the_plugin_and_the_document() {
+    let mut host = host();
+    let mut project = Project::empty();
+    let tone = host.instantiate(&info(TONE_ID)).unwrap();
+    let id = tone.instance;
+    project.add_plugin_channel("Tone", tone).unwrap();
+    host.sync(&mut project, None, false);
+    assert!(host.presets(id).is_empty(), "read when first asked for");
+    host.list_presets(id);
+    let names: Vec<&str> = host.presets(id).iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["Soft Sine", "Buzz"]);
+    assert!(host.presets(id).iter().all(|p| !p.user));
+
+    host.load_preset(&mut project, id, 1).unwrap();
+    let p = project.plugin_by_instance(id).unwrap().1;
+    assert_eq!(p.values[..2], [0.8, 1.0], "Buzz: loud square");
+    assert_eq!(&p.state[..4], b"GTT1", "the document has the new state");
+
+    host.save_preset(id, "My Buzz").unwrap();
+    host.load_preset(&mut project, id, 0).unwrap();
+    assert_eq!(project.plugin_by_instance(id).unwrap().1.values[1], 0.0);
+    let mine = host.presets(id).iter().position(|p| p.user).unwrap();
+    assert_eq!(host.presets(id)[mine].name, "My Buzz");
+    host.load_preset(&mut project, id, mine).unwrap();
+    let p = project.plugin_by_instance(id).unwrap().1;
+    assert_eq!(p.values[..2], [0.8, 1.0]);
+    assert!(host.load_preset(&mut project, id, 99).is_err());
+}
+
+#[test]
+fn extra_outputs_and_midi_output_reach_the_engine() {
+    let mut p = loaded(TONE_ID);
+    p.read_params();
+    assert_eq!(p.outputs(), (vec!["Sub".to_owned()], true));
+    let (mut proc, _rx) = p.activate(RATE).unwrap();
+    assert_eq!(proc.extra_outputs(), 1);
+    let (mut l, mut r) = ([0.0_f32; 32], [0.0_f32; 32]);
+    proc.note_on(3, 60, 1.0);
+    assert!(proc.process(&mut l, &mut r, &ctx()));
+    let (sl, sr) = proc.extra_output(0).unwrap();
+    assert!(l.iter().any(|&x| x != 0.0));
+    for i in 0..32 {
+        assert!((sl[i] - 0.5 * l[i]).abs() < 1e-6 && sl[i] == sr[i], "{i}");
+    }
+    let mut midi = Vec::new();
+    proc.midi_out(&mut |at, msg| midi.push((at, msg)));
+    assert_eq!(midi, vec![(3, [0x90, 72, 127])], "the note an octave up");
+    proc.midi_out(&mut |at, msg| midi.push((at, msg)));
+    assert_eq!(midi.len(), 1, "handed over once");
+    proc.note_off(5, 60);
+    proc.process(&mut l, &mut r, &ctx());
+    proc.midi_out(&mut |at, msg| midi.push((at, msg)));
+    assert_eq!(midi[1], (5, [0x80, 72, 0]));
+    proc.stop();
 }

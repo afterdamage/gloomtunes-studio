@@ -34,7 +34,8 @@ pub(crate) struct Signals {
     pub(crate) latency: AtomicBool,
     pub(crate) dirty: AtomicBool,
     pub(crate) gui_closed: AtomicBool,
-    /// Requested editor size, packed with [`GuiSize::pack_to_u64`]; `u64::MAX` for none.
+    /// Requested editor size, width in the high and height in the low 32 bits; `u64::MAX`
+    /// for none.
     pub(crate) gui_resize: AtomicU64,
     waker: Waker,
 }
@@ -63,11 +64,31 @@ impl Signals {
         flag.swap(false, Ordering::AcqRel)
     }
 
-    pub(crate) fn take_resize(&self) -> Option<GuiSize> {
+    /// Takes a requested editor size (width, height).
+    pub(crate) fn take_resize(&self) -> Option<(u32, u32)> {
         match self.gui_resize.swap(u64::MAX, Ordering::AcqRel) {
             u64::MAX => None,
-            v => Some(GuiSize::unpack_from_u64(v)),
+            v => Some(((v >> 32) as u32, v as u32)),
         }
+    }
+
+    /// Asks for an editor size (width, height).
+    pub(crate) fn request_resize(&self, width: u32, height: u32) {
+        self.gui_resize.store(
+            (u64::from(width) << 32) | u64::from(height),
+            Ordering::Release,
+        );
+        (self.waker)();
+    }
+
+    /// Asks the UI for a frame.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn wake(&self) {
+        (self.waker)();
+    }
+
+    pub(crate) fn raise_flag(&self, flag: &AtomicBool) {
+        self.raise(flag);
     }
 }
 
@@ -154,10 +175,7 @@ impl HostGuiImpl for Shared {
     fn resize_hints_changed(&self) {}
 
     fn request_resize(&self, new_size: GuiSize) -> Result<(), HostError> {
-        self.signals
-            .gui_resize
-            .store(new_size.pack_to_u64(), Ordering::Release);
-        (self.signals.waker)();
+        self.signals.request_resize(new_size.width, new_size.height);
         Ok(())
     }
 
@@ -307,6 +325,43 @@ impl HostNotePortsImpl for MainThread<'_> {
     fn rescan(&self, _flags: NotePortRescanFlags) {
         self.shared.signals.raise(&self.shared.signals.restart);
     }
+}
+
+/// Polls file descriptors without waiting: (fd, wants read, wants write) in; (fd, readable,
+/// writable, error) out for those with something to report.
+#[cfg(unix)]
+pub(crate) fn poll_fds(
+    fds: &[(std::os::fd::RawFd, bool, bool)],
+) -> Vec<(std::os::fd::RawFd, bool, bool, bool)> {
+    if fds.is_empty() {
+        return Vec::new();
+    }
+    let mut polls: Vec<libc::pollfd> = fds
+        .iter()
+        .map(|&(fd, read, write)| libc::pollfd {
+            fd,
+            events: (if read { libc::POLLIN } else { 0 }) | (if write { libc::POLLOUT } else { 0 }),
+            revents: 0,
+        })
+        .collect();
+    // SAFETY: `polls` is a valid array of pollfd of the given length; zero timeout.
+    #[allow(unsafe_code)]
+    let n = unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as libc::nfds_t, 0) };
+    if n <= 0 {
+        return Vec::new();
+    }
+    polls
+        .iter()
+        .filter(|p| p.revents != 0)
+        .map(|p| {
+            (
+                p.fd,
+                p.revents & libc::POLLIN != 0,
+                p.revents & libc::POLLOUT != 0,
+                p.revents & (libc::POLLERR | libc::POLLHUP) != 0,
+            )
+        })
+        .collect()
 }
 
 #[cfg(unix)]

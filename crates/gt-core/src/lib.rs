@@ -42,8 +42,8 @@ pub use playlist::{
     FadeCurve, Frozen, Marker, Playlist, StretchMode, Track, TrackId, WarpMarker,
 };
 pub use plugin::{
-    PluginFormat, PluginInstanceId, PluginKind, PluginOwner, PluginParamInfo, PluginRef,
-    MAX_PLUGIN_PARAMS,
+    PluginFormat, PluginInstanceId, PluginKind, PluginOutput, PluginOwner, PluginParamInfo,
+    PluginRef, MAX_EXTRA_OUTPUTS, MAX_PLUGIN_PARAMS,
 };
 pub use project::{
     Adsr, BuiltInSample, Channel, ChannelId, Instrument, LoopMode, Note, Pattern, PatternId,

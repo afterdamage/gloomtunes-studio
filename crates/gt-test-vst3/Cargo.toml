@@ -1,0 +1,19 @@
+[package]
+name = "gt-test-vst3"
+description = "GloomTunes Studio: small VST3 plugins for testing the plugin host."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vst3.workspace = true

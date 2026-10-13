@@ -515,7 +515,7 @@ fn load_engine(
             p,
             EngineCommand::SetChannelParams {
                 slot: i as u16,
-                params: Box::new(ChannelParams::from_channel(ch, project.is_silenced(i))),
+                params: Box::new(ChannelParams::from_project(project, i)),
             },
         );
     }

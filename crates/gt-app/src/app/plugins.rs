@@ -76,6 +76,21 @@ impl GloomApp {
             }
             PluginAction::CloseEditor(id) => self.plugins.close_editor(id),
             PluginAction::Retry(id) => self.plugins.retry(id, self.audio.engine_mut()),
+            PluginAction::ListPresets(id) => self.plugins.list_presets(id),
+            PluginAction::Routed(_) => {
+                self.push_all_params();
+                self.pending_edit = Some("Plugin routing");
+            }
+            PluginAction::LoadPreset(id, i) => {
+                match self.plugins.load_preset(&mut self.project, id, i) {
+                    Ok(()) => self.pending_edit = Some("Load preset"),
+                    Err(e) => self.toast(format!("Cannot load the preset: {e}")),
+                }
+            }
+            PluginAction::SavePreset(id, name) => match self.plugins.save_preset(id, &name) {
+                Ok(()) => self.toast(format!("Saved preset \"{name}\"")),
+                Err(e) => self.toast(format!("Cannot save the preset: {e}")),
+            },
         }
     }
 
@@ -92,11 +107,14 @@ impl GloomApp {
             .iter()
             .map(|p| PluginEntry {
                 name: p.name.clone(),
-                vendor: p.vendor.clone(),
+                vendor: match p.format {
+                    gt_core::PluginFormat::Clap => p.vendor.clone(),
+                    f => format!("{} · {}", p.vendor, f.label()),
+                },
                 kind: p.kind(),
                 details: [
                     p.description.as_str(),
-                    &format!("{} {}", p.id, p.version),
+                    &format!("{} · {} {}", p.format.label(), p.id, p.version),
                     &p.path.display().to_string(),
                 ]
                 .iter()

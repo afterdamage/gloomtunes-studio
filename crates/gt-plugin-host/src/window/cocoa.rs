@@ -88,6 +88,10 @@ impl Native {
         unsafe { Window::from_cocoa_nsview(Retained::as_ptr(&self.view) as *mut _) }
     }
 
+    pub(super) fn raw_handle(&self) -> *mut std::ffi::c_void {
+        Retained::as_ptr(&self.view) as *mut std::ffi::c_void
+    }
+
     pub(super) fn poll(&mut self) -> WindowEvents {
         let mut ev = WindowEvents::default();
         if !self.closed && !self.window.isVisible() && !self.window.isMiniaturized() {

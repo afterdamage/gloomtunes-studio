@@ -507,6 +507,22 @@ struct PluginDto {
     /// The parameters as the plugin described them, with their values (normalized 0..1).
     #[serde(default)]
     params: Vec<PluginParamDto>,
+    /// Extra stereo outputs (multi-output instruments) and their inserts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    outputs: Vec<PluginOutputDto>,
+    /// The plugin sends MIDI.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    sends_midi: bool,
+    /// Channel id that plays its MIDI output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    midi_out: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PluginOutputDto {
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    route: Option<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1601,6 +1617,16 @@ fn plugin_dto(p: &PluginRef) -> PluginDto {
                 value,
             })
             .collect(),
+        outputs: p
+            .outputs
+            .iter()
+            .map(|o| PluginOutputDto {
+                name: o.name.clone(),
+                route: o.route,
+            })
+            .collect(),
+        sends_midi: p.sends_midi,
+        midi_out: p.midi_out.map(|c| c.0),
     }
 }
 
@@ -1637,6 +1663,17 @@ fn plugin_from_dto(
         })
         .collect::<Vec<_>>()
         .into();
+    p.outputs = d
+        .outputs
+        .into_iter()
+        .take(gt_core::MAX_EXTRA_OUTPUTS)
+        .map(|o| gt_core::PluginOutput {
+            name: o.name,
+            route: o.route.filter(|&r| usize::from(r) < gt_core::STRIPS),
+        })
+        .collect();
+    p.sends_midi = d.sends_midi;
+    p.midi_out = d.midi_out.map(ChannelId);
     p.sanitize();
     Some((p, d.state))
 }
@@ -2164,6 +2201,10 @@ mod tests {
         ]);
         synth.values = vec![0.25, 2.0 / 3.0];
         synth.state = std::sync::Arc::from(vec![1u8, 2, 3, 250]);
+        synth.set_output_names(vec!["Sub".into(), "Drums".into()]);
+        synth.outputs[1].route = Some(3);
+        synth.sends_midi = true;
+        synth.midi_out = Some(p.channels[0].id);
         let ch = p.add_plugin_channel("Synth", synth.clone()).unwrap();
         let mut fx = PluginRef::new(
             "com.example.fx",
@@ -2188,6 +2229,12 @@ mod tests {
         assert_eq!(back.params, synth.params);
         assert_eq!(back.values, synth.values);
         assert_eq!(back.state, synth.state);
+        assert_eq!(
+            back.outputs, synth.outputs,
+            "extra outputs and their inserts"
+        );
+        assert!(back.sends_midi);
+        assert_eq!(back.midi_out, synth.midi_out);
         assert_ne!(
             back.instance, synth.instance,
             "running instances are per session"

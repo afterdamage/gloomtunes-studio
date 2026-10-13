@@ -11,7 +11,7 @@ use gt_core::{
 use gt_dsp::fx::{eq_band_response, BandType};
 
 use crate::param_ui::{param_live, param_menu};
-use crate::views::plugins::{plugin_controls, PluginAction, PluginPanelView, PluginState};
+use crate::views::plugins::{plugin_controls, PluginAction, PluginPanelView};
 use crate::widgets::{fader, format_gain, format_pan, knob, param_knob, stereo_meter};
 use crate::GloomTheme;
 
@@ -499,11 +499,7 @@ fn detail(
             );
             changed |= if let Some(p) = slot.plugin.as_deref_mut() {
                 let owner = PluginOwner::Effect { strip: i, slot: k };
-                let missing = PluginPanelView {
-                    state: PluginState::Waiting,
-                    has_editor: false,
-                    editor_open: false,
-                };
+                let missing = PluginPanelView::default();
                 let pv = view.plugin.unwrap_or(&missing);
                 plugin_controls(ui, theme, owner, p, pv, &mut state.plugin_actions)
             } else if slot.kind == EffectKind::Plugin {

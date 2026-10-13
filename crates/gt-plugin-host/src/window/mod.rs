@@ -77,6 +77,15 @@ impl HostWindow {
         }
     }
 
+    /// The native handle a VST3 editor attaches to: the X11 window id, the `HWND` or the
+    /// `NSView`.
+    pub(crate) fn raw_handle(&self) -> *mut std::ffi::c_void {
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        return self.inner.raw_handle();
+        #[allow(unreachable_code)]
+        std::ptr::null_mut()
+    }
+
     /// Handles pending events.
     pub(crate) fn poll(&mut self) -> WindowEvents {
         #[cfg(any(target_os = "linux", target_os = "macos", windows))]

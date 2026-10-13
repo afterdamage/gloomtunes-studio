@@ -8,9 +8,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use clack_extensions::audio_ports::*;
 use clack_extensions::note_ports::*;
 use clack_extensions::params::*;
+use clack_extensions::preset_discovery::prelude::*;
 use clack_extensions::state::{PluginState, PluginStateImpl};
-use clack_plugin::events::event_types::ParamValueEvent;
+use clack_plugin::events::event_types::{NoteOffEvent, NoteOnEvent, ParamValueEvent};
 use clack_plugin::events::spaces::CoreEventSpace;
+use clack_plugin::events::Match;
 use clack_plugin::prelude::*;
 use clack_plugin::stream::{InputStream, OutputStream};
 
@@ -40,7 +42,8 @@ impl Plugin for TonePlugin {
             .register::<PluginAudioPorts>()
             .register::<PluginNotePorts>()
             .register::<PluginParams>()
-            .register::<PluginState>();
+            .register::<PluginState>()
+            .register::<PluginPresetLoad>();
     }
 }
 
@@ -96,6 +99,8 @@ pub struct ToneProcessor<'a> {
     voices: [Voice; VOICES],
     release: f32,
     sample_rate: f32,
+    /// A copy of the main output, for the sub output.
+    sub: Vec<f32>,
 }
 
 impl<'a> PluginAudioProcessor<'a, ToneShared, ToneMainThread<'a>> for ToneProcessor<'a> {
@@ -118,6 +123,7 @@ impl<'a> PluginAudioProcessor<'a, ToneShared, ToneMainThread<'a>> for ToneProces
             }; VOICES],
             release: (-1.0 / (RELEASE * sample_rate)).exp(),
             sample_rate,
+            sub: vec![0.0; config.max_frames_count as usize],
         })
     }
 
@@ -154,10 +160,27 @@ impl<'a> PluginAudioProcessor<'a, ToneShared, ToneMainThread<'a>> for ToneProces
                                 Pckn::match_all(),
                                 f64::from(key),
                             ));
+                            // The note an octave up on the note output (an "arpeggiator").
+                            if key < 116 {
+                                let up = Pckn::new(0u16, 0u16, u16::from(key + 12), Match::All);
+                                let _ = events.output.try_push(NoteOnEvent::new(
+                                    n.header().time(),
+                                    up,
+                                    n.velocity(),
+                                ));
+                            }
                         }
                     }
                     Some(CoreEventSpace::NoteOff(n)) => {
                         let key = n.pckn().key.into_specific();
+                        if let Some(k) = key.filter(|&k| k < 116) {
+                            let up = Pckn::new(0u16, 0u16, k + 12, Match::All);
+                            let _ = events.output.try_push(NoteOffEvent::new(
+                                n.header().time(),
+                                up,
+                                0.0,
+                            ));
+                        }
                         for v in &mut self.voices {
                             if key.is_none() || v.key.map(u16::from) == key {
                                 v.gate = false;
@@ -180,6 +203,23 @@ impl<'a> PluginAudioProcessor<'a, ToneShared, ToneMainThread<'a>> for ToneProces
             if let Some(first) = first.channel(0) {
                 for ch in rest {
                     ch.copy_from_slice(first);
+                }
+            }
+        }
+        let frames = channels
+            .channel(0)
+            .map_or(0, |c| c.len())
+            .min(self.sub.len());
+        if let Some(main) = channels.channel(0) {
+            self.sub[..frames].copy_from_slice(&main[..frames]);
+        }
+        // The "Sub" output: the main output at half level, on both channels.
+        if let Some(mut port) = audio.output_port(1) {
+            if let Ok(Some(mut sub)) = port.channels().map(|c| c.into_f32()) {
+                for ch in sub.iter_mut() {
+                    for (s, m) in ch.iter_mut().zip(&self.sub[..frames]) {
+                        *s = 0.5 * m;
+                    }
                 }
             }
         }
@@ -277,17 +317,21 @@ impl PluginAudioPortsImpl for ToneMainThread<'_> {
         if is_input {
             0
         } else {
-            1
+            2
         }
     }
 
     fn get(&self, index: u32, is_input: bool, writer: &mut AudioPortInfoWriter) {
-        if !is_input && index == 0 {
+        if !is_input && index < 2 {
             writer.set(&AudioPortInfo {
-                id: ClapId::new(1),
-                name: b"main",
+                id: ClapId::new(index + 1),
+                name: if index == 0 { b"main" } else { b"Sub" },
                 channel_count: 2,
-                flags: AudioPortFlags::IS_MAIN,
+                flags: if index == 0 {
+                    AudioPortFlags::IS_MAIN
+                } else {
+                    AudioPortFlags::empty()
+                },
                 port_type: Some(AudioPortType::STEREO),
                 in_place_pair: None,
             });
@@ -296,16 +340,12 @@ impl PluginAudioPortsImpl for ToneMainThread<'_> {
 }
 
 impl PluginNotePortsImpl for ToneMainThread<'_> {
-    fn count(&self, is_input: bool) -> u32 {
-        if is_input {
-            1
-        } else {
-            0
-        }
+    fn count(&self, _is_input: bool) -> u32 {
+        1
     }
 
-    fn get(&self, index: u32, is_input: bool, writer: &mut NotePortInfoWriter) {
-        if is_input && index == 0 {
+    fn get(&self, index: u32, _is_input: bool, writer: &mut NotePortInfoWriter) {
+        if index == 0 {
             writer.set(&NotePortInfo {
                 id: ClapId::new(1),
                 name: b"main",
@@ -388,6 +428,22 @@ impl PluginMainThreadParams for ToneMainThread<'_> {
                 }
             }
         }
+    }
+}
+
+impl PluginPresetLoadImpl for ToneMainThread<'_> {
+    fn load_from_location(
+        &self,
+        location: Location,
+        load_key: Option<&CStr>,
+    ) -> Result<(), PluginError> {
+        let preset = crate::presets::PRESETS
+            .iter()
+            .find(|p| location == Location::Plugin && Some(p.1) == load_key)
+            .ok_or(PluginError::Message("no such preset"))?;
+        self.shared.set_param(PARAM_VOLUME, f64::from(preset.2));
+        self.shared.set_param(PARAM_WAVE, f64::from(preset.3));
+        Ok(())
     }
 }
 

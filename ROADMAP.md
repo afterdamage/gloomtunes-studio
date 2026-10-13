@@ -568,6 +568,21 @@ sound identical; the golden export test stays.
   - Limits: one line per parameter per pattern; lines are drawn with straight segments
     (curves only by recording or in clips).
 
+### Prompt 18: VST3 hosting and plugin hosting 2
+- VST3 (D113): scanned, loaded, played, automated, saved and edited (editor windows on all
+  three systems) exactly like CLAP; a plugin shipped in both formats is offered as CLAP.
+  Limits: `moduleinfo.json` is not read, so every bundle is loaded once to scan it.
+- Presets and units (D114), both formats: a Presets menu loads the plugin's own presets (CLAP
+  preset discovery, VST3 programs and `.vstpreset` files) and saves and loads user presets in
+  the data folder; sliders show values in the plugin's own text and units.
+- Instrument delay compensation (D115): latent plugin instruments are lined up with the rest.
+- Multi-output instruments and MIDI out (D116): each extra stereo output of a plugin
+  instrument can play into its own insert, and the notes a plugin sends (arpeggiators) can
+  play another channel, a block later.
+- Audio Units on macOS (D117): AUv2 effects and instruments are scanned, played, automated,
+  saved and preset-loaded like the other formats. Limits: no AU editor windows (sliders only),
+  no AU extra outputs or MIDI out, no AUv3.
+
 ---
 
 ## v1.0 scope

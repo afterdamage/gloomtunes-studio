@@ -64,25 +64,58 @@ pub(crate) struct ParamOut {
     pub(crate) value: f32,
 }
 
-/// Receives the plugin's output events: parameter changes go to the UI queue, the rest are
-/// ignored. Never allocates.
+/// MIDI messages a plugin can send per block (the rest are dropped).
+pub(crate) const MIDI_OUT: usize = 256;
+
+/// Receives the plugin's output events: parameter changes go to the UI queue, notes and MIDI
+/// to a fixed buffer for the engine (an arpeggiator's output), the rest are ignored. Never
+/// allocates.
 struct OutputSink {
     params: Arc<[ParamMap]>,
     queue: rtrb::Producer<ParamOut>,
+    midi: [(u32, [u8; 3]); MIDI_OUT],
+    midi_len: usize,
+}
+
+impl OutputSink {
+    fn midi(&mut self, offset: u32, msg: [u8; 3]) {
+        if self.midi_len < MIDI_OUT {
+            self.midi[self.midi_len] = (offset, msg);
+            self.midi_len += 1;
+        }
+    }
 }
 
 impl OutputEventBuffer for OutputSink {
     fn try_push(&mut self, event: &UnknownEvent) -> Result<(), TryPushError> {
-        if let Some(CoreEventSpace::ParamValue(e)) = event.as_core_event() {
-            if let Some(id) = e.param_id() {
-                if let Some(i) = self.params.iter().position(|p| p.id == id.get()) {
-                    let value = self.params[i].to_norm(e.value());
-                    let _ = self.queue.push(ParamOut {
-                        index: i as u32,
-                        value,
-                    });
+        let at = event.header().time();
+        let key = |k: Option<u16>| k.map_or(0, |k| (k & 0x7F) as u8);
+        match event.as_core_event() {
+            Some(CoreEventSpace::ParamValue(e)) => {
+                if let Some(id) = e.param_id() {
+                    if let Some(i) = self.params.iter().position(|p| p.id == id.get()) {
+                        let value = self.params[i].to_norm(e.value());
+                        let _ = self.queue.push(ParamOut {
+                            index: i as u32,
+                            value,
+                        });
+                    }
                 }
             }
+            Some(CoreEventSpace::NoteOn(e)) => {
+                let vel = (e.velocity().clamp(0.0, 1.0) * 127.0).round() as u8;
+                self.midi(at, [0x90, key(e.key().into_specific()), vel.max(1)]);
+            }
+            Some(CoreEventSpace::NoteOff(e)) => {
+                self.midi(at, [0x80, key(e.key().into_specific()), 0]);
+            }
+            Some(CoreEventSpace::Midi(e)) => {
+                let d = e.data();
+                if d[0] & 0xF0 >= 0x80 {
+                    self.midi(at, [d[0] & 0xF0, d[1] & 0x7F, d[2] & 0x7F]);
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -100,6 +133,11 @@ pub(crate) struct Layout {
     pub(crate) main_out: Option<usize>,
     /// The note input port, and whether it only takes MIDI.
     pub(crate) note_port: Option<(u16, bool)>,
+    /// Output ports after the main one (multi-output instruments) and their names.
+    pub(crate) extra_outs: Vec<usize>,
+    pub(crate) extra_names: Vec<String>,
+    /// The plugin has a note output port.
+    pub(crate) note_out: bool,
 }
 
 /// The engine-side plugin.
@@ -118,6 +156,8 @@ pub(crate) struct ClapProcessor {
     effect: bool,
     latency: usize,
     steady: u64,
+    /// Frames of the last block.
+    frames: usize,
 }
 
 impl ClapProcessor {
@@ -142,6 +182,8 @@ impl ClapProcessor {
             out: OutputSink {
                 params: Arc::clone(&params),
                 queue,
+                midi: [(0, [0; 3]); MIDI_OUT],
+                midi_len: 0,
             },
             params,
             in_ports: AudioPorts::with_capacity(layout.inputs.iter().sum(), layout.inputs.len()),
@@ -153,6 +195,7 @@ impl ClapProcessor {
             effect,
             latency,
             steady: 0,
+            frames: 0,
         }
     }
 
@@ -282,6 +325,8 @@ impl PluginProcessor for ClapProcessor {
             }
         }
         let transport = Self::transport(ctx);
+        self.out.midi_len = 0;
+        self.frames = n;
         let ok = self.run(n, &transport);
         self.events.clear();
         self.steady += n as u64;
@@ -385,6 +430,27 @@ impl PluginProcessor for ClapProcessor {
 
     fn latency(&self) -> usize {
         self.latency
+    }
+
+    fn extra_outputs(&self) -> usize {
+        self.layout.extra_outs.len()
+    }
+
+    fn extra_output(&self, k: usize) -> Option<(&[f32], &[f32])> {
+        let port = self.out_bufs.get(*self.layout.extra_outs.get(k)?)?;
+        let n = self.frames;
+        match port.as_slice() {
+            [mono] => Some((&mono[..n], &mono[..n])),
+            [left, right, ..] => Some((&left[..n], &right[..n])),
+            [] => None,
+        }
+    }
+
+    fn midi_out(&mut self, sink: &mut dyn FnMut(u32, [u8; 3])) {
+        for &(offset, msg) in &self.out.midi[..self.out.midi_len] {
+            sink(offset, msg);
+        }
+        self.out.midi_len = 0;
     }
 
     fn stop(&mut self) {

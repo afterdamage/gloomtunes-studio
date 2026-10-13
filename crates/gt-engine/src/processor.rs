@@ -19,6 +19,9 @@ use crate::song::{ChannelParams, SongSnapshot};
 use crate::transport::{EventBuf, EventKind, ScheduledEvent, Transport};
 use crate::{EngineConfig, Telemetry, FADE_SECONDS, RENDER_QUANTUM, SCOPE_LEN};
 
+/// Most MIDI messages forwarded from plugins to other channels per block.
+const MIDI_FORWARD: usize = 1024;
+
 /// Frequency of the device test tone (concert A).
 pub const TEST_TONE_HZ: f32 = 440.0;
 /// Level of the device test tone. -12 dBFS leaves headroom and is comfortable on speakers.
@@ -104,6 +107,12 @@ pub struct AudioProcessor {
     mods: Option<Box<ModPlan>>,
     /// `MAX_CHANNELS` slots, allocated once in `new`.
     channels: Vec<ChannelSlot>,
+    /// Per channel slot: the delay lining a plugin instrument up with the slowest one on its
+    /// strip (D115).
+    channel_pdc: Vec<crate::mixer::PdcDelay>,
+    /// MIDI plugins sent to other channels (target slot, offset, message), played in the next
+    /// block. Capacity fixed in `new`.
+    midi_fwd: Vec<(u16, u32, [u8; 3])>,
     preview: ChannelSlot,
     /// Increments with every note-on; orders voices for stealing.
     voice_age: u64,
@@ -199,6 +208,10 @@ impl AudioProcessor {
             tapped: false,
             mods: None,
             channels: (0..MAX_CHANNELS).map(|_| ChannelSlot::new(sr)).collect(),
+            channel_pdc: (0..MAX_CHANNELS)
+                .map(|_| crate::mixer::PdcDelay::new())
+                .collect(),
+            midi_fwd: Vec::with_capacity(MIDI_FORWARD),
             preview,
             voice_age: 0,
             scope_slot: None,
@@ -380,6 +393,8 @@ impl AudioProcessor {
 
         self.apply_controls();
         let pctx = self.plugin_context();
+        self.update_instrument_latency();
+        self.deliver_midi();
         for slot in 0..self.channels.len() {
             self.render_channel(slot, &pctx);
         }
@@ -449,6 +464,62 @@ impl AudioProcessor {
         }
     }
 
+    /// Instrument delay compensation (D115): each strip learns the largest latency of the
+    /// running plugin instruments routed to it, and each of those channels is delayed by the
+    /// difference to that. Cheap enough to run every quantum (one pass over the channels).
+    fn update_instrument_latency(&mut self) {
+        let mut lat = [0_usize; gt_core::STRIPS];
+        for ch in self.channels.iter().filter(|c| c.is_plugin()) {
+            let l = self.plugins.latency(ch.plugin);
+            let s = usize::from(ch.route()).min(gt_core::STRIPS - 1);
+            lat[s] = lat[s].max(l);
+            for k in 0..self.plugins.extra_outputs(ch.plugin) {
+                if let Some(s) = ch.extra_routes()[k] {
+                    let s = usize::from(s).min(gt_core::STRIPS - 1);
+                    lat[s] = lat[s].max(l);
+                }
+            }
+        }
+        if self.mixer.set_instrument_latency(&lat) {
+            self.telemetry
+                .latency_frames
+                .store(self.mixer.latency() as u32, Ordering::Relaxed);
+        }
+    }
+
+    /// Plays the MIDI plugins sent to other channels in the last block, at the same offsets.
+    fn deliver_midi(&mut self) {
+        for i in 0..self.midi_fwd.len() {
+            let (target, offset, msg) = self.midi_fwd[i];
+            let slot = usize::from(target);
+            let Some(ch) = self.channels.get(slot) else {
+                continue;
+            };
+            let (status, key, value) = (msg[0] & 0xF0, msg[1] & 0x7F, msg[2] & 0x7F);
+            let note_on = status == 0x90 && value > 0;
+            let note_off = status == 0x80 || (status == 0x90 && value == 0);
+            if ch.is_plugin() {
+                let index = ch.plugin;
+                if note_on {
+                    self.plugins
+                        .note_on(index, offset, key, f32::from(value) / 127.0);
+                } else if note_off {
+                    self.plugins.note_off(index, offset, key);
+                } else if status == 0xA0 {
+                    self.plugins
+                        .key_pressure(index, offset, key, f32::from(value) / 127.0);
+                } else if matches!(status, 0xB0 | 0xD0 | 0xE0) {
+                    self.plugins.midi(index, offset, msg);
+                }
+            } else if note_on {
+                self.slot_note_on(slot, key, f32::from(value) / 127.0);
+            } else if note_off {
+                self.slot_note_off(slot, key);
+            }
+        }
+        self.midi_fwd.clear();
+    }
+
     /// Renders a plugin channel: its notes go to the plugin at their offsets, one block is
     /// processed, then gain and pan as for any channel.
     fn render_plugin_channel(&mut self, slot: usize, pctx: &PluginContext) {
@@ -493,8 +564,36 @@ impl AudioProcessor {
             &self.telemetry,
         );
         let ch = &mut self.channels[slot];
-        let (ml, mr) = self.mixer.direct_mut(usize::from(ch.route()));
+        let route = usize::from(ch.route());
+        let own = self.plugins.latency(index);
+        let pdc = &mut self.channel_pdc[slot];
+        pdc.set_delay(self.mixer.instrument_latency(route).saturating_sub(own));
+        pdc.process(&mut self.scratch_l, &mut self.scratch_r);
+        let (ml, mr) = self.mixer.latent_mut(route);
         let peak = ch.mix_into((&self.scratch_l, &self.scratch_r), (ml, mr));
+        // Extra outputs of a multi-output instrument, each into its own insert.
+        let gain = ch.extra_gain();
+        for k in 0..self.plugins.extra_outputs(index) {
+            let (Some(s), Some((a, b))) =
+                (ch.extra_routes()[k], self.plugins.extra_output(index, k))
+            else {
+                continue;
+            };
+            let (ml, mr) = self.mixer.latent_mut(usize::from(s));
+            for (((m, &x), n), &y) in ml.iter_mut().zip(a).zip(mr.iter_mut()).zip(b) {
+                *m += x * gain;
+                *n += y * gain;
+            }
+        }
+        // MIDI the plugin sent (an arpeggiator) goes to its target channel next block.
+        if let Some(target) = ch.midi_out() {
+            let fwd = &mut self.midi_fwd;
+            self.plugins.midi_out(index, &mut |offset, msg| {
+                if fwd.len() < fwd.capacity() {
+                    fwd.push((target, offset, msg));
+                }
+            });
+        }
         self.telemetry.channel_peaks[slot].fetch_max(peak, Ordering::Relaxed);
         if self.scope_slot == Some(slot) {
             for (l, r) in self.scratch_l.iter_mut().zip(&self.scratch_r) {
@@ -2214,5 +2313,194 @@ mod tests {
         );
         p.process(&mut buf);
         assert!(buf.iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn plugin_instruments_with_latency_are_lined_up_with_the_others() {
+        use crate::plugin::tests::FakePlugin;
+        use gt_core::{PluginInstanceId, MASTER};
+        let (mut h, mut p) = engine(48_000, 2);
+        h.send(EngineCommand::SetMetronome(false)).unwrap();
+        for (slot, id, latency) in [(0u16, 9101u64, 0usize), (1, 9102, 40)] {
+            h.send(EngineCommand::SetChannelParams {
+                slot,
+                params: Box::new(crate::ChannelParams {
+                    kind: crate::InstrumentKind::Plugin,
+                    plugin: Some(PluginInstanceId(id)),
+                    gain: 1.0,
+                    pan: 0.0,
+                    route: MASTER as u8,
+                    ..crate::ChannelParams::default()
+                }),
+            })
+            .unwrap();
+            h.send(EngineCommand::SetPlugin {
+                index: slot as u8,
+                plugin: Some(Box::new(crate::PluginBox {
+                    instance: PluginInstanceId(id),
+                    processor: Box::new(FakePlugin {
+                        gain: 1.0,
+                        held: 0,
+                        nan: false,
+                        latency,
+                    }),
+                })),
+            })
+            .unwrap();
+        }
+        let mut buf = vec![0.0; 2 * 128];
+        p.process(&mut buf);
+        assert!(buf.iter().all(|&s| s == 0.0));
+        // The instrument without latency waits for the one with 40 frames.
+        h.send(EngineCommand::NoteOn {
+            slot: 0,
+            key: 60,
+            velocity: 1.0,
+        })
+        .unwrap();
+        p.process(&mut buf);
+        let first = buf.iter().position(|&s| s != 0.0).unwrap() / 2;
+        assert_eq!(first, 40);
+        assert_eq!(
+            h.telemetry().latency_frames.load(Ordering::Relaxed),
+            40,
+            "the master reports the instrument latency"
+        );
+    }
+
+    /// An instrument with one extra output (a constant) that echoes each note an octave up
+    /// to its MIDI output.
+    struct ArpPlugin {
+        extra: [f32; crate::RENDER_QUANTUM],
+        echo: Option<(u32, u8)>,
+    }
+
+    impl crate::PluginProcessor for ArpPlugin {
+        fn process(&mut self, l: &mut [f32], r: &mut [f32], _: &crate::PluginContext) -> bool {
+            l.fill(0.0);
+            r.fill(0.0);
+            true
+        }
+        fn note_on(&mut self, offset: u32, key: u8, _velocity: f32) {
+            self.echo = Some((offset, key + 12));
+        }
+        fn note_off(&mut self, _offset: u32, _key: u8) {}
+        fn release_all(&mut self, _offset: u32) {}
+        fn set_param(&mut self, _index: u32, _value: f32) {}
+        fn reset(&mut self) {}
+        fn latency(&self) -> usize {
+            0
+        }
+        fn extra_outputs(&self) -> usize {
+            1
+        }
+        fn extra_output(&self, k: usize) -> Option<(&[f32], &[f32])> {
+            (k == 0).then_some((&self.extra[..], &self.extra[..]))
+        }
+        fn midi_out(&mut self, sink: &mut dyn FnMut(u32, [u8; 3])) {
+            if let Some((offset, key)) = self.echo.take() {
+                sink(offset, [0x90, key, 100]);
+            }
+        }
+    }
+
+    #[test]
+    fn extra_outputs_play_into_their_inserts_and_plugin_midi_reaches_another_channel() {
+        use crate::plugin::tests::FakePlugin;
+        use gt_core::{PluginInstanceId, MASTER};
+        let (mut h, mut p) = engine(48_000, 2);
+        h.send(EngineCommand::SetMetronome(false)).unwrap();
+        let arp = |extra: Option<u8>, midi_out: Option<u16>| crate::ChannelParams {
+            kind: crate::InstrumentKind::Plugin,
+            plugin: Some(PluginInstanceId(9201)),
+            gain: 1.0,
+            route: MASTER as u8,
+            extra_routes: {
+                let mut r = [None; gt_core::MAX_EXTRA_OUTPUTS];
+                r[0] = extra;
+                r
+            },
+            midi_out,
+            ..crate::ChannelParams::default()
+        };
+        h.send(EngineCommand::SetChannelParams {
+            slot: 0,
+            params: Box::new(arp(None, Some(1))),
+        })
+        .unwrap();
+        h.send(EngineCommand::SetChannelParams {
+            slot: 1,
+            params: Box::new(crate::ChannelParams {
+                kind: crate::InstrumentKind::Plugin,
+                plugin: Some(PluginInstanceId(9202)),
+                gain: 1.0,
+                route: MASTER as u8,
+                ..crate::ChannelParams::default()
+            }),
+        })
+        .unwrap();
+        let fake = FakePlugin {
+            gain: 1.0,
+            held: 0,
+            nan: false,
+            latency: 0,
+        };
+        for (index, id, processor) in [
+            (
+                0u8,
+                9201u64,
+                Box::new(ArpPlugin {
+                    extra: [0.25; crate::RENDER_QUANTUM],
+                    echo: None,
+                }) as Box<dyn crate::PluginProcessor>,
+            ),
+            (1, 9202, Box::new(fake)),
+        ] {
+            h.send(EngineCommand::SetPlugin {
+                index,
+                plugin: Some(Box::new(crate::PluginBox {
+                    instance: PluginInstanceId(id),
+                    processor,
+                })),
+            })
+            .unwrap();
+        }
+        let mut buf = vec![0.0; 2 * 128];
+        p.process(&mut buf);
+        assert!(
+            buf.iter().all(|&s| s == 0.0),
+            "an unrouted extra output is not heard"
+        );
+
+        // Routed to the master, the extra output is heard.
+        h.send(EngineCommand::SetChannelParams {
+            slot: 0,
+            params: Box::new(arp(Some(MASTER as u8), Some(1))),
+        })
+        .unwrap();
+        for _ in 0..20 {
+            p.process(&mut buf);
+        }
+        assert!(buf.iter().all(|&s| s > 0.1), "{:?}", &buf[..4]);
+
+        // A note on the arpeggiator comes out of its MIDI output and plays channel 2.
+        h.send(EngineCommand::SetChannelParams {
+            slot: 0,
+            params: Box::new(arp(None, Some(1))),
+        })
+        .unwrap();
+        for _ in 0..20 {
+            p.process(&mut buf);
+        }
+        assert!(buf.iter().all(|&s| s == 0.0));
+        h.send(EngineCommand::NoteOn {
+            slot: 0,
+            key: 60,
+            velocity: 1.0,
+        })
+        .unwrap();
+        p.process(&mut buf);
+        let first = buf.iter().position(|&s| s != 0.0).unwrap() / 2;
+        assert_eq!(first, crate::RENDER_QUANTUM, "played in the next block");
     }
 }

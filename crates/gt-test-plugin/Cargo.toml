@@ -17,7 +17,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 clack-plugin.workspace = true
-clack-extensions = { workspace = true, features = ["clack-plugin", "audio-ports", "note-ports", "params", "state", "latency", "gui", "timer"] }
+clack-extensions = { workspace = true, features = ["clack-plugin", "audio-ports", "note-ports", "params", "state", "latency", "gui", "timer", "preset-discovery"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb.workspace = true
