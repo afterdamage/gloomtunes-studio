@@ -694,6 +694,9 @@ impl GloomApp {
                 self.push_song();
                 self.pending_edit = Some("Edit pattern automation");
             }
+            PianoRollAction::AutomateParam(target) => {
+                self.on_param_request(ParamRequest::AutomatePattern(target));
+            }
             PianoRollAction::AuditionOn { key, velocity } => self.send(EngineCommand::NoteOn {
                 slot,
                 key,
@@ -1041,7 +1044,7 @@ impl GloomApp {
                     self.pending_edit = Some("Automate in pattern");
                 }
                 // Draw it in the piano roll's bottom lane; it plays wherever the pattern does.
-                self.roll.lane = Some(target);
+                self.roll.lane = gt_ui::views::Lane::Automation(target);
                 self.main_view = MainView::PianoRoll;
                 self.push_song();
             }
@@ -1145,6 +1148,10 @@ impl GloomApp {
             return Vec::new();
         };
         let (id, name) = (ch.id, ch.name.clone());
+        let params = ParamId::of_channel(ch)
+            .into_iter()
+            .map(|p| (p, p.name(&self.project)))
+            .collect();
         let bar_ticks = self.project.signatures.sig_of_bar(0).bar_ticks();
         let automation_names = self
             .project
@@ -1176,7 +1183,7 @@ impl GloomApp {
                 })
             })
             .collect();
-        let controls = pat.controls.get(&id).map_or(&[][..], Vec::as_slice);
+        let mut controls = pat.controls.remove(&id).unwrap_or_default();
         let automation = &mut pat.automation;
         let actions = piano_roll(
             ui,
@@ -1189,13 +1196,17 @@ impl GloomApp {
                 bar_ticks,
                 playhead,
                 channel_name: &name,
-                controls,
+                controls: &mut controls,
                 automation,
                 automation_names,
+                params,
             },
         );
         if !notes.is_empty() {
             pat.notes.insert(id, notes);
+        }
+        if !controls.is_empty() {
+            pat.controls.insert(id, controls);
         }
         pat.notes.retain(|_, v| !v.is_empty());
         actions

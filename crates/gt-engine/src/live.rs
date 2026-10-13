@@ -78,6 +78,13 @@ pub enum LiveKind {
     ModWheel(f32),
     /// Channel aftertouch, 0 to 1.
     Pressure(f32),
+    /// Another MIDI controller, 0 to 1 (plugins only).
+    Cc {
+        /// Controller number.
+        cc: u8,
+        /// Value.
+        value: f32,
+    },
     /// Polyphonic aftertouch on one key, 0 to 1.
     KeyPressure {
         /// MIDI key.
@@ -95,6 +102,7 @@ pub fn control_kind(kind: gt_core::ControlKind, value: f32) -> LiveKind {
         C::Sustain => LiveKind::Sustain(value >= 0.5),
         C::ModWheel => LiveKind::ModWheel(value),
         C::Pressure => LiveKind::Pressure(value),
+        C::Cc(cc) => LiveKind::Cc { cc, value },
     }
 }
 
@@ -254,6 +262,7 @@ fn pack(e: &LiveEvent) -> u64 {
         LiveKind::ModWheel(v) => (4, 0, v),
         LiveKind::Pressure(v) => (5, 0, v),
         LiveKind::KeyPressure { key, value } => (6, key, value),
+        LiveKind::Cc { cc, value } => (7, cc, value),
     };
     tag | u64::from(e.port) << 8
         | u64::from(e.channel) << 16
@@ -274,6 +283,7 @@ fn unpack(d: u64) -> Option<LiveEvent> {
         4 => LiveKind::ModWheel(value),
         5 => LiveKind::Pressure(value),
         6 => LiveKind::KeyPressure { key, value },
+        7 => LiveKind::Cc { cc: key, value },
         _ => return None,
     };
     Some(LiveEvent {

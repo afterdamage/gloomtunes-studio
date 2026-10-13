@@ -28,19 +28,32 @@ pub enum ControlKind {
     ModWheel,
     /// Channel aftertouch, 0 to 1.
     Pressure,
+    /// Any other MIDI controller (0 to [`MAX_LEARN_CC`]), 0 to 1 (Prompt 22). Plugin
+    /// instruments receive it as a control change; built-in instruments only follow CC 1
+    /// (as the mod wheel) and CC 64 (as the sustain pedal).
+    Cc(u8),
 }
 
 impl ControlKind {
-    /// Every kind, in display order.
+    /// The fixed kinds, in display order (every [`ControlKind::Cc`] comes after them).
     pub const ALL: [Self; 4] = [Self::Bend, Self::Sustain, Self::ModWheel, Self::Pressure];
 
-    /// Display name.
+    /// Display name ("MIDI CC" for every controller number; see [`Self::label`]).
     pub fn name(self) -> &'static str {
         match self {
             Self::Bend => "Pitch bend",
             Self::Sustain => "Sustain",
             Self::ModWheel => "Mod wheel",
             Self::Pressure => "Aftertouch",
+            Self::Cc(_) => "MIDI CC",
+        }
+    }
+
+    /// Display name with the controller number.
+    pub fn label(self) -> String {
+        match self {
+            Self::Cc(n) => format!("CC {n}"),
+            k => k.name().to_owned(),
         }
     }
 
@@ -53,14 +66,32 @@ impl ControlKind {
         }
     }
 
-    /// Code in project files.
+    /// Code in project files: 0 to 3 for the fixed kinds, 4 + the number for a CC.
     pub fn code(self) -> u8 {
-        self as u8
+        match self {
+            Self::Bend => 0,
+            Self::Sustain => 1,
+            Self::ModWheel => 2,
+            Self::Pressure => 3,
+            Self::Cc(n) => 4 + n.min(MAX_LEARN_CC),
+        }
     }
 
     /// The kind with file code `c`.
     pub fn from_code(c: u8) -> Option<Self> {
-        Self::ALL.get(usize::from(c)).copied()
+        match c {
+            0..=3 => Self::ALL.get(usize::from(c)).copied(),
+            _ => (c - 4 <= MAX_LEARN_CC).then_some(Self::Cc(c - 4)),
+        }
+    }
+
+    /// The controller as a CC lane: CC 1 and 64 are the mod wheel and sustain pedal.
+    pub fn of_cc(cc: u8) -> Self {
+        match cc {
+            1 => Self::ModWheel,
+            64 => Self::Sustain,
+            n => Self::Cc(n.min(MAX_LEARN_CC)),
+        }
     }
 }
 

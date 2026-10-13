@@ -1494,6 +1494,7 @@ impl AudioProcessor {
                 LiveKind::Sustain(down) => [0xB0, 64, if down { 127 } else { 0 }],
                 LiveKind::ModWheel(v) => [0xB0, 1, seven(v)],
                 LiveKind::Pressure(v) => [0xD0, seven(v), 0],
+                LiveKind::Cc { cc, value } => [0xB0, cc & 0x7F, seven(value)],
                 LiveKind::KeyPressure { key, value } => {
                     self.plugins.key_pressure(ch.plugin, offset, key, value);
                     return;
@@ -1509,7 +1510,7 @@ impl AudioProcessor {
             LiveKind::ModWheel(v) => ch.set_mod_wheel(v),
             LiveKind::Pressure(v) => ch.set_pressure(v),
             LiveKind::KeyPressure { key, value } => ch.set_key_pressure(key, value),
-            LiveKind::Note(_) => {}
+            LiveKind::Note(_) | LiveKind::Cc { .. } => {}
         }
     }
 

@@ -14,6 +14,7 @@ pub mod effects;
 pub mod midi;
 pub mod mixer;
 pub mod modulation;
+pub mod note_tools;
 pub mod param;
 pub mod params;
 pub mod peaks;

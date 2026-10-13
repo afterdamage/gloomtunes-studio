@@ -614,6 +614,16 @@ sound identical; the golden export test stays.
 - Limits: AU instruments ignore per-note values; quantize and humanize act on the edited
   channel only; chased notes start without their slide or portamento.
 
+### Prompt 22: Event lanes, note tools, generator
+- Bottom lane shows any note property, pitch bend, sustain, mod wheel, aftertouch, any MIDI
+  CC, or any automatable parameter of the channel's instrument; draw freehand, as lines or as
+  curves; stored per pattern (D124).
+- Tools menu with live preview and one undo step: arpeggiate, strum, chop, flam, glue, legato,
+  flip, randomize (seeded, in the scale), scale velocities; chord stamp with inversions on
+  click; chord progression and bassline generator from key, mode and style seed (D125).
+- Limits: built-in instruments ignore CCs other than 1 and 64; tools on the edited channel and
+  editable ghosts only; the generator writes triads only (no 7ths), one chord per bar.
+
 ---
 
 ## v1.0 scope
