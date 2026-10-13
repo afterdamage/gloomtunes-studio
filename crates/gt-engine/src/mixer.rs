@@ -12,7 +12,8 @@ use gt_core::mixer::FIRST_SEND;
 use gt_core::PluginInstanceId;
 use gt_core::{EffectKind, EffectSlot, Mixer, FX_SLOTS, MASTER, SENDS, STRIPS};
 use gt_dsp::fx::{
-    Chorus, Compressor, Delay, Distortion, Effect, FxContext, Limiter, ParamEq, Reverb, StereoWidth,
+    Bitcrusher, Chorus, Compressor, Delay, Distortion, Effect, Flanger, FxContext, Gate, Limiter,
+    MultiFilter, ParamEq, Phaser, Reverb, SoftClipper, StereoWidth, TransientShaper,
 };
 use gt_dsp::LinearRamp;
 
@@ -52,6 +53,13 @@ pub fn create_effect(slot: &EffectSlot, sample_rate: f32) -> EffectBox {
         EffectKind::Distortion => Box::new(Distortion::new(sr)),
         EffectKind::Limiter => Box::new(Limiter::new(sr)),
         EffectKind::Width => Box::new(StereoWidth::new(sr)),
+        EffectKind::Filter => Box::new(MultiFilter::new(sr)),
+        EffectKind::Gate => Box::new(Gate::new(sr)),
+        EffectKind::Flanger => Box::new(Flanger::new(sr)),
+        EffectKind::Phaser => Box::new(Phaser::new(sr)),
+        EffectKind::Bitcrusher => Box::new(Bitcrusher::new(sr)),
+        EffectKind::Clipper => Box::new(SoftClipper::new(sr)),
+        EffectKind::Transient => Box::new(TransientShaper::new(sr)),
         // Plugins run from the plugin table (`EngineCommand::SetPlugin`), not from a box.
         EffectKind::Plugin => Box::new(Passthrough),
     };
@@ -93,6 +101,8 @@ pub struct StripParams {
     pub sidechain: Option<u8>,
     /// Effect slots that are switched on.
     pub enabled: [bool; FX_SLOTS],
+    /// Wet/dry mix of each slot (1 = only the effect).
+    pub mix: [f32; FX_SLOTS],
     /// The plugin instance in each slot that holds a plugin.
     pub fx_plugin: [Option<PluginInstanceId>; FX_SLOTS],
 }
@@ -108,6 +118,7 @@ impl Default for StripParams {
             sends: [0.0; SENDS],
             sidechain: None,
             enabled: [true; FX_SLOTS],
+            mix: [1.0; FX_SLOTS],
             fx_plugin: [None; FX_SLOTS],
         }
     }
@@ -149,6 +160,7 @@ impl MixerParams {
                 sends: s.sends,
                 sidechain: s.sidechain.filter(|_| order.is_some()).map(|x| x as u8),
                 enabled: std::array::from_fn(|k| s.slots[k].as_ref().is_some_and(|x| x.enabled)),
+                mix: std::array::from_fn(|k| s.slots[k].as_ref().map_or(1.0, |x| x.mix)),
                 fx_plugin: std::array::from_fn(|k| {
                     s.slots[k]
                         .as_ref()
@@ -236,6 +248,25 @@ struct FxSlot {
     enabled: bool,
     /// 1 when the effect is heard, 0 when bypassed.
     wet: LinearRamp,
+    /// The slot's wet/dry mix.
+    mix: LinearRamp,
+    /// The dry signal delayed by the effect's latency, so a partial mix lines up.
+    dry_delay: PdcDelay,
+}
+
+impl FxSlot {
+    fn latency(&self) -> usize {
+        if self.plugin.is_some() {
+            self.plugin_latency
+        } else {
+            self.effect.as_ref().map_or(0, |e| e.0.latency())
+        }
+    }
+
+    /// True when the slot is heard: switched on with some of the effect in the mix.
+    fn active(&self) -> bool {
+        self.enabled && self.mix.target() > 0.0
+    }
 }
 
 struct Strip {
@@ -298,6 +329,8 @@ impl Strip {
                 plugin_latency: 0,
                 enabled: true,
                 wet: LinearRamp::new(1.0),
+                mix: LinearRamp::new(1.0),
+                dry_delay: PdcDelay::new(),
             }),
             params: StripParams::default(),
             auto_gain: None,
@@ -431,15 +464,25 @@ impl MixerEngine {
             for ((ramp_k, &level), auto) in s.sends.iter_mut().zip(&sp.sends).zip(&s.auto_sends) {
                 ramp_k.set_target(auto.unwrap_or(level).clamp(0.0, 1.0), ramp);
             }
-            for (slot, &on) in s.fx.iter_mut().zip(&sp.enabled) {
+            for ((slot, &on), &mix) in s.fx.iter_mut().zip(&sp.enabled).zip(&sp.mix) {
+                let latent = slot.latency() > 0;
                 if slot.enabled != on {
                     slot.enabled = on;
-                    let latent = slot.effect.as_ref().is_some_and(|e| e.0.latency() > 0)
-                        || slot.plugin_latency > 0;
                     // A latent effect switches at once: crossfading would mix two time-shifted
                     // copies of the signal.
                     slot.wet
                         .set_target(if on { 1.0 } else { 0.0 }, if latent { 0 } else { bypass });
+                }
+                let mix = if mix.is_finite() {
+                    mix.clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                if mix != slot.mix.target() {
+                    // Turning a latent slot's mix to or from zero changes the strip's latency,
+                    // so that step happens at once too; the dry path is aligned otherwise.
+                    let jump = latent && (mix == 0.0 || slot.mix.target() == 0.0);
+                    slot.mix.set_target(mix, if jump { 0 } else { ramp });
                 }
             }
         }
@@ -527,16 +570,30 @@ impl MixerEngine {
         old
     }
 
-    /// Sets one effect parameter.
-    pub(crate) fn set_effect_param(&mut self, strip: usize, slot: usize, index: usize, value: f32) {
-        if let Some(e) = self
+    /// Sets one effect parameter. Returns true if that changed the effect's latency (the gate's
+    /// look-ahead), in which case delay compensation has been recomputed.
+    pub(crate) fn set_effect_param(
+        &mut self,
+        strip: usize,
+        slot: usize,
+        index: usize,
+        value: f32,
+    ) -> bool {
+        let Some(e) = self
             .strips
             .get_mut(strip)
             .and_then(|s| s.fx.get_mut(slot))
             .and_then(|f| f.effect.as_mut())
-        {
-            e.0.set_param(index, value);
+        else {
+            return false;
+        };
+        let before = e.0.latency();
+        e.0.set_param(index, value);
+        if e.0.latency() == before {
+            return false;
         }
+        self.update_latency();
+        true
     }
 
     /// Points every slot at the plugin table entry running its plugin (after the mixer
@@ -636,15 +693,13 @@ impl MixerEngine {
         for s in &mut self.strips {
             s.fx_latency =
                 s.fx.iter()
-                    .filter(|f| f.enabled)
-                    .map(|f| {
-                        if f.plugin.is_some() {
-                            f.plugin_latency
-                        } else {
-                            f.effect.as_ref().map_or(0, |e| e.0.latency())
-                        }
-                    })
+                    .filter(|f| f.active())
+                    .map(FxSlot::latency)
                     .sum();
+            for f in &mut s.fx {
+                let d = f.latency();
+                f.dry_delay.set_delay(d);
+            }
         }
         for &s in &self.order {
             let s = usize::from(s);
@@ -816,9 +871,17 @@ impl MixerEngine {
             if wet_settled && slot.wet.value() == 0.0 {
                 continue;
             }
-            if !wet_settled {
+            // A slot mixed fully dry is skipped exactly like a bypassed one.
+            let mix_settled = slot.mix.is_settled();
+            if mix_settled && slot.mix.value() == 0.0 {
+                continue;
+            }
+            let blend = !wet_settled || !mix_settled || slot.mix.value() < 1.0;
+            // A latent slot's dry line runs all the time, so it is full when a blend starts.
+            if blend || slot.latency() > 0 {
                 self.dry_l = l;
                 self.dry_r = r;
+                slot.dry_delay.process(&mut self.dry_l, &mut self.dry_r);
             }
             let mut meter = 0.0;
             if slot.plugin.is_some() {
@@ -827,9 +890,9 @@ impl MixerEngine {
                 fx.0.process(&mut l, &mut r, &ctx);
                 meter = fx.0.meter();
             }
-            if !wet_settled {
+            if blend {
                 for i in 0..Q {
-                    let w = slot.wet.next_value();
+                    let w = slot.wet.next_value() * slot.mix.next_value();
                     l[i] = self.dry_l[i] + (l[i] - self.dry_l[i]) * w;
                     r[i] = self.dry_r[i] + (r[i] - self.dry_r[i]) * w;
                 }

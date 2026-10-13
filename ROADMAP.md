@@ -583,6 +583,15 @@ sound identical; the golden export test stays.
   saved and preset-loaded like the other formats. Limits: no AU editor windows (sliders only),
   no AU extra outputs or MIDI out, no AUv3.
 
+### Prompt 19: Effects pack I
+- New mixer effects (D118), each with presets: multi-mode filter (LP/HP/BP/notch, 12 or
+  24 dB/oct, drive, envelope and tempo-synced LFO on cutoff), gate/expander (look-ahead,
+  sidechain), flanger and phaser (2 to 12 stages, tempo sync), bitcrusher (anti-alias option),
+  soft clipper (4 curves, 2x/4x oversampling) and transient shaper.
+- Every effect slot has a wet/dry Mix knob (D119), lined up with the effect's latency; 0 % is
+  the same as bypass.
+- Limits: LFOs run free rather than locked to the song position; slot mix is not automatable.
+
 ---
 
 ## v1.0 scope

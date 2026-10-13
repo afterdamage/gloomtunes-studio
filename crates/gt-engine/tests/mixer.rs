@@ -223,3 +223,79 @@ fn replaced_effects_and_mixer_boxes_come_back_as_garbage() {
     // Two replaced EQs and one mixer box.
     assert_eq!(h.collect_garbage(), 3);
 }
+
+/// Plays a 1 kHz tone through insert 1 holding `slot` (or bypassing it) and returns 4096
+/// frames of the master with the reported latency.
+fn through_slot(slot: &EffectSlot) -> (Vec<f32>, usize) {
+    let (mut h, mut p) = engine();
+    let mut m = Mixer::new();
+    m.strips[1].slots[0] = Some(slot.clone());
+    mixer(&mut h, &m);
+    h.send(EngineCommand::SetEffect {
+        strip: 1,
+        slot: 0,
+        effect: Some(create_effect(slot, SR as f32)),
+    })
+    .unwrap();
+    let tone: Vec<f32> = (0..9600)
+        .map(|i| 0.5 * (std::f32::consts::TAU * 1000.0 * i as f32 / SR as f32).sin())
+        .collect();
+    h.send(EngineCommand::SetChannelSample {
+        slot: 0,
+        sample: Some(Arc::new(SampleData::mono(SR, tone))),
+    })
+    .unwrap();
+    h.send(EngineCommand::SetChannelParams {
+        slot: 0,
+        params: Box::new(ChannelParams {
+            gain: 1.0,
+            route: 1,
+            ..ChannelParams::default()
+        }),
+    })
+    .unwrap();
+    render(&mut p, 2048);
+    hit(&mut h, 0);
+    let out = render(&mut p, 4096);
+    (
+        out,
+        h.telemetry().latency_frames.load(Ordering::Relaxed) as usize,
+    )
+}
+
+#[test]
+fn a_slot_mixed_fully_dry_is_bit_identical_to_bypass() {
+    for kind in EffectKind::ALL {
+        let mut off = EffectSlot::new(kind);
+        off.enabled = false;
+        let mut dry = EffectSlot::new(kind);
+        dry.mix = 0.0;
+        assert_eq!(through_slot(&off), through_slot(&dry), "{}", kind.key());
+    }
+}
+
+#[test]
+fn a_partial_mix_lines_the_dry_signal_up_with_a_latent_effect() {
+    // A gate that is always open with 2 ms look-ahead: wet is the input 96 frames late.
+    let gate = EffectSlot::new(EffectKind::Gate)
+        .with("threshold", -80.0)
+        .with("attack", 0.01)
+        .with("lookahead", 2.0);
+    let (wet, latency) = through_slot(&gate);
+    assert_eq!(latency, 96);
+    let mut half = gate.clone();
+    half.mix = 0.5;
+    let (mixed, latency) = through_slot(&half);
+    assert_eq!(latency, 96);
+    // Dry and wet line up, so half of each is the same signal (no comb filtering).
+    let settled = 1024..4096;
+    let err = wet[settled.clone()]
+        .iter()
+        .zip(&mixed[settled])
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(err < 1e-5, "{err}");
+    // Mixed fully dry, the slot adds no latency.
+    half.mix = 0.0;
+    assert_eq!(through_slot(&half).1, 0);
+}
