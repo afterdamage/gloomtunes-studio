@@ -4,7 +4,7 @@
 use egui::{pos2, vec2, RichText, Sense, Stroke, Ui};
 use gt_core::{ChannelId, ChannelParam, LoopMode, ParamId, SamplerSettings};
 
-use crate::param_ui::param_menu;
+use crate::param_ui::{param_live, param_menu};
 use crate::widgets::labeled_knob;
 use crate::GloomTheme;
 
@@ -38,7 +38,9 @@ pub fn sampler_panel(
     let dim = |s: &str| RichText::new(s).color(theme.text_dim);
     let menu = |r: egui::Response, param: ChannelParam| {
         if let Some(channel) = view.channel {
-            param_menu(theme, &r, ParamId::Channel { channel, param });
+            let id = ParamId::Channel { channel, param };
+            param_menu(theme, &r, id);
+            param_live(theme, &r, id, |v| param.info().to_normalized(v));
         }
         r.changed()
     };

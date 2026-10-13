@@ -136,6 +136,8 @@ impl AudioPlay {
 /// shaped by their curves, holding the first and last values outside them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AutoLane {
+    /// The parameter (for the UI's live values).
+    pub target: ParamId,
     /// Where the parameter lives.
     pub dest: ParamDest,
     /// Range and taper, to turn normalized values into plain ones.
@@ -470,6 +472,7 @@ impl SongSnapshot {
             .into_iter()
             .filter_map(|(target, spans)| {
                 Some(AutoLane {
+                    target,
                     dest: ParamDest::resolve(&target, project)?,
                     info: *target.info(),
                     points: lane_points(spans),

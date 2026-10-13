@@ -95,6 +95,8 @@ pub struct MidiPrefs {
     pub record_mode: String,
     /// "merge" or "stack".
     pub loop_passes: String,
+    /// "latch", "touch" or "write".
+    pub automation_mode: String,
 }
 
 impl Default for MidiPrefs {
@@ -108,6 +110,7 @@ impl Default for MidiPrefs {
             octave: m.octave,
             record_mode: m.mode.key().to_owned(),
             loop_passes: m.passes.key().to_owned(),
+            automation_mode: m.automation.key().to_owned(),
         }
     }
 }

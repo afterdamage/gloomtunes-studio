@@ -31,6 +31,7 @@ use gt_ui::views::{FirstRunState, SettingsPage, ShortcutEditorState};
 use gt_ui::widgets::MeterBallistics;
 use gt_ui::{Command, GloomTheme, Keymap};
 
+mod automate;
 mod bounce;
 mod midi;
 mod plugins;
@@ -187,6 +188,8 @@ pub struct GloomApp {
     fresh_engine: bool,
     /// Audio recording: input routes, the session, the latency measurement.
     record: record::RecordState,
+    /// Automation recording and live values.
+    auto: automate::AutoState,
 }
 
 /// What the plugin panels show for plugin `id`.
@@ -316,6 +319,7 @@ impl GloomApp {
                 octave: settings.midi.octave,
                 mode: gt_ui::views::RecordMode::from_key(&settings.midi.record_mode),
                 passes: gt_ui::views::LoopPasses::from_key(&settings.midi.loop_passes),
+                automation: gt_ui::views::AutoMode::from_key(&settings.midi.automation_mode),
                 ..MidiPanelModel::default()
             },
             sent_live_slot: None,
@@ -329,6 +333,7 @@ impl GloomApp {
             plugin_slot: None,
             fresh_engine: false,
             record: record::RecordState::default(),
+            auto: automate::AutoState::default(),
             settings,
         };
         for port in &app.settings.midi.disabled_ports {
@@ -443,12 +448,14 @@ impl GloomApp {
         } else {
             SongSnapshot::compile(&self.project)
         };
+        let lanes = song.automation.iter().map(|l| l.target).collect();
         let automated: Vec<(usize, usize, usize)> = song
             .automation
             .iter()
             .filter_map(|l| effect_of(&l.dest))
             .collect();
         if self.try_send(EngineCommand::SetSong(Box::new(song))) {
+            self.auto.lanes = lanes;
             let old = std::mem::replace(&mut self.lane_fx, automated);
             self.release_fx(old);
         }
@@ -894,6 +901,7 @@ impl GloomApp {
             return;
         }
         let plan = ModPlan::compile(p);
+        let targets = plan.targets.iter().map(|t| t.target).collect();
         let modulated: Vec<(usize, usize, usize)> = plan
             .targets
             .iter()
@@ -901,6 +909,7 @@ impl GloomApp {
             .collect();
         if self.try_send(EngineCommand::SetModulation(Box::new(plan))) {
             self.sent_mods = Some(key);
+            self.auto.mods = targets;
             let old = std::mem::replace(&mut self.mod_fx, modulated);
             self.release_fx(old);
         }
@@ -1874,6 +1883,7 @@ impl eframe::App for GloomApp {
         self.transport.bpm = self.project.tempo.bpm_at(self.transport.position);
         self.transport.time_sig = self.project.signatures.sig_at(self.transport.position);
         param_ui::set_marks(&ctx, std::sync::Arc::new(self.param_marks()));
+        self.publish_live_values(&ctx);
         // Before any shortcut: in piano mode the typing keyboard takes its keys first.
         self.live_frame(&ctx, dt);
         self.record_frame();
@@ -2223,7 +2233,8 @@ impl eframe::App for GloomApp {
         if let Some(req) = param_ui::take_request(&ctx) {
             self.on_param_request(req);
         }
-        self.sync_plugins(&ctx);
+        let plugin_moves = self.sync_plugins(&ctx);
+        self.automation_frame(&ctx, &plugin_moves);
         self.sync_mixer();
         self.sync_modulation();
         if self.main_view != MainView::PianoRoll {

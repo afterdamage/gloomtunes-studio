@@ -10,7 +10,7 @@ use gt_core::{
 };
 use gt_dsp::fx::{eq_band_response, BandType};
 
-use crate::param_ui::param_menu;
+use crate::param_ui::{param_live, param_menu};
 use crate::views::plugins::{plugin_controls, PluginAction, PluginPanelView, PluginState};
 use crate::widgets::{fader, format_gain, format_pan, knob, param_knob, stereo_meter};
 use crate::GloomTheme;
@@ -201,6 +201,9 @@ fn strip(
                         vec2(30.0, meter_h),
                     );
                     param_menu(theme, &r, ParamId::strip_volume(i));
+                    param_live(theme, &r, ParamId::strip_volume(i), |v| {
+                        crate::widgets::fader_position(v, MixerStrip::MAX_VOLUME)
+                    });
                     if r.changed() {
                         s.volume = v;
                         changed = true;
@@ -211,6 +214,7 @@ fn strip(
                     format!("Pan {}", format_pan(p))
                 });
                 param_menu(theme, &r, ParamId::strip_pan(i));
+                param_live(theme, &r, ParamId::strip_pan(i), |v| (v + 1.0) * 0.5);
                 if r.changed() {
                     s.pan = pan;
                     changed = true;
@@ -389,14 +393,12 @@ fn detail(
                         },
                     )
                     .inner;
-                param_menu(
-                    theme,
-                    &r,
-                    ParamId::Strip {
-                        strip: i,
-                        param: StripParam::Send(k),
-                    },
-                );
+                let send = ParamId::Strip {
+                    strip: i,
+                    param: StripParam::Send(k),
+                };
+                param_menu(theme, &r, send);
+                param_live(theme, &r, send, |v| v);
                 if r.changed() {
                     mixer.strips[i].sends[k] = v;
                     changed = true;

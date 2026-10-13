@@ -36,6 +36,9 @@ pub struct MidiCc {
     pub cc: u8,
     /// Value 0 to 127.
     pub value: u8,
+    /// When it arrived on [`gt_engine::clock_ns`]'s clock (0 until stamped), so recorded
+    /// automation lands where a live note sent at the same moment would play (D111).
+    pub at_ns: u64,
 }
 
 /// One input port as the settings panel shows it.
@@ -86,6 +89,7 @@ fn decode(msg: &[u8]) -> Option<MidiIn> {
                 channel,
                 cc: cc & 0x7F,
                 value: value & 0x7F,
+                at_ns: 0,
             };
             match c.cc {
                 1 => Some(MidiIn::Both(LiveKind::ModWheel(unit(value)), c)),
@@ -346,7 +350,11 @@ fn connect(
             &format!("{CLIENT_NAME} in"),
             move |_stamp, msg, state: &mut PortState| {
                 shared.activity.fetch_add(1, Ordering::Relaxed);
-                let to_ui = |cc| {
+                let to_ui = |cc: MidiCc| {
+                    let cc = MidiCc {
+                        at_ns: gt_engine::clock_ns(),
+                        ..cc
+                    };
                     if tx.send(cc).is_ok() {
                         ctx.request_repaint();
                     }
@@ -388,7 +396,8 @@ mod tests {
             Some(MidiIn::Cc(MidiCc {
                 channel: 2,
                 cc: 74,
-                value: 100
+                value: 100,
+                at_ns: 0,
             }))
         );
         assert_eq!(decode(&[0xB5, 123, 0]), Some(MidiIn::AllOff(5)));

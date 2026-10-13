@@ -14,8 +14,9 @@ use super::{GloomApp, MainView};
 
 impl GloomApp {
     /// Once per frame, after the views: keeps the running plugins in step with the document
-    /// and the engine, and runs their main-thread work.
-    pub(super) fn sync_plugins(&mut self, ctx: &egui::Context) {
+    /// and the engine, and runs their main-thread work. Returns the parameters plugins moved
+    /// themselves (their editors).
+    pub(super) fn sync_plugins(&mut self, ctx: &egui::Context) -> Vec<gt_core::ParamId> {
         let fresh = std::mem::take(&mut self.fresh_engine);
         let out = self
             .plugins
@@ -30,6 +31,7 @@ impl GloomApp {
         if let Some(next) = self.plugins.next_frame() {
             ctx.request_repaint_after(next);
         }
+        out.moved
     }
 
     /// Where the browser adds an effect: the slot chosen with "Plugin…", else the open slot

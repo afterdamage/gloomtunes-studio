@@ -76,6 +76,59 @@ impl LoopPasses {
     }
 }
 
+/// How moving a control while recording in song mode writes automation (D111).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutoMode {
+    /// Writing starts when the control is touched and goes on with its last value after
+    /// release, until the transport stops.
+    #[default]
+    Latch,
+    /// Writing lasts while the control is held; on release the old automation plays again.
+    Touch,
+    /// Every control moved during the pass is written from where recording started to where
+    /// it stopped.
+    Write,
+}
+
+impl AutoMode {
+    /// Every mode, in menu order.
+    pub const ALL: [Self; 3] = [Self::Latch, Self::Touch, Self::Write];
+
+    /// Name in settings files.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Latch => "latch",
+            Self::Touch => "touch",
+            Self::Write => "write",
+        }
+    }
+
+    /// Menu name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Latch => "Latch",
+            Self::Touch => "Touch",
+            Self::Write => "Write",
+        }
+    }
+
+    /// The mode named `key` (latch for anything else).
+    pub fn from_key(key: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|m| m.key() == key)
+            .unwrap_or_default()
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Latch => "Writes from the first touch until the transport stops",
+            Self::Touch => "Writes while you hold the control, then returns to the old automation",
+            Self::Write => "Writes every control you move over the whole recorded stretch",
+        }
+    }
+}
+
 /// One input route: a port (and MIDI channel) that plays a fixed rack channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MidiRouteRow {
@@ -108,6 +161,8 @@ pub struct MidiPanelModel {
     pub mode: RecordMode,
     /// Merge or stack loop passes.
     pub passes: LoopPasses,
+    /// How control moves are written as automation.
+    pub automation: AutoMode,
     /// Input routes; anything not routed plays the selected channel.
     pub routes: Vec<MidiRouteRow>,
     /// Rack channel names, for route targets.
@@ -126,6 +181,7 @@ impl Default for MidiPanelModel {
             octave: 3,
             mode: RecordMode::Overdub,
             passes: LoopPasses::Merge,
+            automation: AutoMode::Latch,
             routes: Vec::new(),
             channels: Vec::new(),
         }
@@ -196,6 +252,14 @@ pub fn midi_panel(ui: &mut Ui, theme: &GloomTheme, m: &mut MidiPanelModel) -> Ve
                         "Each pass around the pattern is kept as its own copy (\"take 1\", \
                      \"take 2\" …); the last pass stays in the pattern",
                     );
+            });
+            ui.end_row();
+            ui.label(dim("Automation"));
+            ui.horizontal(|ui| {
+                for mode in AutoMode::ALL {
+                    ui.selectable_value(&mut m.automation, mode, mode.name())
+                        .on_hover_text(mode.hint());
+                }
             });
             ui.end_row();
             ui.label(dim("Count-in"));

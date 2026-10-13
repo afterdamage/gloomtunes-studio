@@ -450,6 +450,7 @@ impl GloomApp {
             octave: m.octave,
             record_mode: m.mode.key().to_owned(),
             loop_passes: m.passes.key().to_owned(),
+            automation_mode: m.automation.key().to_owned(),
         };
         s.set_keymap(&self.keymap);
         s.theme = ThemePrefs::from_theme(&self.theme);

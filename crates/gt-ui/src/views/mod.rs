@@ -24,7 +24,8 @@ pub use input_panel::{
     input_menu, input_panel, offered_inputs, InputAction, InputPanelModel, PairMode,
 };
 pub use midi_panel::{
-    midi_panel, LoopPasses, MidiAction, MidiPanelModel, MidiPortRow, MidiRouteRow, RecordMode,
+    midi_panel, AutoMode, LoopPasses, MidiAction, MidiPanelModel, MidiPortRow, MidiRouteRow,
+    RecordMode,
 };
 pub use mixer::{mixer_view, MixerState, MixerView, StripMeter};
 pub use modulators::{modulators_panel, ModulatorsState};

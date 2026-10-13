@@ -143,6 +143,13 @@ pub struct Telemetry {
     pub recording: AtomicBool,
     /// Frames in the take being recorded.
     pub record_frames: AtomicU64,
+    /// The plain value each automation lane of the current song last set, by lane index (NaN:
+    /// not set since the song changed). Lanes past [`MAX_LIVE_VALUES`] are not reported.
+    pub lane_values: [AtomicF32; MAX_LIVE_VALUES],
+    /// The plain value each modulation target last took, by target index, as `lane_values`.
+    pub mod_values: [AtomicF32; MAX_LIVE_VALUES],
+    /// Song position against the [`clock_ns`] clock while playing.
+    pub anchor: ClockAnchor,
     /// Times recorded audio could not be handed to the disk writer (its ring was full).
     pub record_gaps: AtomicU32,
 }
@@ -160,6 +167,57 @@ pub struct MeterCell {
 
 /// Length of the oscilloscope ring buffer in samples.
 pub const SCOPE_LEN: usize = 4096;
+
+/// Automation lanes and modulation targets whose live values [`Telemetry`] reports.
+pub const MAX_LIVE_VALUES: usize = 512;
+
+/// Where the song was at a moment of the [`clock_ns`] clock: something that happened at
+/// `at_ns` is at the tick a live event arriving then plays at (one device period later,
+/// D109). Written by the audio thread once per callback, read by the UI without locks
+/// (a sequence counter tells a torn read, which is retried).
+#[derive(Debug, Default)]
+pub struct ClockAnchor {
+    seq: AtomicU64,
+    ns: AtomicU64,
+    tick: AtomicU64,
+    rate: AtomicU64,
+}
+
+impl ClockAnchor {
+    /// The song was at `tick` (NaN: not playing) at `ns`, moving `ticks_per_ns`. One writer.
+    pub fn publish(&self, ns: u64, tick: f64, ticks_per_ns: f64) {
+        let s = self.seq.load(Ordering::Relaxed);
+        self.seq.store(s + 1, Ordering::Relaxed);
+        std::sync::atomic::fence(Ordering::Release);
+        self.ns.store(ns, Ordering::Relaxed);
+        self.tick.store(tick.to_bits(), Ordering::Relaxed);
+        self.rate.store(ticks_per_ns.to_bits(), Ordering::Relaxed);
+        self.seq.store(s + 2, Ordering::Release);
+    }
+
+    /// The song tick something that happened at `at_ns` belongs to, while playing.
+    pub fn tick_at(&self, at_ns: u64) -> Option<f64> {
+        for _ in 0..64 {
+            let s = self.seq.load(Ordering::Acquire);
+            if s % 2 == 1 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let ns = self.ns.load(Ordering::Relaxed);
+            let tick = f64::from_bits(self.tick.load(Ordering::Relaxed));
+            let rate = f64::from_bits(self.rate.load(Ordering::Relaxed));
+            std::sync::atomic::fence(Ordering::Acquire);
+            if self.seq.load(Ordering::Relaxed) != s {
+                continue;
+            }
+            if s == 0 || tick.is_nan() {
+                return None;
+            }
+            return Some(tick + (at_ns as f64 - ns as f64) * rate);
+        }
+        None
+    }
+}
 
 impl Default for Telemetry {
     fn default() -> Self {
@@ -192,6 +250,9 @@ impl Default for Telemetry {
             input_latency: AtomicU32::default(),
             recording: AtomicBool::default(),
             record_frames: AtomicU64::default(),
+            lane_values: std::array::from_fn(|_| AtomicF32::new(f32::NAN)),
+            mod_values: std::array::from_fn(|_| AtomicF32::new(f32::NAN)),
+            anchor: ClockAnchor::default(),
             record_gaps: AtomicU32::default(),
         }
     }

@@ -123,6 +123,8 @@ pub struct AudioProcessor {
     live_slot: Option<u16>,
     /// Where each input port and MIDI channel plays.
     live_routes: Box<LiveRoutes>,
+    /// Parameters being recorded: their lanes do not play.
+    writing: Vec<ParamDest>,
     /// Per source, MIDI channel and key, the slot + 1 holding a live note (0: none).
     live_held: Box<[u16]>,
     /// Live events waiting for their frame: (engine frame, event), in arrival order.
@@ -208,6 +210,7 @@ impl AudioProcessor {
             count_in: None,
             live_slot: None,
             live_routes: Box::default(),
+            writing: Vec::new(),
             live_held: vec![0; LIVE_SOURCES * 16 * 128].into_boxed_slice(),
             live_wait: Box::new([(0, LiveEvent::from(crate::LiveNote::off(0))); LIVE_WAIT]),
             live_wait_len: 0,
@@ -298,6 +301,7 @@ impl AudioProcessor {
         }
         out[frames * ch..].fill(0.0);
 
+        self.publish_anchor();
         let t = &*self.telemetry;
         t.last_block_frames.store(frames as u32, Ordering::Relaxed);
         t.blocks.fetch_add(1, Ordering::Relaxed);
@@ -737,18 +741,27 @@ impl AudioProcessor {
         self.control_tick = tick.unwrap_or(f64::NAN);
         let lane_tick = tick.filter(|_| has_lanes);
         let ramp = Q as u32;
+        let writing = &self.writing;
         if let (Some(t), Some(song)) = (lane_tick, song) {
-            for lane in song.automation.iter().filter(|l| !l.modulated) {
+            for (i, lane) in song.automation.iter().enumerate() {
+                if lane.modulated || writing.contains(&lane.dest) {
+                    continue;
+                }
                 for (at, frames) in jump.map(|j| (j, 0)).into_iter().chain([(t, ramp)]) {
-                    let v = gt_core::playlist::value_at(&lane.points, at);
+                    let v = lane
+                        .info
+                        .from_normalized(gt_core::playlist::value_at(&lane.points, at));
                     apply_param(
                         &mut self.channels,
                         &mut self.mixer,
                         &mut self.plugins,
                         lane.dest,
-                        lane.info.from_normalized(v),
+                        v,
                         frames,
                     );
+                    if let Some(cell) = self.telemetry.lane_values.get(i) {
+                        cell.store(v, Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -761,7 +774,7 @@ impl AudioProcessor {
                 aftertouch: 0.0,
             };
             let live_slot = self.live_slot;
-            for target in &mut plan.targets {
+            for (i, target) in plan.targets.iter_mut().enumerate() {
                 // MIDI sources follow the target's own channel, else the selected one.
                 let slot = match target.dest {
                     ParamDest::Channel { slot, .. }
@@ -778,14 +791,15 @@ impl AudioProcessor {
                     aftertouch: expr.pressure,
                     ..clock
                 };
-                let base_at = |t: Option<f64>| match (target.lane, t.filter(|_| has_lanes), song) {
+                let lane = target.lane.filter(|_| !writing.contains(&target.dest));
+                let base_at = |t: Option<f64>| match (lane, t.filter(|_| has_lanes), song) {
                     (Some(i), Some(t), Some(song)) => song
                         .automation
                         .get(i)
                         .map_or(target.base, |l| gt_core::playlist::value_at(&l.points, t)),
                     _ => target.base,
                 };
-                if jump.is_some() && target.lane.is_some() {
+                if jump.is_some() && lane.is_some() {
                     let prev: f32 = target
                         .mods
                         .iter()
@@ -815,6 +829,12 @@ impl AudioProcessor {
                     target.info.from_normalized(v.clamp(0.0, 1.0)),
                     ramp,
                 );
+                if let Some(cell) = self.telemetry.mod_values.get(i) {
+                    cell.store(
+                        target.info.from_normalized(v.clamp(0.0, 1.0)),
+                        Ordering::Relaxed,
+                    );
+                }
             }
         }
         for ch in &mut self.channels {
@@ -942,15 +962,18 @@ impl AudioProcessor {
                     self.retire(Garbage::Song(old));
                 }
                 self.link_lanes();
+                forget_values(&self.telemetry.lane_values);
             }
             EngineCommand::UpdateSong(song) => {
                 if let Some(old) = self.song.replace(song) {
                     self.retire(Garbage::Song(old));
                 }
                 self.link_lanes();
+                forget_values(&self.telemetry.lane_values);
             }
             EngineCommand::SetModulation(mut plan) => {
                 self.clear_controls();
+                forget_values(&self.telemetry.mod_values);
                 if let Some(old) = self.mods.take() {
                     plan.inherit(&old);
                     self.retire(Garbage::Modulation(old));
@@ -1069,6 +1092,14 @@ impl AudioProcessor {
             EngineCommand::SetLiveRoutes(routes) => {
                 let old = std::mem::replace(&mut self.live_routes, routes);
                 self.retire(Garbage::LiveRoutes(old));
+            }
+            EngineCommand::SetWriting(mut list) => {
+                // The old list goes back in the box, so nothing is freed here.
+                std::mem::swap(&mut *list, &mut self.writing);
+                self.retire(Garbage::Writing(list));
+                // Lanes that stop playing leave the document value; those that resume set
+                // theirs again in the next quantum.
+                self.clear_controls();
             }
             EngineCommand::CountIn { bars } => self.start_count_in(bars),
             EngineCommand::SetInput(feed) => {
@@ -1214,6 +1245,20 @@ impl AudioProcessor {
             }
         }
         self.live_wait_len = kept;
+    }
+
+    /// Tells the UI where the song is against the clock, after a callback: an event that
+    /// arrives as the callback starts plays at the next callback's first frame.
+    fn publish_anchor(&self) {
+        let next = self.cb_out + self.cb_frames;
+        let playing = self.transport.state() == TransportState::Playing;
+        let tick = if playing {
+            self.transport.position_at(next)
+        } else {
+            f64::NAN
+        };
+        let rate = self.transport.bpm_at(next) / 60.0 * gt_core::PPQ as f64 / 1e9;
+        self.telemetry.anchor.publish(self.cb_ns, tick, rate);
     }
 
     /// The engine frame where an event that arrived at `at_ns` plays.
@@ -1438,6 +1483,13 @@ fn apply_param(
             value,
         ),
         ParamDest::Plugin { instance, index } => plugins.set_param(instance, index, value),
+    }
+}
+
+/// Marks live values unknown (their lanes or targets changed).
+fn forget_values(cells: &[crate::AtomicF32]) {
+    for c in cells {
+        c.store(f32::NAN, Ordering::Relaxed);
     }
 }
 
@@ -1838,6 +1890,92 @@ mod tests {
         let mut tail = vec![0.0; 48_000];
         p.process(&mut tail);
         assert!(tail[40_000..].iter().all(|s| s.abs() < 1e-4));
+    }
+
+    #[test]
+    fn the_clock_anchor_places_a_moment_where_a_live_event_then_plays() {
+        let (mut h, mut p, live) = live_synth(&[0]);
+        h.send(EngineCommand::SetLiveChannel(Some(0))).unwrap();
+        h.send(EngineCommand::Play).unwrap();
+        let ms = 1_000_000;
+        let t = std::sync::Arc::clone(&p.telemetry);
+        let mut buf = vec![0.0; 480];
+        assert_eq!(t.anchor.tick_at(1_000 * ms), None, "nothing published yet");
+        for k in 0..5 {
+            p.process_at(&mut buf, (1_000 + 10 * k) * ms);
+        }
+        // A moment 2.5 ms into the period after the last callback.
+        let at = 1_042 * ms + ms / 2;
+        let expected = t.anchor.tick_at(at).unwrap();
+        live.send(crate::LiveEvent {
+            kind: crate::LiveKind::Note(crate::LiveNote::on(60, 1.0)),
+            port: 0,
+            channel: 0,
+            at_ns: at,
+        });
+        p.process_at(&mut buf, 1_050 * ms);
+        p.process_at(&mut buf, 1_060 * ms);
+        let mut ticks = Vec::new();
+        h.poll_events(|e| {
+            if let crate::EngineEvent::LiveNote { tick, .. } = e {
+                ticks.push(tick);
+            }
+        });
+        assert_eq!(ticks.len(), 1);
+        assert!(
+            (ticks[0] - expected).abs() < 0.05,
+            "{} vs {expected}",
+            ticks[0]
+        );
+        // Stopped: no position.
+        h.send(EngineCommand::Stop).unwrap();
+        p.process_at(&mut buf, 1_070 * ms);
+        assert_eq!(t.anchor.tick_at(1_070 * ms), None);
+    }
+
+    #[test]
+    fn lanes_report_their_values_and_stop_while_their_parameter_is_written() {
+        use gt_core::{AutoPoint, Automation, ClipKind, ParamId};
+        let (mut h, mut p) = engine(48_000, 2);
+        let mut project = gt_core::Project::demo();
+        let track = project.playlist.tracks[6].id;
+        let target = ParamId::strip_pan(2);
+        project.playlist.add_clip(
+            track,
+            0,
+            3840,
+            ClipKind::Automation(Automation {
+                target,
+                points: vec![AutoPoint::new(0, 0.75)],
+            }),
+        );
+        let song = crate::SongSnapshot::compile_song(&project, |_| None);
+        let i = song
+            .automation
+            .iter()
+            .position(|l| l.target == target)
+            .unwrap();
+        let dest = song.automation[i].dest;
+        h.send(EngineCommand::SetSong(Box::new(song))).unwrap();
+        h.send(EngineCommand::Play).unwrap();
+        let t = std::sync::Arc::clone(&p.telemetry);
+        let cell = &t.lane_values[i];
+        assert!(cell.load(Ordering::Relaxed).is_nan());
+        let mut buf = vec![0.0; 960];
+        p.process(&mut buf);
+        assert!(
+            (cell.load(Ordering::Relaxed) - 0.5).abs() < 1e-6,
+            "pan 0.75 is +0.5"
+        );
+        // Written: the lane is not applied (its value is not reported) until writing ends.
+        h.send(EngineCommand::SetWriting(Box::new(vec![dest])))
+            .unwrap();
+        cell.store(9.0, Ordering::Relaxed);
+        p.process(&mut buf);
+        assert_eq!(cell.load(Ordering::Relaxed), 9.0);
+        h.send(EngineCommand::SetWriting(Box::default())).unwrap();
+        p.process(&mut buf);
+        assert!((cell.load(Ordering::Relaxed) - 0.5).abs() < 1e-6);
     }
 
     /// A synth on `slot` with the metronome off and a connected live input.
