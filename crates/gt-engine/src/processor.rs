@@ -721,7 +721,12 @@ impl AudioProcessor {
     /// the quantum, so between control points they move sample by sample.
     fn apply_controls(&mut self) {
         let song = self.song.as_deref();
-        let has_lanes = song.is_some_and(|s| !s.repeat && !s.automation.is_empty());
+        let has_lanes = song.is_some_and(|s| !s.automation.is_empty());
+        // Pattern mode: the pattern's lanes repeat with it (D112).
+        let wrap = |t: f64| match song {
+            Some(s) if s.repeat && s.length > 0 => t.rem_euclid(s.length as f64),
+            _ => t,
+        };
         if !has_lanes && self.mods.is_none() {
             return;
         }
@@ -736,10 +741,11 @@ impl AudioProcessor {
         });
         // Playback started, located or wrapped exactly here: lanes jump to their value at the
         // new position first, so the first ramp does not start from wherever they were.
-        let jump =
-            start.filter(|t| (t - self.control_tick).abs() > 0.5 || self.control_tick.is_nan());
-        self.control_tick = tick.unwrap_or(f64::NAN);
-        let lane_tick = tick.filter(|_| has_lanes);
+        let jump = start
+            .map(wrap)
+            .filter(|t| (t - self.control_tick).abs() > 0.5 || self.control_tick.is_nan());
+        self.control_tick = tick.map_or(f64::NAN, wrap);
+        let lane_tick = tick.filter(|_| has_lanes).map(wrap);
         let ramp = Q as u32;
         let writing = &self.writing;
         if let (Some(t), Some(song)) = (lane_tick, song) {
@@ -1976,6 +1982,40 @@ mod tests {
         h.send(EngineCommand::SetWriting(Box::default())).unwrap();
         p.process(&mut buf);
         assert!((cell.load(Ordering::Relaxed) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pattern_lanes_repeat_with_the_pattern() {
+        use gt_core::{AutoPoint, Automation, ParamId};
+        let (mut h, mut p) = engine(48_000, 2);
+        let mut project = gt_core::Project::empty();
+        let target = ParamId::strip_pan(2);
+        // Left for the first half bar, right for the second.
+        project.current_pattern_mut().automation.push(Automation {
+            target,
+            points: vec![
+                AutoPoint::new(0, 0.0),
+                AutoPoint::new(1920, 0.0),
+                AutoPoint::new(1921, 1.0),
+            ],
+        });
+        let song = crate::SongSnapshot::compile(&project);
+        assert_eq!(song.length, 3840);
+        h.send(EngineCommand::SetSong(Box::new(song))).unwrap();
+        h.send(EngineCommand::Play).unwrap();
+        let t = std::sync::Arc::clone(&p.telemetry);
+        // 25 frames per tick at 120 BPM: run to a frame, read the pan.
+        let mut done = 0usize;
+        let mut pan_at = |frame: usize| {
+            let mut buf = vec![0.0; 2 * (frame - done)];
+            p.process(&mut buf);
+            done = frame;
+            t.lane_values[0].load(Ordering::Relaxed)
+        };
+        assert_eq!(pan_at(25 * 960), -1.0);
+        assert_eq!(pan_at(25 * 2880), 1.0);
+        assert_eq!(pan_at(25 * (3840 + 960)), -1.0, "second pass");
+        assert_eq!(pan_at(25 * (3840 + 2880)), 1.0);
     }
 
     /// A synth on `slot` with the metronome off and a connected live input.

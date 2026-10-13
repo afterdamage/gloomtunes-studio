@@ -276,6 +276,10 @@ pub struct Pattern {
     /// Recorded controller data (bend, sustain, mod wheel, aftertouch) per channel, each list
     /// sorted by tick.
     pub controls: BTreeMap<ChannelId, Vec<ControlPoint>>,
+    /// Pattern automation (D112): one line per parameter, points at ticks from the pattern
+    /// start. It plays wherever the pattern plays, unless a playlist automation clip for the
+    /// same parameter is playing.
+    pub automation: Vec<crate::Automation>,
 }
 
 impl Pattern {
@@ -985,6 +989,7 @@ impl Project {
             steps: 16,
             notes: BTreeMap::new(),
             controls: BTreeMap::new(),
+            automation: Vec::new(),
         });
         id
     }

@@ -1,6 +1,7 @@
-//! Automation recording and live values, the app side (Prompt 17, D111): control moves during
-//! a song-mode recording become automation clips, and the values automation and modulators
-//! give parameters are shown on their controls.
+//! Automation recording and live values, the app side (Prompt 17, D111, D112): control moves
+//! while recording become automation clips (song mode) or the pattern's automation (pattern
+//! mode), and the values automation and modulators give parameters are shown on their
+//! controls.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -16,8 +17,9 @@ use crate::autorec::AutoRecorder;
 /// Automation recording and live-value state.
 #[derive(Default)]
 pub(super) struct AutoState {
-    /// The recording under way (song mode, recording, playing).
-    rec: Option<AutoRecorder>,
+    /// The recording under way (recording and playing), and whether it is in song mode
+    /// (playlist clips at song ticks) or pattern mode (the pattern's lines at pattern ticks).
+    rec: Option<(AutoRecorder, bool)>,
     /// Controls the mouse held last frame.
     held: HashSet<ParamId>,
     /// Parameters a MIDI controller moved since the last frame: when (clock ns) and to what
@@ -66,29 +68,32 @@ impl GloomApp {
     pub(super) fn automation_frame(&mut self, ctx: &egui::Context, plugin_moves: &[ParamId]) {
         let touches = param_ui::take_touches(ctx);
         let ccs = std::mem::take(&mut self.auto.cc_moves);
-        let on = self.transport.song_mode
-            && self.transport.state == PlayState::Playing
+        let on = self.transport.state == PlayState::Playing
             && (self.recorder.armed || self.record.active());
-        let anchor = |ns: u64| {
-            self.audio
-                .engine()
-                .and_then(|e| e.telemetry().anchor.tick_at(ns))
-        };
-        let now = anchor(clock_ns()).unwrap_or(self.transport.position.0 as f64);
-        if !on {
-            if let Some(mut rec) = self.auto.rec.take() {
+        let song = self.transport.song_mode;
+        // Pattern mode records at pattern ticks: the engine repeats the pattern from tick 0.
+        let len = self.project.current_pattern().length_ticks().max(1) as f64;
+        let place = |t: f64| if song { t } else { t.rem_euclid(len) };
+        let now = self
+            .tick_at_ns(clock_ns())
+            .map_or(place(self.transport.position.0 as f64), place);
+        // Stopped, or switched between song and pattern mode: the passes so far go in.
+        if self.auto.rec.as_ref().is_some_and(|r| !on || r.1 != song) {
+            if let Some((mut rec, in_song)) = self.auto.rec.take() {
                 rec.stop(self.auto.last_tick);
-                self.commit_passes(rec.take_done());
+                self.commit_passes(rec.take_done(), in_song);
             }
+        }
+        if !on {
             self.auto.held.clear();
             self.send_writing(Vec::new());
             return;
         }
         self.auto.last_tick = now;
-        let rec = self
+        let (rec, _) = self
             .auto
             .rec
-            .get_or_insert_with(|| AutoRecorder::new(self.midi_model.automation, now));
+            .get_or_insert_with(|| (AutoRecorder::new(self.midi_model.automation, now), song));
         rec.advance(now);
         let mut held = HashSet::new();
         for t in touches {
@@ -102,7 +107,11 @@ impl GloomApp {
         }
         self.auto.held = held;
         for (id, at_ns, value) in ccs {
-            rec.moved(id, anchor(at_ns).unwrap_or(now), value, false);
+            let at = self
+                .audio
+                .engine()
+                .and_then(|e| e.telemetry().anchor.tick_at(at_ns));
+            rec.moved(id, at.map_or(now, place), value, false);
         }
         for &id in plugin_moves {
             rec.moved(id, now, id.normalized(&self.project), false);
@@ -113,9 +122,16 @@ impl GloomApp {
             .iter()
             .filter_map(|t| ParamDest::resolve(t, &self.project))
             .collect();
-        self.commit_passes(done);
+        self.commit_passes(done, song);
         self.send_writing(writing);
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
+    }
+
+    /// The song tick a moment of [`clock_ns`] plays at, while playing.
+    fn tick_at_ns(&self, ns: u64) -> Option<f64> {
+        self.audio
+            .engine()
+            .and_then(|e| e.telemetry().anchor.tick_at(ns))
     }
 
     fn send_writing(&mut self, writing: Vec<ParamDest>) {
@@ -126,14 +142,19 @@ impl GloomApp {
         }
     }
 
-    /// Writes finished passes into automation clips and lets the engine play them.
-    fn commit_passes(&mut self, passes: Vec<(ParamId, Vec<gt_core::AutoPoint>)>) {
-        let mut any = false;
-        for (target, points) in passes {
-            any |= gt_core::record_automation(&mut self.project, target, &points).is_some();
-        }
-        if !any {
+    /// Writes finished passes into automation clips (song mode) or the current pattern's
+    /// automation, and lets the engine play them.
+    fn commit_passes(&mut self, passes: Vec<(ParamId, Vec<gt_core::AutoPoint>)>, song: bool) {
+        if passes.is_empty() {
             return;
+        }
+        for (target, points) in passes {
+            if song {
+                gt_core::record_automation(&mut self.project, target, &points);
+            } else {
+                let pat = self.project.current_pattern_mut();
+                gt_core::record_pattern_automation(pat, target, &points);
+            }
         }
         self.pending_edit = Some("Record automation");
         self.push_recorded();

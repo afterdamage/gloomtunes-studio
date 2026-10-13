@@ -3,7 +3,7 @@
 
 use crate::params::ParamId;
 use crate::playlist::{value_at, AutoPoint, Automation, ClipId, ClipKind};
-use crate::project::Project;
+use crate::project::{Pattern, Project};
 
 /// Default thinning tolerance: the largest vertical error (normalized value) a dropped point
 /// may leave, about half a percent of the range.
@@ -140,12 +140,46 @@ pub fn record_automation(
             ..*p
         })
         .collect();
-    let (s0, s1) = (src(t0), new.last().map_or(src(t0), |p| p.at));
-    let old = std::mem::take(&mut a.points);
+    a.points = merge(&a.points, new);
+    Some(id)
+}
+
+/// Writes a recorded pass (points at pattern ticks, sorted, values normalized) for `target`
+/// into the pattern's automation (D112), making its line if it has none. Points past the
+/// pattern end are dropped; inside the pass the old points are replaced as in
+/// [`record_automation`].
+pub fn record_pattern_automation(pattern: &mut Pattern, target: ParamId, pass: &[AutoPoint]) {
+    let len = pattern.length_ticks();
+    let new: Vec<AutoPoint> = pass
+        .iter()
+        .filter(|p| (0..=len).contains(&p.at))
+        .map(|p| AutoPoint {
+            value: p.value.clamp(0.0, 1.0),
+            ..*p
+        })
+        .collect();
+    if new.is_empty() {
+        return;
+    }
+    match pattern.automation.iter_mut().find(|a| a.target == target) {
+        Some(a) => a.points = merge(&a.points, new),
+        None => pattern.automation.push(Automation {
+            target,
+            points: new,
+        }),
+    }
+}
+
+/// `old` with `new` (sorted, non-empty) in place of its points over `new`'s range, and guard
+/// points one tick outside that range so the old line goes on either side.
+fn merge(old: &[AutoPoint], new: Vec<AutoPoint>) -> Vec<AutoPoint> {
+    let (Some(s0), Some(s1)) = (new.first().map(|p| p.at), new.last().map(|p| p.at)) else {
+        return old.to_vec();
+    };
     let mut points: Vec<AutoPoint> = old.iter().copied().filter(|p| p.at < s0).collect();
     if let Some(prev) = points.last() {
         if prev.at < s0 - 1 {
-            let v = value_at(&old, (s0 - 1) as f64);
+            let v = value_at(old, (s0 - 1) as f64);
             points.push(AutoPoint {
                 at: s0 - 1,
                 value: v,
@@ -157,7 +191,7 @@ pub fn record_automation(
     let after: Vec<AutoPoint> = old.iter().copied().filter(|p| p.at > s1).collect();
     if let Some(next) = after.first() {
         if next.at > s1 + 1 {
-            let v = value_at(&old, (s1 + 1) as f64);
+            let v = value_at(old, (s1 + 1) as f64);
             points.push(AutoPoint {
                 at: s1 + 1,
                 value: v,
@@ -166,8 +200,7 @@ pub fn record_automation(
         }
     }
     points.extend(after);
-    a.points = points;
-    Some(id)
+    points
 }
 
 #[cfg(test)]
@@ -221,6 +254,22 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn pattern_passes_make_or_merge_the_pattern_line() {
+        let mut p = Project::empty();
+        let target = ParamId::strip_pan(2);
+        let pat = p.current_pattern_mut();
+        record_pattern_automation(pat, target, &pts(&[(0, 0.2), (960, 0.4)]));
+        record_pattern_automation(pat, target, &pts(&[(1920, 0.9), (2880, 0.9)]));
+        // Past the end (a one-bar pattern is 3840 ticks): dropped.
+        record_pattern_automation(pat, target, &pts(&[(5000, 0.1)]));
+        assert_eq!(pat.automation.len(), 1);
+        assert_eq!(
+            pat.automation[0].points,
+            pts(&[(0, 0.2), (960, 0.4), (1919, 0.4), (1920, 0.9), (2880, 0.9)])
+        );
     }
 
     #[test]

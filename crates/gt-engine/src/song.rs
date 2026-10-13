@@ -268,12 +268,28 @@ impl SongSnapshot {
         }
         events.sort_by_key(SongEvent::order);
         let control_slots = finish_controls(&mut controls);
+        // Pattern automation: one pass, repeated by the engine with the pattern.
+        let automation = pattern
+            .automation
+            .iter()
+            .filter(|a| !a.points.is_empty() && a.target.is_valid(project))
+            .filter_map(|a| {
+                Some(AutoLane {
+                    target: a.target,
+                    dest: ParamDest::resolve(&a.target, project)?,
+                    info: *a.target.info(),
+                    points: lane_points(vec![(0, length, 0, a.points.as_slice())]),
+                    modulated: false,
+                })
+            })
+            .collect();
         Self {
             length,
             repeat: true,
             events,
             controls,
             control_slots,
+            automation,
             ..Self::default()
         }
     }
@@ -337,6 +353,7 @@ impl SongSnapshot {
         let mut controls = Vec::new();
         let mut audio: Vec<AudioPlay> = Vec::new();
         let mut lanes: Vec<(ParamId, Vec<Span<'_>>)> = Vec::new();
+        let mut pattern_lanes: Vec<(ParamId, Vec<Span<'_>>)> = Vec::new();
         // Frozen tracks whose render is loaded play it instead of their pattern and audio clips.
         let mut frozen = Vec::new();
         for t in &pl.tracks {
@@ -379,6 +396,7 @@ impl SongSnapshot {
                 ClipKind::Pattern(id) => {
                     if let Some(pat) = project.pattern(*id) {
                         expand_pattern(project, pat, clip, swing, &mut events, &mut controls);
+                        pattern_spans(project, pat, clip, &mut pattern_lanes);
                     }
                 }
                 ClipKind::Audio {
@@ -468,6 +486,21 @@ impl SongSnapshot {
         }
         events.sort_by_key(SongEvent::order);
         audio.sort_by(|a: &AudioPlay, b| a.start_s.total_cmp(&b.start_s));
+        // Pattern automation plays where no automation clip of the same parameter does.
+        for (target, spans) in pattern_lanes {
+            let i = match lanes.iter().position(|(t, _)| *t == target) {
+                Some(i) => i,
+                None => {
+                    lanes.push((target, Vec::new()));
+                    lanes.len() - 1
+                }
+            };
+            let mut cuts: Vec<(i64, i64)> = lanes[i].1.iter().map(|s| (s.0, s.1)).collect();
+            cuts.sort_unstable();
+            let pieces: Vec<Span<'_>> =
+                spans.into_iter().flat_map(|s| subtract(s, &cuts)).collect();
+            lanes[i].1.extend(pieces);
+        }
         let automation = lanes
             .into_iter()
             .filter_map(|(target, spans)| {
@@ -560,6 +593,59 @@ fn crossfades(pl: &gt_core::Playlist, clip: &gt_core::Clip) -> (i64, i64) {
 
 /// An automation clip on the timeline: start, end, source offset and its points.
 type Span<'a> = (i64, i64, i64, &'a [AutoPoint]);
+
+/// The spans of a pattern's automation a pattern clip plays: one per repetition of the
+/// pattern inside the clip (D112).
+fn pattern_spans<'a>(
+    project: &Project,
+    pat: &'a Pattern,
+    clip: &gt_core::Clip,
+    out: &mut Vec<(ParamId, Vec<Span<'a>>)>,
+) {
+    let len = pat.length_ticks();
+    if len <= 0 {
+        return;
+    }
+    let (lo, hi) = (clip.offset, clip.offset + clip.length);
+    for a in &pat.automation {
+        if a.points.is_empty() || !a.target.is_valid(project) {
+            continue;
+        }
+        let spans = (lo.div_euclid(len)..=(hi - 1).div_euclid(len)).filter_map(|k| {
+            let (s, e) = ((k * len).max(lo), ((k + 1) * len).min(hi));
+            (e > s).then_some((
+                clip.start + s - lo,
+                clip.start + e - lo,
+                s - k * len,
+                a.points.as_slice(),
+            ))
+        });
+        match out.iter_mut().find(|(t, _)| *t == a.target) {
+            Some((_, v)) => v.extend(spans),
+            None => out.push((a.target, spans.collect())),
+        }
+    }
+}
+
+/// The parts of `span` outside the timeline ranges `cuts` (sorted by start).
+fn subtract<'a>(span: Span<'a>, cuts: &[(i64, i64)]) -> Vec<Span<'a>> {
+    let (start, end, offset, points) = span;
+    let mut out = Vec::new();
+    let mut from = start;
+    for &(c0, c1) in cuts {
+        if c1 <= from || c0 >= end {
+            continue;
+        }
+        if c0 > from {
+            out.push((from, c0, offset + (from - start), points));
+        }
+        from = from.max(c1);
+    }
+    if from < end {
+        out.push((from, end, offset + (from - start), points));
+    }
+    out
+}
 
 fn swing_ticks(project: &Project) -> i64 {
     (f64::from(project.swing.clamp(0.0, 1.0)) * STEP_TICKS as f64 / 2.0).round() as i64
@@ -1191,6 +1277,65 @@ mod tests {
         assert_eq!(lane.info.from_normalized(0.25), -0.5);
         // The demo's delay swell and bass filter are there too.
         assert_eq!(s.automation.len(), 3);
+    }
+
+    #[test]
+    fn pattern_automation_plays_with_the_pattern_and_song_clips_override_it() {
+        let (mut p, _, id) = song_project();
+        let target = ParamId::strip_pan(2);
+        // A one-bar ramp 0 -> 1 in the pattern.
+        p.current_pattern_mut()
+            .automation
+            .push(gt_core::Automation {
+                target,
+                points: vec![AutoPoint::new(0, 0.0), AutoPoint::new(3840, 1.0)],
+            });
+        // Pattern mode: one pass of the line, repeated by the engine.
+        let s = SongSnapshot::compile(&p);
+        assert_eq!(s.automation.len(), 1);
+        assert_eq!(
+            gt_core::playlist::value_at(&s.automation[0].points, 960.0),
+            0.25
+        );
+
+        // Song mode: three bars of the pattern from bar 2, slipped by half a bar, and a song
+        // clip over the second bar of the clip.
+        let (a, b) = (p.playlist.tracks[0].id, p.playlist.tracks[1].id);
+        let clip = p
+            .playlist
+            .add_clip(a, 3840, 3 * 3840, ClipKind::Pattern(id));
+        p.playlist.clip_mut(clip).unwrap().offset = 1920;
+        p.playlist.add_clip(
+            b,
+            7680,
+            3840,
+            ClipKind::Automation(gt_core::Automation {
+                target,
+                points: vec![AutoPoint::new(0, 0.9), AutoPoint::new(3840, 0.9)],
+            }),
+        );
+        let s = SongSnapshot::compile_song(&p, |_| None);
+        assert_eq!(s.automation.len(), 1, "one lane per parameter");
+        let v = |t: f64| gt_core::playlist::value_at(&s.automation[0].points, t);
+        // Clip start = pattern tick 1920 (0.5), wrapping at 5760 back to 0.
+        assert!((v(3840.0) - 0.5).abs() < 1e-6);
+        assert!((v(4800.0) - 0.75).abs() < 1e-6);
+        assert!((v(5760.0) - 0.0).abs() < 1e-6, "the pattern came round");
+        assert!((v(6720.0) - 0.25).abs() < 1e-6);
+        // The song clip wins while it plays, then the pattern goes on where it is.
+        assert_eq!(v(7680.0), 0.9);
+        assert_eq!(v(10000.0), 0.9);
+        assert!(
+            (v(11520.0) - 0.5).abs() < 1e-6,
+            "the pattern where it has got to"
+        );
+        assert!((v(12480.0) - 0.75).abs() < 1e-6);
+        // A muted song clip leaves the pattern line.
+        let auto = p.playlist.clips.iter().position(|c| c.track == b).unwrap();
+        p.playlist.clips[auto].muted = true;
+        let s = SongSnapshot::compile_song(&p, |_| None);
+        let v = |t: f64| gt_core::playlist::value_at(&s.automation[0].points, t);
+        assert!((v(8640.0) - 0.75).abs() < 1e-6);
     }
 
     #[test]

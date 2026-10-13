@@ -555,6 +555,18 @@ sound identical; the golden export test stays.
   - CPU: one atomic store per automation lane or modulator per quantum.
   - Limits: plugin editors and controllers have no release, so their touch ends a beat after
     the last move; a pass reaching another clip on the same track stops there.
+- Part 2 delivered (2026-10-13), in review (D112):
+  - Patterns hold automation lines ("Automate in pattern" on any control's menu). They play
+    wherever the pattern plays: looping in pattern mode, and in every pattern clip in song
+    mode.
+  - A playlist automation clip for the same parameter overrides the pattern's line while it
+    plays; around it the pattern's line goes on where the pattern is.
+  - Recording in pattern mode writes into the current pattern's lines (same modes).
+  - The piano roll's bottom lane can show a line instead of velocities: left-drag draws
+    (snapped), right-click removes a point, ✕ deletes the line. Saved with the pattern.
+  - CPU: none measurable (pattern lanes are ordinary lanes; one modulo per quantum).
+  - Limits: one line per parameter per pattern; lines are drawn with straight segments
+    (curves only by recording or in clips).
 
 ---
 

@@ -663,6 +663,10 @@ impl GloomApp {
                 self.push_song();
                 self.pending_edit = Some("Edit notes");
             }
+            PianoRollAction::AutomationChanged => {
+                self.push_song();
+                self.pending_edit = Some("Edit pattern automation");
+            }
             PianoRollAction::AuditionOn { key, velocity } => self.send(EngineCommand::NoteOn {
                 slot,
                 key,
@@ -923,6 +927,11 @@ impl GloomApp {
                 marks.automated.insert(a.target);
             }
         }
+        for p in &self.project.patterns {
+            marks
+                .automated
+                .extend(p.automation.iter().map(|a| a.target));
+        }
         for m in self.project.modulators.iter().filter(|m| m.enabled) {
             marks.modulated.insert(m.target);
         }
@@ -946,6 +955,25 @@ impl GloomApp {
                 self.transport.song_mode = true;
                 self.push_song();
                 self.pending_edit = Some("Create automation clip");
+            }
+            ParamRequest::AutomatePattern(target) => {
+                let value = target.normalized(&self.project);
+                let pat = self.project.current_pattern_mut();
+                if !pat.automation.iter().any(|a| a.target == target) {
+                    let len = pat.length_ticks();
+                    pat.automation.push(gt_core::Automation {
+                        target,
+                        points: vec![
+                            gt_core::AutoPoint::new(0, value),
+                            gt_core::AutoPoint::new(len, value),
+                        ],
+                    });
+                    self.pending_edit = Some("Automate in pattern");
+                }
+                // Draw it in the piano roll's bottom lane; it plays wherever the pattern does.
+                self.roll.lane = Some(target);
+                self.main_view = MainView::PianoRoll;
+                self.push_song();
             }
             ParamRequest::AddLfo(target) | ParamRequest::AddFollower(target) => {
                 let source = if matches!(req, ParamRequest::AddLfo(_)) {
@@ -1048,6 +1076,13 @@ impl GloomApp {
         };
         let (id, name) = (ch.id, ch.name.clone());
         let bar_ticks = self.project.signatures.sig_of_bar(0).bar_ticks();
+        let automation_names = self
+            .project
+            .current_pattern()
+            .automation
+            .iter()
+            .map(|a| a.target.name(&self.project))
+            .collect();
         let pat = self.project.current_pattern_mut();
         self.roll.set_target(pat.id.0, id.0);
         let pattern_len = pat.length_ticks();
@@ -1055,6 +1090,7 @@ impl GloomApp {
         let mut notes = pat.notes.remove(&id).unwrap_or_default();
         let ghosts: Vec<&[gt_core::Note]> = pat.notes.values().map(Vec::as_slice).collect();
         let controls = pat.controls.get(&id).map_or(&[][..], Vec::as_slice);
+        let automation = &mut pat.automation;
         let actions = piano_roll(
             ui,
             theme,
@@ -1067,6 +1103,8 @@ impl GloomApp {
                 playhead,
                 channel_name: &name,
                 controls,
+                automation,
+                automation_names,
             },
         );
         if !notes.is_empty() {

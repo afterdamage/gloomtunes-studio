@@ -20,6 +20,8 @@ use crate::GloomTheme;
 pub enum ParamRequest {
     /// Add an automation clip for the parameter at the playhead.
     Automate(ParamId),
+    /// Add an automation line for the parameter to the current pattern (D112).
+    AutomatePattern(ParamId),
     /// Attach an LFO.
     AddLfo(ParamId),
     /// Attach an envelope follower.
@@ -156,6 +158,7 @@ pub fn param_menu(theme: &GloomTheme, resp: &Response, id: ParamId) {
         ui.label(egui::RichText::new(id.label()).color(theme.text_dim));
         let mut items = vec![
             ("Create automation clip", ParamRequest::Automate(id)),
+            ("Automate in pattern", ParamRequest::AutomatePattern(id)),
             ("Add LFO", ParamRequest::AddLfo(id)),
             ("Add envelope follower", ParamRequest::AddFollower(id)),
         ];
