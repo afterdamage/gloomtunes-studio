@@ -20,6 +20,8 @@ use crate::time::{TempoMap, TimeSigMap, PPQ};
 pub const STEP_TICKS: i64 = PPQ / 4;
 /// MIDI key that plays a sample at its original pitch (C5 in FL-style naming, MIDI 60).
 pub const ROOT_KEY: u8 = 60;
+
+use crate::sampler::{Interp, KeyZone, SamplerFilter, SamplerLfo};
 /// Velocity of a newly placed step (100 of 127).
 pub const DEFAULT_VELOCITY: f32 = 100.0 / 127.0;
 /// Most channels a project can have (the engine preallocates this many slots).
@@ -132,6 +134,35 @@ pub struct SamplerSettings {
     pub loop_mode: LoopMode,
     /// Amplitude envelope.
     pub adsr: Adsr,
+    /// Interpolation quality (Prompt 23).
+    pub interp: Interp,
+    /// Play the region backwards.
+    pub reverse: bool,
+    /// Voice filter and its envelope.
+    pub filter: SamplerFilter,
+    /// The two LFOs.
+    pub lfos: [SamplerLfo; 2],
+    /// Key at which `sample` plays at its recorded pitch.
+    pub root_key: u8,
+    /// Keys `sample` answers.
+    pub key_lo: u8,
+    /// Highest key `sample` answers.
+    pub key_hi: u8,
+    /// Multi-sample zones; when there are any they replace `sample`.
+    pub zones: Vec<KeyZone>,
+    /// Zones answering the same key and velocity take turns instead of layering.
+    pub round_robin: bool,
+    /// One voice at a time.
+    pub mono: bool,
+    /// Mono only: a key pressed while another is held glides without restarting.
+    pub legato: bool,
+    /// Glide time of mono notes, ms (0: none).
+    pub glide_ms: f32,
+    /// Most voices sounding at once (1 to 16).
+    pub voices: u8,
+    /// Time-stretch mode: fit `sample` to this many beats at the song tempo, keeping its pitch
+    /// (0: off; plays resampled).
+    pub stretch_beats: f32,
 }
 
 impl Default for SamplerSettings {
@@ -143,7 +174,42 @@ impl Default for SamplerSettings {
             end: 1.0,
             loop_mode: LoopMode::OneShot,
             adsr: Adsr::default(),
+            interp: Interp::default(),
+            reverse: false,
+            filter: SamplerFilter::default(),
+            lfos: [SamplerLfo::default(); 2],
+            root_key: ROOT_KEY,
+            key_lo: 0,
+            key_hi: 127,
+            zones: Vec::new(),
+            round_robin: false,
+            mono: false,
+            legato: false,
+            glide_ms: 0.0,
+            voices: SamplerSettings::MAX_VOICES,
+            stretch_beats: 0.0,
         }
+    }
+}
+
+impl SamplerSettings {
+    /// Voice pool size of a sampler channel.
+    pub const MAX_VOICES: u8 = 16;
+    /// Most zones in a multi-sample instrument.
+    pub const MAX_ZONES: usize = 256;
+
+    /// Every sample the channel uses: its main sample and its zones' samples.
+    pub fn sources(&self) -> impl Iterator<Item = &SampleSource> {
+        self.sample
+            .iter()
+            .chain(self.zones.iter().map(|z| &z.sample))
+    }
+
+    /// Every sample the channel uses, mutably.
+    pub fn sources_mut(&mut self) -> impl Iterator<Item = &mut SampleSource> {
+        self.sample
+            .iter_mut()
+            .chain(self.zones.iter_mut().map(|z| &mut z.sample))
     }
 }
 
@@ -233,6 +299,13 @@ impl Channel {
     /// The sample this channel plays, if any.
     pub fn sample(&self) -> Option<&SampleSource> {
         self.sampler().and_then(|s| s.sample.as_ref())
+    }
+
+    /// Every sample the channel plays (its sample and its key zones').
+    pub fn samples(&self) -> impl Iterator<Item = &SampleSource> {
+        self.sampler()
+            .into_iter()
+            .flat_map(SamplerSettings::sources)
     }
 }
 
@@ -812,6 +885,27 @@ impl Project {
                     a.decay_ms = fin(a.decay_ms, 0.0, 10_000.0, 0.0);
                     a.sustain = fin(a.sustain, 0.0, 1.0, 1.0);
                     a.release_ms = fin(a.release_ms, 0.0, 20_000.0, 50.0);
+                    let f = &mut s.filter;
+                    f.cutoff = fin(f.cutoff, 20.0, 20_000.0, 8000.0);
+                    f.resonance = fin(f.resonance, 0.0, 1.0, 0.2);
+                    f.env_amount = fin(f.env_amount, -8.0, 8.0, 0.0);
+                    let a = &mut f.env;
+                    a.attack_ms = fin(a.attack_ms, 0.0, 10_000.0, 0.0);
+                    a.decay_ms = fin(a.decay_ms, 0.0, 10_000.0, 300.0);
+                    a.sustain = fin(a.sustain, 0.0, 1.0, 0.0);
+                    a.release_ms = fin(a.release_ms, 0.0, 20_000.0, 200.0);
+                    for l in &mut s.lfos {
+                        l.rate = fin(l.rate, 0.01, 50.0, 4.0);
+                        l.amount = fin(l.amount, 0.0, 1.0, 0.25);
+                    }
+                    s.root_key = s.root_key.min(127);
+                    s.key_lo = s.key_lo.min(127);
+                    s.key_hi = s.key_hi.clamp(s.key_lo, 127);
+                    s.zones.truncate(SamplerSettings::MAX_ZONES);
+                    s.zones.iter_mut().for_each(KeyZone::sanitize);
+                    s.glide_ms = fin(s.glide_ms, 0.0, 5000.0, 0.0);
+                    s.voices = s.voices.clamp(1, SamplerSettings::MAX_VOICES);
+                    s.stretch_beats = fin(s.stretch_beats, 0.0, 256.0, 0.0);
                 }
                 Instrument::Synth(p) => p.sanitize(),
                 Instrument::Plugin(p) => p.sanitize(),

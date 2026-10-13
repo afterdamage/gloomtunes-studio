@@ -13,4 +13,4 @@ pub mod ops;
 pub mod presets;
 
 pub use history::{Edit, History, Transaction};
-pub use loader::{is_audio_file, load_sample, LoadError, AUDIO_EXTENSIONS};
+pub use loader::{is_audio_file, list_audio_files, load_sample, LoadError, AUDIO_EXTENSIONS};

@@ -1124,6 +1124,15 @@ impl AudioProcessor {
                     self.retire(Garbage::Sample(old));
                 }
             }
+            EngineCommand::SetChannelZones { slot, zones } => {
+                let old = match self.channels.get_mut(usize::from(slot)) {
+                    Some(ch) => ch.set_zones(zones),
+                    None => zones,
+                };
+                if let Some(old) = old {
+                    self.retire(Garbage::Zones(old));
+                }
+            }
             EngineCommand::NoteOn {
                 slot,
                 key,

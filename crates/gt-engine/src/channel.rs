@@ -4,13 +4,18 @@ use std::sync::Arc;
 
 use gt_core::params::ChannelParam;
 use gt_core::synth::{SynthParam, MOD_SLOTS};
-use gt_core::{SampleData, ROOT_KEY};
+use gt_core::SampleData;
 use gt_dsp::synth::PORTA_DEFAULT_S;
 use gt_dsp::{
     AdsrParams, Expression, Glide, GloomSynth, LinearRamp, NoteExpr, SamplerVoice, VoiceRegion,
+    VoiceSettings,
 };
 
 use crate::song::{ChannelParams, InstrumentKind, PatchValues};
+use crate::zones::ZoneMap;
+
+/// Zone index of a voice playing the channel's single sample (no key map).
+const MAIN_ZONE: u16 = u16::MAX;
 
 /// Voices per channel. When all are busy, the oldest is stolen.
 pub const VOICES_PER_CHANNEL: usize = 16;
@@ -50,6 +55,12 @@ pub(crate) struct ChannelSlot {
     ctl: Controls,
     env: AdsrParams,
     sample: Option<Arc<SampleData>>,
+    /// Multi-sample key map (Prompt 23); when set it replaces `sample`.
+    zones: Option<Arc<ZoneMap>>,
+    /// Round-robin turn.
+    turn: u32,
+    /// How voices read and shape the sample (from the params, with automation).
+    voice_set: VoiceSettings,
     voices: [SamplerVoice; VOICES_PER_CHANNEL],
     gain_l: LinearRamp,
     gain_r: LinearRamp,
@@ -91,6 +102,8 @@ fn pan_gains(gain: f32, pan: f32) -> (f32, f32) {
 impl ChannelSlot {
     pub(crate) fn new(sample_rate: f32) -> Self {
         let params = ChannelParams::default();
+        // Interpolation tables are built here, not on the audio thread.
+        SamplerVoice::warm_up();
         Self {
             synth: Box::new(GloomSynth::new(sample_rate)),
             sr: sample_rate,
@@ -98,6 +111,9 @@ impl ChannelSlot {
             ctl: Controls::default(),
             env: Self::env_for(sample_rate, &params),
             sample: None,
+            zones: None,
+            turn: 0,
+            voice_set: VoiceSettings::default(),
             voices: [SamplerVoice::new(sample_rate); VOICES_PER_CHANNEL],
             gain_l: LinearRamp::new(0.0),
             gain_r: LinearRamp::new(0.0),
@@ -141,7 +157,26 @@ impl ChannelSlot {
         p.adsr.decay_ms = c(ChannelParam::Decay).unwrap_or(p.adsr.decay_ms);
         p.adsr.sustain = c(ChannelParam::Sustain).unwrap_or(p.adsr.sustain);
         p.adsr.release_ms = c(ChannelParam::Release).unwrap_or(p.adsr.release_ms);
+        p.sampler.cutoff = c(ChannelParam::Cutoff).unwrap_or(p.sampler.cutoff);
+        p.sampler.resonance = c(ChannelParam::Resonance).unwrap_or(p.sampler.resonance);
         p
+    }
+
+    /// Voice settings for the effective parameters.
+    fn voice_settings(sr: f32, p: &ChannelParams) -> VoiceSettings {
+        let s = &p.sampler;
+        let e = s.filter_env;
+        VoiceSettings {
+            sinc: s.sinc,
+            reverse: s.reverse,
+            filter: s.filter,
+            cutoff: s.cutoff,
+            // Resonance 0..1 to Q 0.5..15, evenly in ratio.
+            q: 0.5 * 30.0_f32.powf(s.resonance.clamp(0.0, 1.0)),
+            env_octaves: s.env_amount,
+            filter_env: AdsrParams::new(sr, e.attack_ms, e.decay_ms, e.sustain, e.release_ms),
+            lfos: s.lfos,
+        }
     }
 
     /// The synth patch with automation and modulation applied.
@@ -184,6 +219,7 @@ impl ChannelSlot {
             self.ctl.synth_dirty = false;
         }
         self.env = Self::env_for(self.sr, &self.effective());
+        self.voice_set = Self::voice_settings(self.sr, &self.effective());
         self.retarget(self.ramp_frames);
     }
 
@@ -219,6 +255,9 @@ impl ChannelSlot {
                 self.env = Self::env_for(self.sr, &self.effective());
             }
             ChannelParam::Start | ChannelParam::End => {}
+            ChannelParam::Cutoff | ChannelParam::Resonance => {
+                self.voice_set = Self::voice_settings(self.sr, &self.effective());
+            }
         }
     }
 
@@ -278,6 +317,37 @@ impl ChannelSlot {
         std::mem::replace(&mut self.sample, s)
     }
 
+    /// Swaps the key map, returning the old one (for the garbage queue). Playing voices stop.
+    pub(crate) fn set_zones(&mut self, z: Option<Arc<ZoneMap>>) -> Option<Arc<ZoneMap>> {
+        self.kill_all();
+        std::mem::replace(&mut self.zones, z)
+    }
+
+    /// A free voice, or the oldest one when the pool or the voice limit is full.
+    fn free_voice(&self) -> usize {
+        let limit = usize::from(
+            self.params
+                .sampler
+                .voices
+                .clamp(1, VOICES_PER_CHANNEL as u8),
+        );
+        let active = self.voices.iter().filter(|v| v.is_active()).count();
+        let free = (active < limit)
+            .then(|| self.voices.iter().position(|v| !v.is_active()))
+            .flatten();
+        free.unwrap_or_else(|| {
+            // Steal the oldest sounding voice. A hard cut, acceptable for now (ROADMAP Step 3
+            // limits).
+            let mut oldest: Option<usize> = None;
+            for (i, v) in self.voices.iter().enumerate() {
+                if v.is_active() && oldest.is_none_or(|o| v.age < self.voices[o].age) {
+                    oldest = Some(i);
+                }
+            }
+            oldest.unwrap_or(0)
+        })
+    }
+
     /// Starts a note. `age` orders voices for stealing.
     pub(crate) fn note_on(&mut self, key: u8, velocity: f32, age: u64) {
         self.note_on_expr(key, velocity, age, NoteExpr::default());
@@ -293,66 +363,118 @@ impl ChannelSlot {
             self.synth.note_on_expr(key, velocity, age, e);
             return;
         }
-        let Some(sample) = &self.sample else {
-            return;
-        };
-        let frames = sample.frames();
-        if frames == 0 {
-            return;
-        }
         let p = self.effective();
-        let semis =
-            p.pitch + self.expr.bend_semis + f32::from(key) - f32::from(ROOT_KEY) + e.fine / 100.0;
-        let step =
-            f64::from((semis / 12.0).exp2()) * f64::from(sample.sample_rate) / f64::from(self.sr);
-        if let Glide::Slide { seconds } = e.glide {
-            let newest = self
-                .voices
-                .iter_mut()
-                .filter(|v| v.is_held())
-                .max_by_key(|v| v.age);
-            if let Some(v) = newest {
-                v.glide_to(step, (seconds.max(0.0) * self.sr) as u32);
-                self.last_step = Some(step);
-                return;
+        let sp = p.sampler;
+        // The zones this note plays: from the key map, or the single sample over its range.
+        let mut picked = [0u16; VOICES_PER_CHANNEL];
+        let n = match &self.zones {
+            Some(m) => {
+                let n = m.pick(key, velocity, sp.round_robin, self.turn, &mut picked);
+                self.turn = self.turn.wrapping_add(1);
+                n
             }
+            None if self.sample.as_ref().is_some_and(|s| s.frames() > 0)
+                && (sp.key_lo..=sp.key_hi).contains(&key) =>
+            {
+                picked[0] = MAIN_ZONE;
+                1
+            }
+            None => 0,
+        };
+        if n == 0 {
+            return;
         }
-        let region = VoiceRegion::from_fractions(frames, p.start, p.end, p.looped);
-        let v = velocity.clamp(0.0, 1.0);
-        // Velocity to amplitude: squared, a common curve that spreads soft hits more evenly
-        // in loudness than a linear map.
-        let gain = v * v;
-        let idx = self
-            .voices
-            .iter()
-            .position(|v| !v.is_active())
-            .unwrap_or_else(|| {
-                // Steal the oldest. A hard cut, acceptable for now (ROADMAP Step 3 limits).
-                let mut oldest = 0;
-                for (i, v) in self.voices.iter().enumerate() {
-                    if v.age < self.voices[oldest].age {
-                        oldest = i;
+        let glide_frames = (sp.glide_ms.max(0.0) * 0.001 * self.sr) as u32;
+        let mut first = true;
+        for &zone in &picked[..n] {
+            let (root, tune, zgain, rate, frames) = match &self.zones {
+                Some(m) if zone != MAIN_ZONE => {
+                    let z = &m.zones[usize::from(zone)];
+                    (z.root, z.tune, z.gain, z.data.sample_rate, z.data.frames())
+                }
+                _ => match &self.sample {
+                    Some(s) => (sp.root_key, 0.0, 1.0, s.sample_rate, s.frames()),
+                    None => continue,
+                },
+            };
+            if frames == 0 {
+                continue;
+            }
+            let semis = p.pitch + self.expr.bend_semis + f32::from(key) - f32::from(root)
+                + tune
+                + e.fine / 100.0;
+            let step = f64::from((semis / 12.0).exp2()) * f64::from(rate) / f64::from(self.sr);
+            if first {
+                first = false;
+                if let Glide::Slide { seconds } = e.glide {
+                    let newest = self
+                        .voices
+                        .iter_mut()
+                        .filter(|v| v.is_held())
+                        .max_by_key(|v| v.age);
+                    if let Some(v) = newest {
+                        v.glide_to(step, (seconds.max(0.0) * self.sr) as u32);
+                        self.last_step = Some(step);
+                        return;
                     }
                 }
-                oldest
-            });
-        let from = match (e.glide, self.last_step) {
-            (Glide::Porta, Some(last)) => last,
-            _ => step,
-        };
-        let voice = &mut self.voices[idx];
-        voice.trigger(key, gain, from, region, self.env, age);
-        voice.set_note_values(e.pan, tone_coef(self.sr, &e), e.release_scale());
-        if from != step {
-            voice.glide_to(step, (PORTA_DEFAULT_S * self.sr) as u32);
+                if sp.mono {
+                    let held = self
+                        .voices
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, v)| v.is_held())
+                        .max_by_key(|(_, v)| v.age)
+                        .map(|(i, _)| i);
+                    if let (true, Some(i)) = (sp.legato, held) {
+                        // Legato: the sounding voice glides to the new key.
+                        self.voices[i].legato_to(key, step, glide_frames.max(1));
+                        self.sustained[i] = false;
+                        self.last_step = Some(step);
+                        return;
+                    }
+                    for v in &mut self.voices {
+                        if v.is_active() {
+                            v.release_any();
+                        }
+                    }
+                }
+            }
+            let region = VoiceRegion::from_fractions(frames, p.start, p.end, p.looped);
+            let v = velocity.clamp(0.0, 1.0);
+            // Velocity to amplitude: squared, a common curve that spreads soft hits more evenly
+            // in loudness than a linear map.
+            let gain = v * v * zgain;
+            let idx = self.free_voice();
+            let from = match (e.glide, self.last_step) {
+                (Glide::Porta, Some(last)) => last,
+                (_, Some(last)) if sp.mono && glide_frames > 0 => last,
+                _ => step,
+            };
+            let voice = &mut self.voices[idx];
+            voice.trigger(key, gain, from, region, self.env, age);
+            voice.zone = zone;
+            if self.voice_set != VoiceSettings::default() {
+                voice.set_settings(self.voice_set);
+            }
+            voice.set_note_values(e.pan, tone_coef(self.sr, &e), e.release_scale());
+            if from != step {
+                let frames = if sp.mono && glide_frames > 0 && e.glide != Glide::Porta {
+                    glide_frames
+                } else {
+                    (PORTA_DEFAULT_S * self.sr) as u32
+                };
+                voice.glide_to(step, frames);
+            }
+            let y = e.y();
+            if y > 0.0 {
+                voice.seek(
+                    region.start + f64::from(y) * START_OFFSET_MAX * (region.end - region.start),
+                );
+            }
+            self.sustained[idx] = false;
+            self.last_step = Some(step);
         }
-        let y = e.y();
-        if y > 0.0 {
-            voice
-                .seek(region.start + f64::from(y) * START_OFFSET_MAX * (region.end - region.start));
-        }
-        self.sustained[idx] = false;
-        self.last_step = Some(step);
     }
 
     /// Starts a note that has been under way for `into_s` seconds (playback started or
@@ -381,36 +503,29 @@ impl ChannelSlot {
         if self.params.kind == InstrumentKind::Plugin {
             return;
         }
-        let Some(sample) = &self.sample else {
-            return;
-        };
         let p = self.effective();
         // A looped voice stops at its note-off, so it only sounds while held.
         if p.looped && !held {
             return;
         }
-        let frames = sample.frames();
-        let semis =
-            p.pitch + self.expr.bend_semis + f32::from(key) - f32::from(ROOT_KEY) + e.fine / 100.0;
-        let step =
-            f64::from((semis / 12.0).exp2()) * f64::from(sample.sample_rate) / f64::from(self.sr);
-        let region = VoiceRegion::from_fractions(frames, p.start, p.end, p.looped);
-        let offset = f64::from(e.y().max(0.0)) * START_OFFSET_MAX * (region.end - region.start);
-        let mut pos =
-            region.start + offset + f64::from(into_s.max(0.0)) * f64::from(self.sr) * step;
-        if pos >= region.end {
-            if !p.looped {
-                return;
-            }
-            let span = (region.end - region.start).max(1.0);
-            pos = region.start + (pos - region.start) % span;
-        }
         self.note_on_expr(key, velocity, age, e);
-        if let Some(v) = self
+        let into = f64::from(into_s.max(0.0)) * f64::from(self.sr);
+        for v in self
             .voices
             .iter_mut()
-            .find(|v| v.is_active() && v.age == age)
+            .filter(|v| v.is_active() && v.age == age)
         {
+            let region = v.region();
+            let offset = f64::from(e.y().max(0.0)) * START_OFFSET_MAX * (region.end - region.start);
+            let mut pos = region.start + offset + into * v.step();
+            if pos >= region.end {
+                if !p.looped {
+                    v.kill();
+                    continue;
+                }
+                let span = (region.end - region.start).max(1.0);
+                pos = region.start + (pos - region.start) % span;
+            }
             v.seek(pos);
         }
     }
@@ -532,13 +647,18 @@ impl ChannelSlot {
         if self.synth.is_active() {
             self.synth.render(out_l, out_r);
         }
-        let Some(sample) = &self.sample else {
-            return;
-        };
-        let (l, r) = (sample.left(), sample.right());
-        for v in &mut self.voices {
-            if v.is_active() {
-                v.render(l, r, out_l, out_r);
+        for i in 0..VOICES_PER_CHANNEL {
+            if !self.voices[i].is_active() {
+                continue;
+            }
+            let zone = self.voices[i].zone;
+            let data = match (&self.zones, zone) {
+                (Some(m), z) if z != MAIN_ZONE => m.zones.get(usize::from(z)).map(|z| &z.data),
+                _ => self.sample.as_ref(),
+            };
+            match data {
+                Some(d) => self.voices[i].render(d.left(), d.right(), out_l, out_r),
+                None => self.voices[i].kill(),
             }
         }
     }
@@ -763,5 +883,132 @@ mod tests {
         ch.note_off(60);
         ch.note_off(64);
         assert_eq!(held(&ch), 0);
+    }
+
+    fn zoned(zones: Vec<crate::zones::Zone>, sp: crate::song::SamplerParams) -> ChannelSlot {
+        let mut ch = ChannelSlot::new(48_000.0);
+        ch.set_zones(Some(Arc::new(ZoneMap { zones })));
+        ch.set_params_now(ChannelParams {
+            gain: 1.0,
+            looped: true,
+            sampler: sp,
+            ..ChannelParams::default()
+        });
+        ch
+    }
+
+    fn dc(level: f32) -> Arc<SampleData> {
+        Arc::new(SampleData::mono(48_000, vec![level; 48_000]))
+    }
+
+    fn playing(ch: &ChannelSlot) -> Vec<(u8, u16)> {
+        let mut v: Vec<(u8, u16)> = ch
+            .voices
+            .iter()
+            .filter(|v| v.is_active())
+            .map(|v| (v.key(), v.zone))
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    #[test]
+    fn notes_pick_zones_by_key_velocity_and_turn() {
+        use crate::zones::Zone;
+        let z = |lo, hi, vlo, vhi, level| Zone {
+            key_lo: lo,
+            key_hi: hi,
+            vel_lo: vlo,
+            vel_hi: vhi,
+            ..Zone::new(dc(level), 60)
+        };
+        let sp = crate::song::SamplerParams {
+            round_robin: true,
+            ..Default::default()
+        };
+        let mut ch = zoned(
+            vec![
+                z(0, 59, 0.0, 0.5, 0.1),
+                z(0, 59, 0.5, 1.0, 0.2),
+                z(60, 127, 0.0, 1.0, 0.3),
+                z(60, 127, 0.0, 1.0, 0.4),
+            ],
+            sp,
+        );
+        ch.note_on(40, 0.3, 1);
+        ch.note_on(40, 0.9, 2);
+        assert_eq!(playing(&ch), [(40, 0), (40, 1)]);
+        ch.kill_all();
+        // Round robin alternates the two takes of the upper range.
+        let mut order = Vec::new();
+        for age in 0..4 {
+            ch.note_on(72, 1.0, age);
+            order.push(ch.voices.iter().find(|v| v.age == age).unwrap().zone);
+        }
+        assert_eq!(order, [2, 3, 2, 3]);
+        // A note outside every zone plays nothing.
+        let mut ch = zoned(vec![z(60, 72, 0.0, 1.0, 0.3)], Default::default());
+        ch.note_on(30, 1.0, 9);
+        assert!(!ch.is_active());
+    }
+
+    #[test]
+    fn voice_limit_mono_and_legato() {
+        use crate::zones::Zone;
+        let one = || vec![Zone::new(dc(0.5), 60)];
+        let mut ch = zoned(
+            one(),
+            crate::song::SamplerParams {
+                voices: 2,
+                ..Default::default()
+            },
+        );
+        for age in 0..5 {
+            ch.note_on(60 + age as u8, 1.0, age);
+        }
+        assert_eq!(playing(&ch), [(63, 0), (64, 0)]);
+
+        // Mono without legato: the old note releases, the new one starts.
+        let mut ch = zoned(
+            one(),
+            crate::song::SamplerParams {
+                mono: true,
+                ..Default::default()
+            },
+        );
+        ch.note_on(60, 1.0, 1);
+        ch.note_on(64, 1.0, 2);
+        let held: Vec<u8> = ch
+            .voices
+            .iter()
+            .filter(|v| v.is_held())
+            .map(|v| v.key())
+            .collect();
+        assert_eq!(held, [64]);
+
+        // Legato: one voice, gliding to the new key without restarting.
+        let mut ch = zoned(
+            one(),
+            crate::song::SamplerParams {
+                mono: true,
+                legato: true,
+                glide_ms: 10.0,
+                ..Default::default()
+            },
+        );
+        ch.note_on(60, 1.0, 1);
+        let (mut l, mut r) = (vec![0.0; 960], vec![0.0; 960]);
+        ch.render_voices(&mut l, &mut r);
+        ch.note_on(72, 1.0, 2);
+        assert_eq!(playing(&ch), [(72, 0)]);
+        let v = ch.voices.iter().find(|v| v.is_active()).unwrap();
+        assert_eq!(v.age, 1, "the first voice carries on");
+        ch.render_voices(&mut l, &mut r);
+        let v = ch.voices.iter().find(|v| v.is_active()).unwrap();
+        assert!(
+            (v.step() - 2.0).abs() < 1e-6,
+            "glided an octave up: {}",
+            v.step()
+        );
     }
 }

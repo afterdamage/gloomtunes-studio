@@ -86,6 +86,14 @@ pub enum EngineCommand {
         /// The new sample, or none for silence. The old one comes back as garbage.
         sample: Option<Arc<SampleData>>,
     },
+    /// Replace a channel's multi-sample key map (Prompt 23); while set it is played instead
+    /// of the channel's sample. Its playing voices stop.
+    SetChannelZones {
+        /// Channel slot.
+        slot: u16,
+        /// The new map, or none. The old one comes back as garbage.
+        zones: Option<Arc<crate::zones::ZoneMap>>,
+    },
     /// Start a note on a channel now (auditioning from the UI).
     NoteOn {
         /// Channel slot.
@@ -185,6 +193,7 @@ impl EngineCommand {
                 | Self::SetModulation(_)
                 | Self::SetChannelParams { .. }
                 | Self::SetChannelSample { .. }
+                | Self::SetChannelZones { .. }
                 | Self::PreviewSample(_)
                 | Self::SetMixer(_)
                 | Self::SetEffect { .. }
@@ -278,6 +287,8 @@ pub enum Garbage {
     Params(Box<ChannelParams>),
     /// A sample no longer used by a channel or the preview voice.
     Sample(Arc<SampleData>),
+    /// A key map no longer used by a channel.
+    Zones(Arc<crate::zones::ZoneMap>),
     /// A mixer-settings box, already copied into the mixer.
     Mixer(Box<MixerParams>),
     /// An effect taken out of a slot.

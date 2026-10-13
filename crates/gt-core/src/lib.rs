@@ -23,6 +23,7 @@ pub mod plugin;
 pub mod project;
 pub mod recording;
 pub mod sample;
+pub mod sampler;
 pub mod synth;
 pub mod time;
 
@@ -52,6 +53,7 @@ pub use project::{
 };
 pub use recording::{AudioInput, Gap, MonitorMode, MAX_INPUT_CHANNELS};
 pub use sample::SampleData;
+pub use sampler::{Interp, KeyZone, LfoTarget, SamplerFilter, SamplerFilterMode, SamplerLfo};
 pub use synth::{ModDest, ModSlot, ModSource, SynthParam, SynthPatch};
 pub use time::{
     BarBeatTick, SigChange, TempoMap, TempoMapError, TempoPoint, Tick, TimeSig, TimeSigMap, PPQ,

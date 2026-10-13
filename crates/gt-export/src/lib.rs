@@ -200,7 +200,7 @@ pub fn load_samples(
 ) -> (HashMap<SampleSource, Arc<SampleData>>, Vec<PathBuf>) {
     let mut out = HashMap::new();
     let mut failed = Vec::new();
-    let sources = project.channels.iter().filter_map(|c| c.sample()).chain(
+    let sources = project.channels.iter().flat_map(|c| c.samples()).chain(
         project.playlist.clips.iter().filter_map(|c| match &c.kind {
             ClipKind::Audio { source, .. } => Some(source),
             _ => None,
@@ -501,13 +501,33 @@ fn load_engine(
         EngineCommand::SetSignatures(Box::new(project.signatures.clone())),
     );
     for (i, ch) in project.channels.iter().enumerate() {
-        let sample = ch.sample().and_then(|s| samples.get(s)).map(Arc::clone);
+        let (sample, zones) = match ch.sampler() {
+            Some(s) => {
+                // Time-stretch mode: render the fitted sample now, as playback does on a worker.
+                let fitted = s
+                    .sample
+                    .as_ref()
+                    .and_then(|src| samples.get(src))
+                    .and_then(|d| Some((gt_engine::stretch::fit_job(project, s, d)?, d)))
+                    .map(|(job, d)| Arc::new(job.render(d)));
+                gt_engine::zones::sampler_sources(s, |src| samples.get(src).map(Arc::clone), fitted)
+            }
+            None => (None, None),
+        };
         send(
             h,
             p,
             EngineCommand::SetChannelSample {
                 slot: i as u16,
                 sample,
+            },
+        );
+        send(
+            h,
+            p,
+            EngineCommand::SetChannelZones {
+                slot: i as u16,
+                zones,
             },
         );
         send(

@@ -15,7 +15,7 @@ mod convolution;
 mod delay;
 mod distortion;
 mod eq;
-mod filter;
+pub(crate) mod filter;
 mod flanger;
 mod gate;
 mod limiter;

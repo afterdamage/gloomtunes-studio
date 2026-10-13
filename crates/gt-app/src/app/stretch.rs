@@ -17,6 +17,8 @@ type Done = (u64, SampleData);
 pub(super) struct StretchCache {
     ready: HashMap<u64, Arc<SampleData>>,
     pending: HashSet<u64>,
+    /// Keys of sampler time-stretch renders asked for (kept when clips are re-requested).
+    fits: HashSet<u64>,
     jobs: mpsc::Sender<(StretchJob, Arc<SampleData>)>,
     done: mpsc::Receiver<Done>,
 }
@@ -38,6 +40,7 @@ impl StretchCache {
         Self {
             ready: HashMap::new(),
             pending: HashSet::new(),
+            fits: HashSet::new(),
             jobs,
             done,
         }
@@ -75,18 +78,39 @@ impl StretchCache {
                 let _ = self.jobs.send((job, sample));
             }
         }
-        self.ready.retain(|k, _| used.contains(k));
+        self.ready
+            .retain(|k, _| used.contains(k) || self.fits.contains(k));
     }
 
-    /// Takes finished renders; true if any arrived.
-    fn poll(&mut self) -> bool {
-        let mut any = false;
+    /// The time-stretch render of sampler `s` (Prompt 23): ready, or queued now and `None`
+    /// until it is (the channel plays its sample resampled meanwhile).
+    pub(super) fn fitted(
+        &mut self,
+        project: &Project,
+        s: &gt_core::SamplerSettings,
+        samples: impl Fn(&SampleSource) -> Option<Arc<SampleData>>,
+    ) -> Option<Arc<SampleData>> {
+        let sample = samples(s.sample.as_ref()?)?;
+        let job = stretch::fit_job(project, s, &sample)?;
+        self.fits.insert(job.key);
+        if let Some(r) = self.ready.get(&job.key) {
+            return Some(Arc::clone(r));
+        }
+        if self.pending.insert(job.key) {
+            let _ = self.jobs.send((job, sample));
+        }
+        None
+    }
+
+    /// Takes finished renders; their keys if any arrived.
+    fn poll(&mut self) -> Option<Vec<u64>> {
+        let mut keys = Vec::new();
         while let Ok((key, data)) = self.done.try_recv() {
             self.pending.remove(&key);
             self.ready.insert(key, Arc::new(data));
-            any = true;
+            keys.push(key);
         }
-        any
+        (!keys.is_empty()).then_some(keys)
     }
 }
 
@@ -101,8 +125,22 @@ impl GloomApp {
 
     /// Picks up finished renders and replays the song with them.
     pub(super) fn poll_stretches(&mut self) {
-        if self.stretch.poll() && self.transport.song_mode {
+        let Some(keys) = self.stretch.poll() else {
+            return;
+        };
+        if self.transport.song_mode {
             self.push_song();
+        }
+        // Samplers in time-stretch mode whose render just arrived.
+        if keys.iter().any(|k| self.stretch.fits.contains(k)) {
+            for i in 0..self.project.channels.len() {
+                if self.project.channels[i]
+                    .sampler()
+                    .is_some_and(|s| s.stretch_beats > 0.0)
+                {
+                    self.push_sample(i);
+                }
+            }
         }
     }
 }

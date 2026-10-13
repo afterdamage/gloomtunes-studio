@@ -45,6 +45,10 @@ pub enum ChannelParam {
     Sustain,
     /// Sampler envelope release.
     Release,
+    /// Sampler filter cutoff (Prompt 23).
+    Cutoff,
+    /// Sampler filter resonance.
+    Resonance,
 }
 
 const fn info(
@@ -66,7 +70,7 @@ const fn info(
     }
 }
 
-static CHANNEL_INFO: [ParamInfo; 9] = [
+static CHANNEL_INFO: [ParamInfo; 11] = [
     info(
         "volume",
         "Volume",
@@ -100,11 +104,25 @@ static CHANNEL_INFO: [ParamInfo; 9] = [
         Power(2.0),
         ParamUnit::Ms,
     ),
+    info(
+        "cutoff",
+        "Filter cutoff",
+        (20.0, 20_000.0, 8000.0),
+        ParamCurve::Exp,
+        ParamUnit::Hz,
+    ),
+    info(
+        "resonance",
+        "Filter resonance",
+        (0.0, 1.0, 0.2),
+        Linear,
+        Percent,
+    ),
 ];
 
 impl ChannelParam {
     /// Every channel parameter, in a stable order.
-    pub const ALL: [ChannelParam; 9] = [
+    pub const ALL: [ChannelParam; 11] = [
         Self::Volume,
         Self::Pan,
         Self::Pitch,
@@ -114,6 +132,8 @@ impl ChannelParam {
         Self::Decay,
         Self::Sustain,
         Self::Release,
+        Self::Cutoff,
+        Self::Resonance,
     ];
 
     /// Range, taper and format.
@@ -461,6 +481,8 @@ impl ParamId {
                     ChannelParam::Decay => s.adsr.decay_ms,
                     ChannelParam::Sustain => s.adsr.sustain,
                     ChannelParam::Release => s.adsr.release_ms,
+                    ChannelParam::Cutoff => s.filter.cutoff,
+                    ChannelParam::Resonance => s.filter.resonance,
                     ChannelParam::Volume | ChannelParam::Pan => unreachable!("handled above"),
                 })
             }
@@ -529,6 +551,8 @@ impl ParamId {
                             ChannelParam::Decay => s.adsr.decay_ms = v,
                             ChannelParam::Sustain => s.adsr.sustain = v,
                             ChannelParam::Release => s.adsr.release_ms = v,
+                            ChannelParam::Cutoff => s.filter.cutoff = v,
+                            ChannelParam::Resonance => s.filter.resonance = v,
                             ChannelParam::Volume | ChannelParam::Pan => unreachable!(),
                         }
                     }

@@ -43,7 +43,7 @@ pub use plugins::{
     plugin_browser, plugin_controls, PluginAction, PluginBrowserAction, PluginBrowserState,
     PluginBrowserView, PluginEntry, PluginPanelView, PluginState,
 };
-pub use sampler_panel::{sampler_panel, SamplerPanelView};
+pub use sampler_panel::{sampler_panel, SamplerPanelOut, SamplerPanelView};
 pub use settings::{
     first_run, perf_panel, privacy_panel, settings_tabs, shortcut_editor, theme_editor,
     FirstRunAction, FirstRunModel, FirstRunState, PerfAction, PerfModel, SettingsPage,

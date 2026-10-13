@@ -407,7 +407,7 @@ impl GloomApp {
     fn request_channel_samples(&mut self) {
         let rate = self.rate();
         for ch in &self.project.channels {
-            if let Some(src) = ch.sample() {
+            for src in ch.samples() {
                 self.library.request(src, rate);
             }
         }
@@ -432,20 +432,28 @@ impl GloomApp {
     /// and the sample is sent when the load finishes, so a failed load never leaves the
     /// previous sample playing.
     fn push_sample(&mut self, i: usize) {
-        let sample = match self.project.channels[i].sample() {
-            None => None,
-            Some(src) => match self.library.get(src) {
-                Some(l) => Some(std::sync::Arc::clone(&l.data)),
-                None => {
-                    let rate = self.rate();
-                    self.library.request(&src.clone(), rate);
-                    None
+        let rate = self.rate();
+        let (sample, zones) = match self.project.channels[i].sampler() {
+            None => (None, None),
+            Some(s) => {
+                for src in s.sources() {
+                    if self.library.get(src).is_none() {
+                        self.library.request(&src.clone(), rate);
+                    }
                 }
-            },
+                let lib = &self.library;
+                let get = |src: &gt_core::SampleSource| lib.get(src).map(|l| Arc::clone(&l.data));
+                let fitted = self.stretch.fitted(&self.project, s, &get);
+                gt_engine::zones::sampler_sources(s, get, fitted)
+            }
         };
         self.send(EngineCommand::SetChannelSample {
             slot: i as u16,
             sample,
+        });
+        self.send(EngineCommand::SetChannelZones {
+            slot: i as u16,
+            zones,
         });
     }
 
@@ -500,6 +508,65 @@ impl GloomApp {
             self.project.signatures.clone(),
         )));
         self.push_song();
+        // Samplers in time-stretch mode fit their sample to the new tempo.
+        for i in 0..self.project.channels.len() {
+            if self.project.channels[i]
+                .sampler()
+                .is_some_and(|s| s.stretch_beats > 0.0)
+            {
+                self.push_sample(i);
+            }
+        }
+    }
+
+    /// Makes the selected sampler a multi-sample instrument from `files` (Prompt 23).
+    fn load_zones(&mut self, files: &[std::path::PathBuf]) {
+        let named: Vec<(gt_core::SampleSource, String)> = files
+            .iter()
+            .filter(|p| gt_project::is_audio_file(p))
+            .map(|p| {
+                let name = p
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                (gt_core::SampleSource::File(p.clone()), name)
+            })
+            .collect();
+        if named.is_empty() {
+            return;
+        }
+        let i = self.rack.selected;
+        let Some(s) = self
+            .project
+            .channels
+            .get_mut(i)
+            .and_then(gt_core::Channel::sampler_mut)
+        else {
+            return;
+        };
+        if named.len() == 1 {
+            s.sample = Some(named[0].0.clone());
+            s.zones.clear();
+        } else {
+            s.zones = gt_core::sampler::map_folder(&named);
+            s.zones.truncate(gt_core::SamplerSettings::MAX_ZONES);
+        }
+        self.push_sample(i);
+        self.push_all_params();
+        self.pending_edit = Some("Load samples");
+    }
+
+    /// Files dropped on the window: audio files (or folders of them) go to the selected
+    /// sampler, one as its sample and several as zones.
+    fn on_dropped_files(&mut self, paths: &[std::path::PathBuf]) {
+        let mut files = Vec::new();
+        for p in paths {
+            if p.is_dir() {
+                files.extend(gt_project::list_audio_files(p));
+            } else {
+                files.push(p.clone());
+            }
+        }
+        self.load_zones(&files);
     }
 
     /// Sends every channel's sample and settings, clears slots no longer used, and the song.
@@ -509,6 +576,10 @@ impl GloomApp {
             self.send(EngineCommand::SetChannelSample {
                 slot: slot as u16,
                 sample: None,
+            });
+            self.send(EngineCommand::SetChannelZones {
+                slot: slot as u16,
+                zones: None,
             });
         }
         self.slots_in_use = n;
@@ -539,7 +610,7 @@ impl GloomApp {
         }
         for src in ready {
             for i in 0..self.project.channels.len() {
-                if self.project.channels[i].sample() == Some(&src) {
+                if self.project.channels[i].samples().any(|s| *s == src) {
                     self.push_sample(i);
                 }
             }
@@ -2141,6 +2212,7 @@ impl eframe::App for GloomApp {
                 _ => None,
             })
             .unwrap_or_default();
+        let mut sampler_out = gt_ui::views::SamplerPanelOut::default();
         let (sampler_changed, synth_actions) = if !show_instrument {
             (false, Vec::new())
         } else {
@@ -2180,7 +2252,9 @@ impl eframe::App for GloomApp {
                                 status: status.as_deref(),
                                 channel,
                             };
-                            (sampler_panel(ui, &theme, &mut ch.name, s, view), Vec::new())
+                            let out = sampler_panel(ui, &theme, &mut ch.name, s, view);
+                            sampler_out = out;
+                            (out.changed, Vec::new())
                         }
                         Instrument::Synth(patch) => {
                             let view = SynthPanelView {
@@ -2214,6 +2288,28 @@ impl eframe::App for GloomApp {
         if sampler_changed {
             self.push_all_params();
             self.pending_edit = Some("Instrument settings");
+        }
+        if sampler_out.reload {
+            self.push_sample(self.rack.selected);
+            self.pending_edit = Some("Instrument settings");
+        }
+        if sampler_out.load_folder {
+            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                let files = gt_project::list_audio_files(&dir);
+                self.load_zones(&files);
+            }
+        }
+        if show_instrument {
+            let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .map(|f| f.path().to_path_buf())
+                    .collect()
+            });
+            if !dropped.is_empty() {
+                self.on_dropped_files(&dropped);
+            }
         }
         for a in synth_actions {
             self.on_synth_panel(a);

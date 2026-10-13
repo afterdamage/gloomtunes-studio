@@ -64,6 +64,20 @@ impl std::fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
+/// The audio files directly in `dir`, sorted by name (none if it cannot be read).
+pub fn list_audio_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.is_file() && is_audio_file(p))
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out
+}
+
 /// True if `path` has one of the [`AUDIO_EXTENSIONS`].
 pub fn is_audio_file(path: &Path) -> bool {
     path.extension()
