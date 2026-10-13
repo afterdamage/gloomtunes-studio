@@ -22,6 +22,12 @@
 //! Portamento: each new note glides from the pitch of the previous note, exponentially in
 //! semitones (constant speed in octaves), reaching 99 % of the interval in the glide time.
 //!
+//! Per-note values ([`NoteExpr`]): pan adds to the voice's pan, fine pitch retunes it, mod X
+//! moves the cutoff (±3 octaves) and mod Y the resonance (±0.5), both also matrix sources, and
+//! release velocity scales the release times. A slide note glides the newest held voice
+//! linearly (in semitones) to its key over the slide note's length; a portamento note starts
+//! its own voice at the previous pitch and glides the same way over the glide time.
+//!
 //! Real-time safety: all voices are allocated in [`GloomSynth::new`]; nothing allocates, locks or
 //! panics afterwards.
 
@@ -29,6 +35,7 @@ use crate::adsr::{Adsr, AdsrParams};
 use crate::blep::{blep_sample, Phase, Wave};
 use crate::ladder::{ladder_g, ladder_k, Ladder};
 use crate::lfo::{Lfo, LfoWave, Noise};
+use crate::note::{Glide, NoteExpr};
 
 /// Voices per synth.
 pub const SYNTH_VOICES: usize = 16;
@@ -38,6 +45,12 @@ pub const MAX_UNISON: usize = 7;
 pub const MOD_SLOTS: usize = 8;
 /// Samples per control-rate update.
 pub const CONTROL_FRAMES: u32 = 16;
+/// Portamento time of a porta note when the patch's glide time is zero, in seconds.
+pub const PORTA_DEFAULT_S: f32 = 0.08;
+/// Filter cutoff movement at full note mod X, in octaves.
+const NOTE_X_OCTAVES: f32 = 3.0;
+/// Resonance change at full note mod Y.
+const NOTE_Y_RESONANCE: f32 = 0.5;
 
 /// One oscillator's settings.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -114,6 +127,10 @@ pub enum ModSource {
     ModWheel,
     /// Aftertouch, 0 to 1: the channel's, or the key's own if it is larger.
     Aftertouch,
+    /// The note's mod X, -1 to 1 (0 for a neutral note).
+    ModX,
+    /// The note's mod Y, -1 to 1.
+    ModY,
 }
 
 /// Modulation destinations. Amount 1.0 means the range given for each.
@@ -300,6 +317,15 @@ struct Voice {
     random: f32,
     pitch: f32,
     target_pitch: f32,
+    /// A linear glide in progress (slide or portamento): semitones per control block, and
+    /// blocks left.
+    slide_step: f32,
+    slide_left: u32,
+    /// Per-note pan, mod X/Y (bipolar) and release time multiplier.
+    note_pan: f32,
+    mod_x: f32,
+    mod_y: f32,
+    release_scale: f32,
     phases: [[Phase; MAX_UNISON]; 2],
     sub: Phase,
     noise: Noise,
@@ -343,6 +369,12 @@ impl Voice {
             random: 0.0,
             pitch: 60.0,
             target_pitch: 60.0,
+            slide_step: 0.0,
+            slide_left: 0,
+            note_pan: 0.0,
+            mod_x: 0.0,
+            mod_y: 0.0,
+            release_scale: 1.0,
             phases: [[Phase::default(); MAX_UNISON]; 2],
             sub: Phase::default(),
             noise: Noise::new(seed),
@@ -394,6 +426,11 @@ impl Voice {
         self.random = self.noise.next_value();
         self.target_pitch = f32::from(key);
         self.pitch = from_pitch;
+        self.slide_left = 0;
+        self.note_pan = 0.0;
+        self.mod_x = 0.0;
+        self.mod_y = 0.0;
+        self.release_scale = 1.0;
         self.ctl_left = 0;
         if stolen {
             self.amp.retrigger(amp);
@@ -424,6 +461,19 @@ impl Voice {
         }
     }
 
+    /// Glides linearly in semitones from the current pitch to `target` over `seconds`.
+    fn slide_to(&mut self, target: f32, seconds: f32, sr: f32) {
+        self.target_pitch = target;
+        let blocks = (seconds.max(0.0) * sr / CONTROL_FRAMES as f32).round() as u32;
+        if blocks == 0 {
+            self.pitch = target;
+            self.slide_left = 0;
+        } else {
+            self.slide_step = (target - self.pitch) / blocks as f32;
+            self.slide_left = blocks;
+        }
+    }
+
     /// Recomputes modulation and everything derived from it, for the next `CONTROL_FRAMES`
     /// samples.
     fn control(&mut self, p: &SynthSettings, x: &Expression, sr: f32, glide_coef: f32) {
@@ -445,6 +495,8 @@ impl Voice {
                 ModSource::Random => self.random,
                 ModSource::ModWheel => x.mod_wheel,
                 ModSource::Aftertouch => x.pressure.max(self.pressure),
+                ModSource::ModX => self.mod_x,
+                ModSource::ModY => self.mod_y,
             };
             m[slot.dest as usize] += slot.amount * s;
         }
@@ -460,7 +512,16 @@ impl Voice {
             lfo.advance(rate * ctl / sr);
         }
 
-        self.pitch += (self.target_pitch - self.pitch) * glide_coef;
+        if self.slide_left > 0 {
+            self.slide_left -= 1;
+            self.pitch = if self.slide_left == 0 {
+                self.target_pitch
+            } else {
+                self.pitch + self.slide_step
+            };
+        } else {
+            self.pitch += (self.target_pitch - self.pitch) * glide_coef;
+        }
         let base = self.pitch + x.bend_semis + md(ModDest::Pitch) * 12.0;
         let n = usize::from(p.unison.clamp(1, MAX_UNISON as u8));
         self.n_uni = n;
@@ -514,15 +575,16 @@ impl Voice {
 
         let octaves = p.filter_env_octaves * self.menv.level()
             + p.key_track * (self.pitch - 60.0) / 12.0
-            + md(ModDest::Cutoff) * 6.0;
+            + md(ModDest::Cutoff) * 6.0
+            + self.mod_x * NOTE_X_OCTAVES;
         let g = ladder_g(p.cutoff_hz * octaves.clamp(-12.0, 12.0).exp2(), sr);
-        self.k = ladder_k(p.resonance + md(ModDest::Resonance));
+        self.k = ladder_k(p.resonance + md(ModDest::Resonance) + self.mod_y * NOTE_Y_RESONANCE);
         self.drive = 1.0 + 3.0 * p.drive.clamp(0.0, 1.0);
 
         let vs = p.velocity_sensitivity.clamp(0.0, 1.0);
         let vel = 1.0 - vs + vs * self.velocity * self.velocity;
         let amp = p.volume.max(0.0) * vel * (1.0 + md(ModDest::Amp)).clamp(0.0, 2.0);
-        let (pl, pr) = pan_unit(md(ModDest::Pan));
+        let (pl, pr) = pan_unit((md(ModDest::Pan) + self.note_pan).clamp(-1.0, 1.0));
         let (tl, tr) = (amp * pl, amp * pr);
 
         if self.fresh {
@@ -678,10 +740,32 @@ impl GloomSynth {
 
     /// Starts a note. `age` orders voices for stealing (larger is newer).
     pub fn note_on(&mut self, key: u8, velocity: f32, age: u64) {
+        self.note_on_expr(key, velocity, age, NoteExpr::default());
+    }
+
+    /// Starts a note with per-note values. A slide note retunes the newest held voice instead
+    /// (or plays as a plain note when none is held); a portamento note starts at the previous
+    /// note's pitch and glides to its own over the glide time ([`PORTA_DEFAULT_S`] when the
+    /// patch has none).
+    pub fn note_on_expr(&mut self, key: u8, velocity: f32, age: u64, e: NoteExpr) {
+        let target = f32::from(key) + e.fine / 100.0;
+        if let Glide::Slide { seconds } = e.glide {
+            let sr = self.sr;
+            if let Some(v) = self
+                .voices
+                .iter_mut()
+                .filter(|v| v.active && v.held)
+                .max_by_key(|v| v.age)
+            {
+                v.slide_to(target, seconds, sr);
+                self.last_pitch = Some(target);
+                return;
+            }
+        }
         let idx = self.pick_voice();
         let from = match self.last_pitch {
-            Some(p) if self.glide_coef < 1.0 => p,
-            _ => f32::from(key),
+            Some(p) if self.glide_coef < 1.0 || e.glide == Glide::Porta => p,
+            _ => target,
         };
         let unison = usize::from(self.settings.unison.clamp(1, MAX_UNISON as u8));
         self.voices[idx].start(
@@ -693,7 +777,22 @@ impl GloomSynth {
             self.amp_params,
             self.menv_params,
         );
-        self.last_pitch = Some(f32::from(key));
+        let v = &mut self.voices[idx];
+        v.note_pan = e.pan.clamp(-1.0, 1.0);
+        v.mod_x = e.x();
+        v.mod_y = e.y();
+        v.release_scale = e.release_scale();
+        v.target_pitch = target;
+        if e.glide == Glide::Porta && from != target {
+            let ms = self.settings.glide_ms;
+            let s = if ms > 0.0 {
+                ms * 0.001
+            } else {
+                PORTA_DEFAULT_S
+            };
+            v.slide_to(target, s, self.sr);
+        }
+        self.last_pitch = Some(target);
     }
 
     fn pick_voice(&self) -> usize {
@@ -721,8 +820,8 @@ impl GloomSynth {
                     v.sustained = true;
                 } else {
                     v.held = false;
-                    v.amp.release();
-                    v.menv.release();
+                    v.amp.release_scaled(v.release_scale);
+                    v.menv.release_scaled(v.release_scale);
                 }
             }
         }
@@ -738,8 +837,8 @@ impl GloomSynth {
             if v.active && v.sustained {
                 v.sustained = false;
                 v.held = false;
-                v.amp.release();
-                v.menv.release();
+                v.amp.release_scaled(v.release_scale);
+                v.menv.release_scaled(v.release_scale);
             }
         }
     }
@@ -1103,5 +1202,107 @@ mod tests {
         s.set_key_pressure(57, 1.0);
         let (l, _) = render(&mut s, 4800);
         assert!(rms(&l[2400..]) < 1e-3);
+    }
+
+    fn sounding_pitch(s: &GloomSynth) -> f32 {
+        s.voices.iter().find(|v| v.active).map_or(0.0, |v| v.pitch)
+    }
+
+    #[test]
+    fn slide_glides_linearly_in_semitones_over_its_length() {
+        let mut s = GloomSynth::new(SR);
+        s.set_settings(&sine_patch());
+        s.note_on(60, 1.0, 1);
+        render(&mut s, 480);
+        let slide = NoteExpr {
+            glide: Glide::Slide { seconds: 0.5 },
+            ..NoteExpr::default()
+        };
+        s.note_on_expr(72, 1.0, 2, slide);
+        assert_eq!(s.active_voices(), 1, "a slide starts no voice");
+        // Every 50 ms the pitch has moved a tenth of the way: a straight line in semitones.
+        for k in 1..=10 {
+            render(&mut s, 2400);
+            let want = 60.0 + 12.0 * k as f32 / 10.0;
+            let got = sounding_pitch(&s);
+            assert!((got - want).abs() < 0.1, "{k}: {got} vs {want}");
+        }
+        let (l, _) = render(&mut s, 48_000);
+        let f = pitch_hz(&l);
+        assert!((f - 523.25).abs() <= 1.0, "{f}");
+        // The voice still belongs to the note it started as.
+        s.note_off(60);
+        render(&mut s, 9600);
+        assert!(!s.is_active());
+    }
+
+    #[test]
+    fn a_slide_with_nothing_held_plays_as_a_note() {
+        let mut s = GloomSynth::new(SR);
+        s.set_settings(&sine_patch());
+        let slide = NoteExpr {
+            glide: Glide::Slide { seconds: 0.5 },
+            ..NoteExpr::default()
+        };
+        s.note_on_expr(69, 1.0, 1, slide);
+        assert_eq!(s.active_voices(), 1);
+        assert_eq!(sounding_pitch(&s), 69.0);
+    }
+
+    #[test]
+    fn portamento_starts_from_the_last_note() {
+        let mut s = GloomSynth::new(SR);
+        s.set_settings(&sine_patch());
+        s.note_on(60, 1.0, 1);
+        render(&mut s, 480);
+        s.note_off(60);
+        let porta = NoteExpr {
+            glide: Glide::Porta,
+            ..NoteExpr::default()
+        };
+        s.note_on_expr(64, 1.0, 2, porta);
+        render(&mut s, 64);
+        let p = s.voices.iter().find(|v| v.key == 64).unwrap().pitch;
+        assert!(p > 60.0 && p < 61.0, "{p}");
+        render(&mut s, (PORTA_DEFAULT_S * SR) as usize);
+        let p = s.voices.iter().find(|v| v.key == 64).unwrap().pitch;
+        assert!((p - 64.0).abs() < 1e-3, "{p}");
+    }
+
+    #[test]
+    fn per_note_fine_pitch_and_pan_reach_the_output() {
+        let mut s = GloomSynth::new(SR);
+        s.set_settings(&sine_patch());
+        let e = NoteExpr {
+            fine: 50.0,
+            pan: -1.0,
+            ..NoteExpr::default()
+        };
+        s.note_on_expr(69, 1.0, 1, e);
+        let (l, r) = render(&mut s, 48_000);
+        let f = pitch_hz(&l);
+        let want = 440.0 * (50.0_f32 / 1200.0).exp2();
+        assert!((f - want).abs() <= 1.0, "{f} vs {want}");
+        assert!(rms(&l) > 0.1 && rms(&r) < 1e-4, "{} {}", rms(&l), rms(&r));
+    }
+
+    #[test]
+    fn release_velocity_scales_the_release_time() {
+        let tail = |release: f32| {
+            let mut s = GloomSynth::new(SR);
+            let mut p = sine_patch();
+            p.amp_env.release_ms = 100.0;
+            s.set_settings(&p);
+            let e = NoteExpr {
+                release,
+                ..NoteExpr::default()
+            };
+            s.note_on_expr(69, 1.0, 1, e);
+            render(&mut s, 4800);
+            s.note_off(69);
+            let (l, _) = render(&mut s, 4800);
+            rms(&l[2400..])
+        };
+        assert!(tail(0.0) > tail(0.5) && tail(0.5) > tail(1.0));
     }
 }

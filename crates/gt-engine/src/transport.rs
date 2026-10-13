@@ -15,6 +15,7 @@
 //! so each event fires exactly once regardless of how the timeline is cut into buffers.
 
 use gt_core::{TempoMap, Tick, TimeSigMap, PPQ};
+use gt_dsp::{Glide, NoteExpr};
 
 use crate::command::{LoopRegion, TransportState};
 use crate::song::{NoteKind, SongSnapshot};
@@ -50,6 +51,8 @@ pub enum EventKind {
         key: u8,
         /// Velocity, 0 to 1.
         velocity: f32,
+        /// Per-note values; a slide's time is in seconds here.
+        expr: NoteExpr,
     },
     /// Playback started, located or wrapped while this song note was already under way: it
     /// starts now, `into_s` seconds into the note. `held` is false when the note itself has
@@ -65,6 +68,8 @@ pub enum EventKind {
         into_s: f32,
         /// The note is still held.
         held: bool,
+        /// Per-note values.
+        expr: NoteExpr,
     },
     /// A recorded controller of a channel slot takes a value.
     Control {
@@ -497,6 +502,7 @@ impl Transport {
                     velocity: n.velocity,
                     into_s: (now_s - self.tempo.tick_to_seconds(n.on as f64)) as f32,
                     held,
+                    expr: n.expr,
                 },
             });
         }
@@ -537,11 +543,23 @@ impl Transport {
                 let f = self.frame_of_tick(tick as f64);
                 if f >= a as i64 && f < b as i64 {
                     let kind = match e.kind {
-                        NoteKind::On { velocity } => EventKind::NoteOn {
-                            slot: e.slot,
-                            key: e.key,
+                        NoteKind::On {
                             velocity,
-                        },
+                            mut expr,
+                            len,
+                        } => {
+                            if let Glide::Slide { seconds } = &mut expr.glide {
+                                *seconds = (self.tempo.tick_to_seconds((tick + len) as f64)
+                                    - self.tempo.tick_to_seconds(tick as f64))
+                                    as f32;
+                            }
+                            EventKind::NoteOn {
+                                slot: e.slot,
+                                key: e.key,
+                                velocity,
+                                expr,
+                            }
+                        }
                         NoteKind::Off => EventKind::NoteOff {
                             slot: e.slot,
                             key: e.key,
@@ -896,6 +914,7 @@ mod tests {
                 slot: 0,
                 key,
                 velocity: 0.8,
+                expr: NoteExpr::default(),
             })
             .collect();
         notes.insert(
@@ -906,6 +925,7 @@ mod tests {
                 slot: 0,
                 key: 50,
                 velocity: 0.8,
+                expr: NoteExpr::default(),
             },
         );
         let mut events: Vec<SongEvent> = Vec::new();
@@ -916,6 +936,8 @@ mod tests {
                 key: n.key,
                 kind: NoteKind::On {
                     velocity: n.velocity,
+                    expr: NoteExpr::default(),
+                    len: n.off - n.on,
                 },
             });
             events.push(SongEvent {

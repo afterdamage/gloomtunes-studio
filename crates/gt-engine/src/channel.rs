@@ -5,7 +5,10 @@ use std::sync::Arc;
 use gt_core::params::ChannelParam;
 use gt_core::synth::{SynthParam, MOD_SLOTS};
 use gt_core::{SampleData, ROOT_KEY};
-use gt_dsp::{AdsrParams, Expression, GloomSynth, LinearRamp, SamplerVoice, VoiceRegion};
+use gt_dsp::synth::PORTA_DEFAULT_S;
+use gt_dsp::{
+    AdsrParams, Expression, Glide, GloomSynth, LinearRamp, NoteExpr, SamplerVoice, VoiceRegion,
+};
 
 use crate::song::{ChannelParams, InstrumentKind, PatchValues};
 
@@ -59,6 +62,24 @@ pub(crate) struct ChannelSlot {
     /// Sustain pedal down, and the sampler voices it holds after their key was let go.
     sustain: bool,
     sustained: [bool; VOICES_PER_CHANNEL],
+    /// Read step of the last sampler note, where portamento starts from.
+    last_step: Option<f64>,
+}
+
+/// Mod X below the middle closes a per-voice low-pass down to this frequency at 0.
+const TONE_MIN_HZ: f32 = 200.0;
+/// Mod Y above the middle starts the sample up to this far into its region.
+const START_OFFSET_MAX: f64 = 0.5;
+
+/// One-pole coefficient for mod X: open from the middle up, closing to [`TONE_MIN_HZ`].
+fn tone_coef(sr: f32, e: &NoteExpr) -> f32 {
+    let x = e.x();
+    if x >= 0.0 {
+        return 1.0;
+    }
+    // From 20 kHz at the middle down to 200 Hz at 0, evenly in octaves.
+    let hz = TONE_MIN_HZ * 100.0_f32.powf(1.0 + x);
+    1.0 - (-std::f32::consts::TAU * hz / sr.max(1.0)).exp()
 }
 
 /// Equal-power pan law: -3 dB per side at centre, so a sound keeps its loudness as it moves.
@@ -86,6 +107,7 @@ impl ChannelSlot {
             expr: Expression::default(),
             sustain: false,
             sustained: [false; VOICES_PER_CHANNEL],
+            last_step: None,
         }
     }
 
@@ -258,11 +280,17 @@ impl ChannelSlot {
 
     /// Starts a note. `age` orders voices for stealing.
     pub(crate) fn note_on(&mut self, key: u8, velocity: f32, age: u64) {
+        self.note_on_expr(key, velocity, age, NoteExpr::default());
+    }
+
+    /// Starts a note with per-note values (Prompt 21). A slide note starts no voice: the
+    /// newest held voice glides to its key instead.
+    pub(crate) fn note_on_expr(&mut self, key: u8, velocity: f32, age: u64, e: NoteExpr) {
         if self.params.kind == InstrumentKind::Plugin {
             return;
         }
         if self.params.kind == InstrumentKind::Synth {
-            self.synth.note_on(key, velocity, age);
+            self.synth.note_on_expr(key, velocity, age, e);
             return;
         }
         let Some(sample) = &self.sample else {
@@ -273,9 +301,22 @@ impl ChannelSlot {
             return;
         }
         let p = self.effective();
-        let semis = p.pitch + self.expr.bend_semis + f32::from(key) - f32::from(ROOT_KEY);
+        let semis =
+            p.pitch + self.expr.bend_semis + f32::from(key) - f32::from(ROOT_KEY) + e.fine / 100.0;
         let step =
             f64::from((semis / 12.0).exp2()) * f64::from(sample.sample_rate) / f64::from(self.sr);
+        if let Glide::Slide { seconds } = e.glide {
+            let newest = self
+                .voices
+                .iter_mut()
+                .filter(|v| v.is_held())
+                .max_by_key(|v| v.age);
+            if let Some(v) = newest {
+                v.glide_to(step, (seconds.max(0.0) * self.sr) as u32);
+                self.last_step = Some(step);
+                return;
+            }
+        }
         let region = VoiceRegion::from_fractions(frames, p.start, p.end, p.looped);
         let v = velocity.clamp(0.0, 1.0);
         // Velocity to amplitude: squared, a common curve that spreads soft hits more evenly
@@ -295,17 +336,45 @@ impl ChannelSlot {
                 }
                 oldest
             });
-        self.voices[idx].trigger(key, gain, step, region, self.env, age);
+        let from = match (e.glide, self.last_step) {
+            (Glide::Porta, Some(last)) => last,
+            _ => step,
+        };
+        let voice = &mut self.voices[idx];
+        voice.trigger(key, gain, from, region, self.env, age);
+        voice.set_note_values(e.pan, tone_coef(self.sr, &e), e.release_scale());
+        if from != step {
+            voice.glide_to(step, (PORTA_DEFAULT_S * self.sr) as u32);
+        }
+        let y = e.y();
+        if y > 0.0 {
+            voice
+                .seek(region.start + f64::from(y) * START_OFFSET_MAX * (region.end - region.start));
+        }
         self.sustained[idx] = false;
+        self.last_step = Some(step);
     }
 
     /// Starts a note that has been under way for `into_s` seconds (playback started or
     /// jumped into it). The synth starts the note fresh while it is `held`; the sampler starts
-    /// its voice that far into the sample, if the sample is still sounding there.
-    pub(crate) fn chase(&mut self, key: u8, velocity: f32, into_s: f32, held: bool, age: u64) {
+    /// its voice that far into the sample, if the sample is still sounding there. Slides and
+    /// portamento are not chased: the note starts at its own pitch.
+    pub(crate) fn chase(
+        &mut self,
+        key: u8,
+        velocity: f32,
+        into_s: f32,
+        held: bool,
+        age: u64,
+        e: NoteExpr,
+    ) {
+        let e = NoteExpr {
+            glide: Glide::None,
+            ..e
+        };
         if self.params.kind == InstrumentKind::Synth {
             if held {
-                self.synth.note_on(key, velocity, age);
+                self.synth.note_on_expr(key, velocity, age, e);
             }
             return;
         }
@@ -321,11 +390,14 @@ impl ChannelSlot {
             return;
         }
         let frames = sample.frames();
-        let semis = p.pitch + self.expr.bend_semis + f32::from(key) - f32::from(ROOT_KEY);
+        let semis =
+            p.pitch + self.expr.bend_semis + f32::from(key) - f32::from(ROOT_KEY) + e.fine / 100.0;
         let step =
             f64::from((semis / 12.0).exp2()) * f64::from(sample.sample_rate) / f64::from(self.sr);
         let region = VoiceRegion::from_fractions(frames, p.start, p.end, p.looped);
-        let mut pos = region.start + f64::from(into_s.max(0.0)) * f64::from(self.sr) * step;
+        let offset = f64::from(e.y().max(0.0)) * START_OFFSET_MAX * (region.end - region.start);
+        let mut pos =
+            region.start + offset + f64::from(into_s.max(0.0)) * f64::from(self.sr) * step;
         if pos >= region.end {
             if !p.looped {
                 return;
@@ -333,7 +405,7 @@ impl ChannelSlot {
             let span = (region.end - region.start).max(1.0);
             pos = region.start + (pos - region.start) % span;
         }
-        self.note_on(key, velocity, age);
+        self.note_on_expr(key, velocity, age, e);
         if let Some(v) = self
             .voices
             .iter_mut()

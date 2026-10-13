@@ -186,12 +186,7 @@ impl Recorder {
         };
         Some((
             k.0,
-            Note {
-                start,
-                length: length.clamp(1, len - start),
-                key: k.1,
-                velocity,
-            },
+            Note::new(start, length.clamp(1, len - start), k.1, velocity),
         ))
     }
 
@@ -267,15 +262,7 @@ impl StepRecorder {
                 return None;
             }
             self.held.push((slot, key));
-            return Some((
-                slot,
-                Note {
-                    start: self.cursor,
-                    length: step,
-                    key: key.min(127),
-                    velocity,
-                },
-            ));
+            return Some((slot, Note::new(self.cursor, step, key.min(127), velocity)));
         }
         let i = self.held.iter().position(|&h| h == (slot, key))?;
         self.held.remove(i);
@@ -383,12 +370,7 @@ pub fn capture(
 }
 
 fn note(start: i64, end: i64, key: u8, velocity: f32) -> Note {
-    Note {
-        start,
-        length: (end - start).max(1),
-        key,
-        velocity,
-    }
+    Note::new(start, (end - start).max(1), key, velocity)
 }
 
 /// Milliseconds as ticks at `bpm`.

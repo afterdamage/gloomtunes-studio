@@ -60,6 +60,15 @@ pub struct SamplerVoice {
     gain: f32,
     env: Adsr,
     declick_frames: f64,
+    /// Per-note balance gains (1 and 1 at centre).
+    pan: (f32, f32),
+    /// One-pole low-pass from the note's mod X: coefficient (1 = open) and state.
+    tone: f32,
+    tone_state: (f32, f32),
+    /// A glide in progress: the step is multiplied by `glide_mul` for `glide_left` frames.
+    glide_mul: f64,
+    glide_left: u32,
+    release_scale: f32,
     /// Trigger order, for stealing the oldest voice.
     pub age: u64,
 }
@@ -80,6 +89,12 @@ impl SamplerVoice {
             gain: 0.0,
             env: Adsr::default(),
             declick_frames: DECLICK_S * f64::from(sample_rate.max(1.0)),
+            pan: (1.0, 1.0),
+            tone: 1.0,
+            tone_state: (0.0, 0.0),
+            glide_mul: 1.0,
+            glide_left: 0,
+            release_scale: 1.0,
             age: 0,
         }
     }
@@ -103,6 +118,40 @@ impl SamplerVoice {
         self.gain = gain;
         self.env.trigger(env);
         self.age = age;
+        self.pan = (1.0, 1.0);
+        self.tone = 1.0;
+        self.tone_state = (0.0, 0.0);
+        self.glide_left = 0;
+        self.release_scale = 1.0;
+    }
+
+    /// Per-note values after [`Self::trigger`]: balance `pan` (-1 to 1), a one-pole low-pass
+    /// coefficient `tone` (1 is open) and the release time multiplier.
+    pub fn set_note_values(&mut self, pan: f32, tone: f32, release_scale: f32) {
+        let p = pan.clamp(-1.0, 1.0);
+        self.pan = (1.0 - p.max(0.0), 1.0 + p.min(0.0));
+        self.tone = tone.clamp(0.0, 1.0);
+        self.release_scale = release_scale;
+    }
+
+    /// Glides the read step to `target_step` over `frames` output frames, evenly in
+    /// semitones (slide notes and portamento).
+    pub fn glide_to(&mut self, target_step: f64, frames: u32) {
+        let valid = target_step.is_finite() && target_step > 0.0;
+        if frames == 0 || !valid {
+            if valid {
+                self.step = target_step;
+            }
+            self.glide_left = 0;
+            return;
+        }
+        self.glide_mul = (target_step / self.step).powf(1.0 / f64::from(frames));
+        self.glide_left = frames;
+    }
+
+    /// The current read step.
+    pub fn step(&self) -> f64 {
+        self.step
     }
 
     /// Moves the play position to frame `pos` of the sample (chasing a note that started
@@ -114,7 +163,7 @@ impl SamplerVoice {
     /// Note-off: loop voices enter their release, one-shot voices play on.
     pub fn release(&mut self) {
         if self.region.looped {
-            self.env.release();
+            self.env.release_scaled(self.release_scale);
         }
     }
 
@@ -185,12 +234,22 @@ impl SamplerVoice {
                     g *= (remaining / self.declick_frames) as f32;
                 }
             }
-            *ol += read(left) * g;
-            *or += read(right) * g;
+            let (mut a, mut b) = (read(left), read(right));
+            if self.tone < 1.0 {
+                self.tone_state.0 += (a - self.tone_state.0) * self.tone;
+                self.tone_state.1 += (b - self.tone_state.1) * self.tone;
+                (a, b) = self.tone_state;
+            }
+            *ol += a * g * self.pan.0;
+            *or += b * g * self.pan.1;
             if !self.env.is_active() {
                 self.active = false;
             }
             self.pos += self.step;
+            if self.glide_left > 0 {
+                self.glide_left -= 1;
+                self.step *= self.glide_mul;
+            }
         }
     }
 }

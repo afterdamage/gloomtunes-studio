@@ -604,6 +604,16 @@ sound identical; the golden export test stays.
 - Limits: no note-by-note pitch editing; no vocoder sibilance path; user responses are not
   embedded when a project's files are collected.
 
+### Prompt 21: Notes and piano roll
+- Per-note pan, release velocity, fine pitch, mod X/Y, slide, portamento, mute and colour
+  groups (schema 5); Gloom Synth and the sampler play them, CLAP and VST3 instruments get note
+  expressions (D122).
+- Piano roll: scale snap, fold view, editing several channels at once, paste at the mouse or
+  playhead, Stretch drag, keyboard nudge/length/velocity by snap or fine steps, a note
+  properties row and a bottom lane for any note property (D123).
+- Limits: AU instruments ignore per-note values; quantize and humanize act on the edited
+  channel only; chased notes start without their slide or portamento.
+
 ---
 
 ## v1.0 scope

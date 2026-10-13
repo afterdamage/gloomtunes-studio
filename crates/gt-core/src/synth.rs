@@ -141,6 +141,8 @@ named_enum! {
         Random => "random", "Random";
         ModWheel => "modwheel", "Mod wheel";
         Aftertouch => "aftertouch", "Aftertouch";
+        ModX => "modx", "Note mod X";
+        ModY => "mody", "Note mod Y";
     }
 }
 

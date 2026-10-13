@@ -10,7 +10,7 @@ use gt_core::synth::{
     ModDest as DocDest, ModSlot as DocModSlot, ModSource as DocSource, SynthParam as P,
 };
 use gt_core::{
-    Adsr, AutoPoint, Channel, ClipKind, ControlKind, Fade, FadeCurve, Instrument, LoopMode,
+    Adsr, AutoPoint, Channel, ClipKind, ControlKind, Fade, FadeCurve, Instrument, LoopMode, Note,
     ParamId, ParamInfo, Pattern, Project, SampleData, SampleSource, SynthPatch, STEP_TICKS,
 };
 
@@ -18,7 +18,7 @@ use crate::control::ParamDest;
 use gt_dsp::synth::{
     EnvSettings, LfoSettings, ModDest, ModSlot, ModSource, OscSettings, SynthSettings, MOD_SLOTS,
 };
-use gt_dsp::{LfoWave, Wave};
+use gt_dsp::{Glide, LfoWave, NoteExpr, Wave};
 
 /// What a pattern event does.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -27,6 +27,11 @@ pub enum NoteKind {
     On {
         /// Velocity.
         velocity: f32,
+        /// Pan, fine pitch, release, mod X/Y and glide (Prompt 21). A slide's time is filled
+        /// in by the transport from `len`.
+        expr: NoteExpr,
+        /// The note's length in ticks.
+        len: i64,
     },
     /// Release the note.
     Off,
@@ -197,28 +202,33 @@ pub struct NoteSpan {
     pub key: u8,
     /// Velocity.
     pub velocity: f32,
+    /// Per-note values.
+    pub expr: NoteExpr,
 }
 
 /// Pairs sorted note events into spans (each note-off ends the earliest open note of its
 /// slot and key), sorted by start.
 fn note_spans(events: &[SongEvent]) -> Vec<NoteSpan> {
-    let mut open: Vec<(u16, u8, i64, f32)> = Vec::new();
+    let mut open: Vec<(u16, u8, i64, f32, NoteExpr)> = Vec::new();
     let mut out = Vec::new();
     for e in events {
         match e.kind {
-            NoteKind::On { velocity } => open.push((e.slot, e.key, e.tick, velocity)),
+            NoteKind::On { velocity, expr, .. } => {
+                open.push((e.slot, e.key, e.tick, velocity, expr));
+            }
             NoteKind::Off => {
                 if let Some(i) = open
                     .iter()
-                    .position(|&(s, k, _, _)| s == e.slot && k == e.key)
+                    .position(|&(s, k, ..)| s == e.slot && k == e.key)
                 {
-                    let (slot, key, on, velocity) = open.remove(i);
+                    let (slot, key, on, velocity, expr) = open.remove(i);
                     out.push(NoteSpan {
                         on,
                         off: e.tick,
                         slot,
                         key,
                         velocity,
+                        expr,
                     });
                 }
             }
@@ -259,8 +269,7 @@ impl SongSnapshot {
                 push_note(
                     &mut events,
                     slot,
-                    n.key,
-                    n.velocity,
+                    n,
                     on.rem_euclid(length),
                     off.rem_euclid(length),
                 );
@@ -309,14 +318,7 @@ impl SongSnapshot {
                     continue;
                 }
                 let on = n.start + swing_of(n.start, swing);
-                push_note(
-                    &mut events,
-                    slot,
-                    n.key,
-                    n.velocity,
-                    on,
-                    on + n.length.max(1),
-                );
+                push_note(&mut events, slot, n, on, on + n.length.max(1));
             }
         }
         events.sort_by_key(SongEvent::order);
@@ -660,19 +662,43 @@ fn swing_of(start: i64, swing: i64) -> i64 {
     }
 }
 
-fn push_note(events: &mut Vec<SongEvent>, slot: usize, key: u8, velocity: f32, on: i64, off: i64) {
+/// The engine's per-note values for a document note. A slide's time is set by the transport.
+pub fn note_expr(n: &Note) -> NoteExpr {
+    NoteExpr {
+        pan: n.pan,
+        fine: n.fine,
+        release: n.release,
+        mod_x: n.mod_x,
+        mod_y: n.mod_y,
+        glide: if n.slide {
+            Glide::Slide { seconds: 0.0 }
+        } else if n.porta {
+            Glide::Porta
+        } else {
+            Glide::None
+        },
+    }
+}
+
+/// Adds a note's on and off events. Muted notes play nothing.
+fn push_note(events: &mut Vec<SongEvent>, slot: usize, n: &Note, on: i64, off: i64) {
+    if n.muted {
+        return;
+    }
     events.push(SongEvent {
         tick: on,
         slot: slot as u16,
-        key,
+        key: n.key,
         kind: NoteKind::On {
-            velocity: velocity.clamp(0.0, 1.0),
+            velocity: n.velocity.clamp(0.0, 1.0),
+            expr: note_expr(n),
+            len: n.length.max(1),
         },
     });
     events.push(SongEvent {
         tick: off,
         slot: slot as u16,
-        key,
+        key: n.key,
         kind: NoteKind::Off,
     });
 }
@@ -723,7 +749,7 @@ fn expand_pattern(
                 }
                 let on = clip.start + (src - src_lo);
                 let off = (on + n.length.max(1)).min(clip.end());
-                push_note(events, slot, n.key, n.velocity, on, off);
+                push_note(events, slot, n, on, off);
             }
         }
     }
@@ -1008,6 +1034,8 @@ fn synth_settings_of(
                 DocSource::Random => ModSource::Random,
                 DocSource::ModWheel => ModSource::ModWheel,
                 DocSource::Aftertouch => ModSource::Aftertouch,
+                DocSource::ModX => ModSource::ModX,
+                DocSource::ModY => ModSource::ModY,
             },
             dest: match d.dest {
                 DocDest::Off => ModDest::Off,

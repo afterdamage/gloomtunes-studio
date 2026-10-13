@@ -116,6 +116,16 @@ impl Adsr {
         }
     }
 
+    /// Enters the release stage with the release time multiplied by `scale` (a note's release
+    /// velocity).
+    pub fn release_scaled(&mut self, scale: f32) {
+        if scale.is_finite() && scale > 0.0 && scale != 1.0 {
+            // k = e^(-4.6 / frames): a time `scale` times longer is k^(1 / scale).
+            self.p.release_k = self.p.release_k.powf(1.0 / scale);
+        }
+        self.release();
+    }
+
     /// Stops immediately.
     pub fn reset(&mut self) {
         self.stage = Stage::Idle;

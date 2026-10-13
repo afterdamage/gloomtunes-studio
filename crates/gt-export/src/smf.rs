@@ -103,7 +103,7 @@ pub fn to_bytes(project: &Project, scope: SmfScope) -> Vec<u8> {
             .filter(|e| usize::from(e.slot) == slot && e.tick >= 0)
             .map(|e| {
                 let message = match e.kind {
-                    NoteKind::On { velocity } => MidiMessage::NoteOn {
+                    NoteKind::On { velocity, .. } => MidiMessage::NoteOn {
                         key: u7c(e.key),
                         vel: u7c((velocity * 127.0).round().max(1.0) as i64),
                     },
@@ -223,12 +223,7 @@ pub fn parse(bytes: &[u8]) -> Result<SmfImport, SmfError> {
                         at: i64| {
             if let Some((start, velocity)) = held[ch][key].take() {
                 let (s, e) = (scale(start), scale(at));
-                notes[ch].push(Note {
-                    start: s,
-                    length: (e - s).max(1),
-                    key: key as u8,
-                    velocity,
-                });
+                notes[ch].push(Note::new(s, (e - s).max(1), key as u8, velocity));
             }
         };
         for ev in track {

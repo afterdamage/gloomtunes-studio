@@ -60,12 +60,7 @@ mod tests {
     use super::*;
 
     fn note(start: i64, key: u8) -> Note {
-        Note {
-            start,
-            length: 100,
-            key,
-            velocity: 0.5,
-        }
+        Note::new(start, 100, key, 0.5)
     }
 
     #[test]
