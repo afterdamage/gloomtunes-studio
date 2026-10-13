@@ -21,7 +21,9 @@ mod com;
 mod process;
 
 use std::cell::RefCell;
-use std::ffi::{c_char, c_void};
+use std::ffi::c_char;
+#[cfg(unix)]
+use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
