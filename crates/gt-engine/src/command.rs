@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use gt_core::{SampleData, TempoMap, Tick, TimeSigMap};
 
-use crate::control::ModPlan;
+use crate::control::{ModPlan, ParamDest};
 use crate::input::{CalibrationSink, InputFeed, InputRoutes, RecordSink};
 use crate::mixer::{EffectBox, MixerParams};
 use crate::plugin::PluginBox;
@@ -132,6 +132,9 @@ pub enum EngineCommand {
     SetLiveChannel(Option<u16>),
     /// Where each MIDI input port and channel plays (D109).
     SetLiveRoutes(Box<crate::LiveRoutes>),
+    /// Parameters being recorded: their automation lanes stop playing so the document value
+    /// (the control the user moves) applies (ARCHITECTURE.md D111).
+    SetWriting(Box<Vec<ParamDest>>),
     /// Put a plugin into the plugin table (or empty an entry). Channels and effect slots that
     /// name its instance start using it. The previous one comes back as garbage, stopped.
     SetPlugin {
@@ -191,6 +194,7 @@ impl EngineCommand {
                 | Self::SetRecorder(_)
                 | Self::Calibrate(_)
                 | Self::SetLiveRoutes(_)
+                | Self::SetWriting(_)
         )
     }
 }
@@ -290,4 +294,6 @@ pub enum Garbage {
     Calibration(Box<CalibrationSink>),
     /// Replaced live routes.
     LiveRoutes(Box<crate::LiveRoutes>),
+    /// A replaced list of parameters being recorded.
+    Writing(Box<Vec<ParamDest>>),
 }

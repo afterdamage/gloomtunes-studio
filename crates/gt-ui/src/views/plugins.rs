@@ -8,7 +8,7 @@ use std::sync::Arc;
 use egui::{vec2, RichText, Ui};
 use gt_core::{ParamId, PluginInstanceId, PluginKind, PluginOwner, PluginRef};
 
-use crate::param_ui::param_menu;
+use crate::param_ui::{param_live, param_menu};
 use crate::GloomTheme;
 
 /// How a plugin in the project is doing, as the plugin host reports it.
@@ -184,7 +184,13 @@ fn plugin_params(
                             )
                         };
                         if info.automatable {
-                            param_menu(theme, &r, ParamId::plugin_param(owner, plugin, info.id));
+                            let id = ParamId::plugin_param(owner, plugin, info.id);
+                            param_menu(theme, &r, id);
+                            // The ghost goes on the rail, left of the value box.
+                            let mut rail = r.clone();
+                            rail.rect
+                                .set_width(ui.spacing().slider_width.min(r.rect.width()));
+                            param_live(theme, &rail, id, |v| v);
                         }
                         if r.changed() && plugin.set_value(info.id, v) {
                             changed = true;

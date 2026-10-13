@@ -12,5 +12,5 @@ pub mod views;
 pub mod widgets;
 
 pub use keymap::{Command, Keymap};
-pub use param_ui::{ParamMarks, ParamRequest};
+pub use param_ui::{LiveValues, ParamMarks, ParamRequest, Touch};
 pub use theme::GloomTheme;

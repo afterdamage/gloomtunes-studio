@@ -88,10 +88,11 @@ impl GloomApp {
                 }
                 continue;
             }
-            moved |= !self
-                .project
-                .apply_cc(cc.channel, cc.cc, cc.value)
-                .is_empty();
+            for param in self.project.apply_cc(cc.channel, cc.cc, cc.value) {
+                let value = param.normalized(&self.project);
+                self.auto.cc_moved(param, cc.at_ns, value);
+                moved = true;
+            }
         }
         if moved {
             // Mixer and effect changes reach the engine through the per-frame mixer sync.
@@ -378,7 +379,7 @@ impl GloomApp {
     }
 
     /// Lets the engine play what was recorded, without cutting what sounds.
-    fn push_recorded(&mut self) {
+    pub(super) fn push_recorded(&mut self) {
         self.project
             .current_pattern_mut()
             .controls
@@ -394,7 +395,10 @@ impl GloomApp {
         } else {
             SongSnapshot::compile(&self.project)
         };
-        self.send(EngineCommand::UpdateSong(Box::new(song)));
+        let lanes = song.automation.iter().map(|l| l.target).collect();
+        if self.try_send(EngineCommand::UpdateSong(Box::new(song))) {
+            self.auto.lanes = lanes;
+        }
         if self.pending_edit.is_none() {
             self.pending_edit = Some(if self.step.on {
                 "Step record"

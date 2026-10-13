@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod autorec;
 pub mod effects;
 pub mod midi;
 pub mod mixer;
@@ -24,6 +25,7 @@ pub mod sample;
 pub mod synth;
 pub mod time;
 
+pub use autorec::{record_automation, record_pattern_automation, thin, THIN_TOLERANCE};
 pub use effects::{EffectKind, EffectSlot};
 pub use midi::{
     ControlKind, ControlPoint, MidiBinding, MidiRoute, MAX_LEARN_CC, MAX_MIDI_BINDINGS,

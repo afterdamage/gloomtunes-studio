@@ -6,6 +6,7 @@
 
 mod app;
 mod audio_io;
+mod autorec;
 mod crash;
 mod files;
 mod library;

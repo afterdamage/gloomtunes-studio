@@ -248,6 +248,8 @@ pub struct ModEntry {
 /// All modulators of one parameter.
 #[derive(Debug, Clone)]
 pub struct ModTarget {
+    /// The parameter (for the UI's live values).
+    pub target: ParamId,
     /// Where the parameter lives.
     pub dest: ParamDest,
     /// Range and taper, to turn normalized values into plain ones.
@@ -287,6 +289,7 @@ impl ModPlan {
                 None => targets.push((
                     m.target,
                     ModTarget {
+                        target: m.target,
                         dest,
                         info: *m.target.info(),
                         base: m.target.normalized(project),

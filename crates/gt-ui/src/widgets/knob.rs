@@ -89,3 +89,18 @@ pub fn knob(
     );
     resp.on_hover_text(format(*value))
 }
+
+/// The ghost of a live value `t` (0..1 of the travel) on a knob drawn in `rect`: a thin ring
+/// just outside the knob's arc from the bottom left to `t`, with a dot at its end.
+pub fn knob_ghost(p: &egui::Painter, rect: egui::Rect, t: f32, stroke: Stroke) {
+    let c = rect.center();
+    let r = rect.width().min(rect.height()) * 0.5;
+    let point = |a: f32| pos2(c.x + r * a.cos(), c.y + r * a.sin());
+    let end = START + SWEEP * t.clamp(0.0, 1.0);
+    let n = (((end - START) / 0.12).ceil() as usize).max(1);
+    let pts: Vec<egui::Pos2> = (0..=n)
+        .map(|k| point(START + (end - START) * k as f32 / n as f32))
+        .collect();
+    p.add(Shape::line(pts, Stroke::new(1.0, stroke.color)));
+    p.circle_filled(point(end), stroke.width + 0.5, stroke.color);
+}

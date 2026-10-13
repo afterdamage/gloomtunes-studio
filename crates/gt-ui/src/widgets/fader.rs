@@ -21,6 +21,14 @@ pub fn fader_position(gain: f32, max: f32) -> f32 {
     (gain.max(0.0) / max).cbrt().clamp(0.0, 1.0)
 }
 
+/// The ghost of a live value at travel `t` (0..1) on a fader drawn in `rect`: a line across
+/// the track where the automation or modulation has it.
+pub fn fader_ghost(p: &egui::Painter, rect: Rect, t: f32, stroke: Stroke) {
+    let track = Rect::from_center_size(rect.center(), vec2(4.0, rect.height() - 10.0));
+    let y = track.bottom() - t.clamp(0.0, 1.0) * track.height();
+    p.line_segment([pos2(rect.left(), y), pos2(rect.right(), y)], stroke);
+}
+
 /// A vertical fader for a linear gain in `0..=max`. Drag (Shift for fine), scroll to nudge,
 /// double-click for unity. `changed()` on the response reports edits.
 pub fn fader(

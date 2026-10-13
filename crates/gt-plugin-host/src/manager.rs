@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use clack_extensions::gui::{GuiConfiguration, GuiSize, PluginGui};
 use clack_host::prelude::PluginEntry;
-use gt_core::{PluginInstanceId, PluginKind, PluginRef, Project};
+use gt_core::{ParamId, PluginInstanceId, PluginKind, PluginRef, Project};
 use gt_engine::{EngineCommand, EngineHandle, PluginBox, MAX_PLUGINS};
 
 use crate::catalog::{self, Catalog, PluginInfo};
@@ -83,13 +83,15 @@ pub(crate) struct Live {
 }
 
 /// What a sync changed in the document.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SyncOutcome {
     /// Parameter values or descriptions in the document were updated from plugins (not an
     /// undoable edit: the app should refresh what depends on them).
     pub mirrored: bool,
     /// A plugin said its state changed (from its editor): the project has unsaved changes.
     pub dirty: bool,
+    /// Parameters a plugin moved itself (its editor), for automation recording (D111).
+    pub moved: Vec<ParamId>,
 }
 
 /// The plugin host.
@@ -659,6 +661,9 @@ impl PluginHost {
             let Some(rx) = l.out.as_mut() else {
                 continue;
             };
+            let Some(owner) = project.plugin_by_instance(id).map(|(o, _)| o) else {
+                continue;
+            };
             let Some(p) = project.plugin_by_instance_mut(id) else {
                 continue;
             };
@@ -671,6 +676,10 @@ impl PluginHost {
                         *s = snapped;
                     }
                     out.mirrored = true;
+                    let param = ParamId::plugin_param(owner, p, p.params[i].id);
+                    if !out.moved.contains(&param) {
+                        out.moved.push(param);
+                    }
                 }
             }
         }

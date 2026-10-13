@@ -559,6 +559,15 @@ struct PatternDto {
     /// Recorded controller data (Prompt 16); absent in older files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     controls: Vec<ChannelControlsDto>,
+    /// Pattern automation (Prompt 17); absent in older files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    automation: Vec<PatternAutoDto>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PatternAutoDto {
+    target: String,
+    points: Vec<PointDto>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -887,6 +896,14 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                     points: v.iter().map(|c| (c.tick, c.kind.code(), c.value)).collect(),
                 })
                 .collect(),
+            automation: pat
+                .automation
+                .iter()
+                .map(|a| PatternAutoDto {
+                    target: a.target.key(),
+                    points: points_dto(&a.points),
+                })
+                .collect(),
         })
         .collect();
     let mixer = p
@@ -981,19 +998,7 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                     },
                     ClipKind::Automation(a) => ClipContentDto::Automation {
                         target: a.target.key(),
-                        points: a
-                            .points
-                            .iter()
-                            .map(|q| PointDto {
-                                at: q.at,
-                                value: q.value,
-                                curve: curve_key(q.curve).to_owned(),
-                                tension: match q.curve {
-                                    Curve::Bezier(t) => Some(t),
-                                    _ => None,
-                                },
-                            })
-                            .collect(),
+                        points: points_dto(&a.points),
                     },
                 },
             })
@@ -1303,12 +1308,26 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                 (ChannelId(cc.channel), v)
             })
             .collect();
+        let mut automation = Vec::new();
+        for a in pat.automation {
+            match ParamId::parse(&a.target) {
+                Some(target) => automation.push(Automation {
+                    target,
+                    points: points_from_dto(&a.points),
+                }),
+                None => warnings.push(format!(
+                    "pattern automation for unknown parameter \"{}\" removed",
+                    a.target
+                )),
+            }
+        }
         p.patterns.push(Pattern {
             id: PatternId(pat.id),
             name: pat.name,
             steps: pat.steps,
             notes,
             controls,
+            automation,
         });
     }
     p.current_pattern = PatternId(d.current_pattern);
@@ -1432,14 +1451,7 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
             ClipContentDto::Automation { target, points } => match ParamId::parse(&target) {
                 Some(target) => Some(ClipKind::Automation(Automation {
                     target,
-                    points: points
-                        .iter()
-                        .map(|q| AutoPoint {
-                            at: q.at,
-                            value: q.value,
-                            curve: curve_from_key(&q.curve, q.tension),
-                        })
-                        .collect(),
+                    points: points_from_dto(&points),
                 })),
                 None => {
                     warnings.push(format!(
@@ -1638,6 +1650,32 @@ fn builtin_key(b: BuiltInSample) -> &'static str {
     }
 }
 
+fn points_dto(points: &[AutoPoint]) -> Vec<PointDto> {
+    points
+        .iter()
+        .map(|q| PointDto {
+            at: q.at,
+            value: q.value,
+            curve: curve_key(q.curve).to_owned(),
+            tension: match q.curve {
+                Curve::Bezier(t) => Some(t),
+                _ => None,
+            },
+        })
+        .collect()
+}
+
+fn points_from_dto(points: &[PointDto]) -> Vec<AutoPoint> {
+    points
+        .iter()
+        .map(|q| AutoPoint {
+            at: q.at,
+            value: q.value,
+            curve: curve_from_key(&q.curve, q.tension),
+        })
+        .collect()
+}
+
 fn curve_key(c: Curve) -> &'static str {
     match c {
         Curve::Hold => "hold",
@@ -1778,6 +1816,18 @@ mod tests {
                 },
             ],
         );
+        p.current_pattern_mut().automation.push(Automation {
+            target: pan,
+            points: vec![
+                AutoPoint::new(0, 0.2),
+                AutoPoint {
+                    at: 960,
+                    value: 0.8,
+                    curve: Curve::Smooth,
+                },
+                AutoPoint::new(3840, 0.5),
+            ],
+        });
         p.midi_routes = vec![
             gt_core::MidiRoute {
                 port: "Keys".into(),

@@ -4,7 +4,7 @@
 use egui::{vec2, RichText, Sense, Stroke, Ui};
 use gt_core::{Channel, ChannelParam, ParamId, Pattern, Project};
 
-use crate::param_ui::param_menu;
+use crate::param_ui::{param_live, param_menu};
 use crate::widgets::{format_gain, format_pan, knob};
 use crate::GloomTheme;
 
@@ -207,6 +207,9 @@ fn channel_row(
         param,
     };
     param_menu(theme, &r, target(ChannelParam::Volume));
+    param_live(theme, &r, target(ChannelParam::Volume), |v| {
+        v / Channel::MAX_VOLUME
+    });
     if r.changed() {
         ch.volume = vol;
         actions.push(RackAction::ParamsChanged);
@@ -216,6 +219,7 @@ fn channel_row(
         format!("Pan {}", format_pan(p))
     });
     param_menu(theme, &r, target(ChannelParam::Pan));
+    param_live(theme, &r, target(ChannelParam::Pan), |v| (v + 1.0) * 0.5);
     if r.changed() {
         ch.pan = pan;
         actions.push(RackAction::ParamsChanged);

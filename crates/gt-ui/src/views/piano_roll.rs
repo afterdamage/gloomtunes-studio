@@ -22,7 +22,7 @@
 //! check is used instead; it is sorted again on release.
 
 use egui::{pos2, vec2, Color32, Pos2, Rect, Response, RichText, Sense, Stroke, Ui};
-use gt_core::{ControlKind, ControlPoint, Note, PPQ};
+use gt_core::{AutoPoint, Automation, ControlKind, ControlPoint, Note, ParamId, PPQ};
 
 use crate::GloomTheme;
 
@@ -212,6 +212,8 @@ enum Drag {
     Erase,
     /// Painting velocities.
     Velocity,
+    /// Drawing the shown automation line; `last` is the tick drawn last.
+    Automation { last: i64 },
 }
 
 /// View and editing state of the piano roll that is not part of the document.
@@ -243,6 +245,8 @@ pub struct PianoRollState {
     pub humanize_ticks: i64,
     /// Humanize velocity range (± fraction).
     pub humanize_velocity: f32,
+    /// The bottom lane shows this parameter's pattern automation instead of velocities.
+    pub lane: Option<ParamId>,
     last_length: i64,
     last_velocity: f32,
     clipboard: Vec<Note>,
@@ -271,6 +275,7 @@ impl Default for PianoRollState {
             quantize_strength: 1.0,
             humanize_ticks: 20,
             humanize_velocity: 0.1,
+            lane: None,
             last_length: PPQ / 4,
             last_velocity: gt_core::project::DEFAULT_VELOCITY,
             clipboard: Vec::new(),
@@ -325,6 +330,10 @@ pub struct PianoRollView<'a> {
     pub channel_name: &'a str,
     /// The channel's recorded controller data, sorted by tick (drawn in the velocity lane).
     pub controls: &'a [ControlPoint],
+    /// The pattern's automation lines (D112), drawn and edited in the bottom lane.
+    pub automation: &'a mut Vec<Automation>,
+    /// Their parameters' names, in the same order.
+    pub automation_names: Vec<String>,
 }
 
 /// Things the app must act on.
@@ -350,6 +359,8 @@ pub enum PianoRollAction {
     Humanize,
     /// Delete the channel's recorded data for one controller, or all of it.
     ClearControls(Option<ControlKind>),
+    /// The pattern's automation changed.
+    AutomationChanged,
 }
 
 /// Geometry of the editing area for one frame.
@@ -414,11 +425,11 @@ pub fn piano_roll(
     ui: &mut Ui,
     theme: &GloomTheme,
     st: &mut PianoRollState,
-    view: PianoRollView<'_>,
+    mut view: PianoRollView<'_>,
 ) -> Vec<PianoRollAction> {
     let mut actions = Vec::new();
     st.selected.resize(view.notes.len(), false);
-    toolbar(ui, theme, st, &view, &mut actions);
+    toolbar(ui, theme, st, &mut view, &mut actions);
     ui.add_space(4.0);
 
     let area = ui.available_rect_before_wrap();
@@ -462,7 +473,21 @@ pub fn piano_roll(
     let notes = view.notes;
     let mut changed = false;
     changed |= grid_input(ui, st, &geo, &grid_resp, notes, &mut actions);
-    changed |= lane_input(ui, st, &geo, lane, &lane_resp, notes);
+    let auto_lane = st
+        .lane
+        .and_then(|t| view.automation.iter().position(|a| a.target == t));
+    if st.lane.is_some() && auto_lane.is_none() {
+        st.lane = None;
+    }
+    match auto_lane {
+        Some(i) => {
+            let line = &mut view.automation[i].points;
+            if automation_input(ui, st, &geo, lane, &lane_resp, line, view.pattern_len) {
+                actions.push(PianoRollAction::AutomationChanged);
+            }
+        }
+        None => changed |= lane_input(ui, st, &geo, lane, &lane_resp, notes),
+    }
     keyboard_input(ui, st, &geo, &key_resp, &mut actions);
     if hovered && !ui.ctx().text_edit_focused() {
         changed |= key_commands(ui, st, notes, &mut actions);
@@ -487,14 +512,104 @@ pub fn piano_roll(
         view.controls,
         sorted,
     );
+    if let Some(i) = auto_lane {
+        paint_automation(ui, theme, &geo, area, lane, &view.automation[i].points);
+    }
     actions
+}
+
+/// Draws the shown automation line over the bottom lane.
+fn paint_automation(
+    ui: &Ui,
+    theme: &GloomTheme,
+    geo: &Geo,
+    area: Rect,
+    lane: Rect,
+    points: &[AutoPoint],
+) {
+    let lp = ui.painter_at(lane);
+    lp.rect_filled(lane, 0.0, theme.bg_panel);
+    ui.painter_at(area).text(
+        pos2(area.left() + 4.0, lane.center().y),
+        egui::Align2::LEFT_CENTER,
+        "Auto",
+        egui::FontId::proportional(10.5),
+        theme.accent,
+    );
+    let y = |v: f32| lane.bottom() - 2.0 - (lane.height() - 4.0) * v.clamp(0.0, 1.0);
+    let (t0, t1) = (geo.tick(lane.left()), geo.tick(lane.right()) + 1);
+    // Sampled so curves show their shape; a few points per pixel column at most.
+    let step = ((t1 - t0) as f32 / lane.width().max(1.0)).max(1.0) as i64 * 2;
+    let line: Vec<Pos2> = (t0..=t1)
+        .step_by(step.max(1) as usize)
+        .chain([t1])
+        .map(|t| pos2(geo.x(t), y(gt_core::playlist::value_at(points, t as f64))))
+        .collect();
+    lp.add(egui::Shape::line(line, Stroke::new(1.5, theme.accent)));
+    for p in points {
+        lp.circle_filled(pos2(geo.x(p.at), y(p.value)), 3.0, theme.accent);
+    }
+}
+
+/// Draws the pattern automation line with the left button (snapped; a drag replaces the
+/// points it crosses) and removes the nearest point with the right button. True on a change.
+fn automation_input(
+    ui: &Ui,
+    st: &mut PianoRollState,
+    geo: &Geo,
+    lane: Rect,
+    resp: &Response,
+    points: &mut Vec<AutoPoint>,
+    pattern_len: i64,
+) -> bool {
+    let (pos, pressed, down) = ui.input(|i| {
+        (
+            i.pointer.interact_pos(),
+            i.pointer.primary_pressed(),
+            i.pointer.primary_down(),
+        )
+    });
+    if resp.secondary_clicked() {
+        let Some(p) = pos else { return false };
+        let near = points
+            .iter()
+            .enumerate()
+            .map(|(i, q)| (i, (geo.x(q.at) - p.x).abs()))
+            .filter(|&(_, d)| d <= 8.0)
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((i, _)) = near.filter(|_| points.len() > 1) {
+            points.remove(i);
+            return true;
+        }
+        return false;
+    }
+    let Some(p) = pos else { return false };
+    let tick = st.snap.round(geo.tick(p.x)).clamp(0, pattern_len.max(0));
+    if resp.hovered() && pressed && st.drag.is_none() {
+        st.drag = Some(Drag::Automation { last: tick });
+    }
+    let Some(Drag::Automation { last }) = st.drag else {
+        return false;
+    };
+    if !down {
+        st.drag = None;
+        return false;
+    }
+    let value = (1.0 - (p.y - lane.top() - 2.0) / (lane.height() - 4.0)).clamp(0.0, 1.0);
+    let (lo, hi) = (last.min(tick), last.max(tick));
+    let before = points.clone();
+    points.retain(|q| q.at < lo || q.at > hi || q.at == last && q.at != tick);
+    let i = points.partition_point(|q| q.at < tick);
+    points.insert(i, AutoPoint::new(tick, value));
+    st.drag = Some(Drag::Automation { last: tick });
+    *points != before
 }
 
 fn toolbar(
     ui: &mut Ui,
     theme: &GloomTheme,
     st: &mut PianoRollState,
-    view: &PianoRollView<'_>,
+    view: &mut PianoRollView<'_>,
     actions: &mut Vec<PianoRollAction>,
 ) {
     let dim = |s: &str| RichText::new(s).color(theme.text_dim);
@@ -567,6 +682,39 @@ fn toolbar(
                 "Recorded pitch bend, sustain, mod wheel and aftertouch (drawn in the velocity \
                  lane)",
             );
+        }
+        if !view.automation.is_empty() {
+            let shown = st
+                .lane
+                .and_then(|t| view.automation.iter().position(|a| a.target == t));
+            let label = shown
+                .and_then(|i| view.automation_names.get(i))
+                .map_or("Velocity", String::as_str);
+            egui::ComboBox::from_id_salt("roll_lane")
+                .width(120.0)
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut st.lane, None, "Velocity");
+                    for (a, name) in view.automation.iter().zip(&view.automation_names) {
+                        ui.selectable_value(&mut st.lane, Some(a.target), name.as_str());
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Bottom lane: note velocities, or one of the pattern's automation lines \
+                     (left-drag draws, right-click removes a point)",
+                );
+            if let Some(i) = shown {
+                if ui
+                    .small_button("✕")
+                    .on_hover_text("Delete this pattern automation")
+                    .clicked()
+                {
+                    view.automation.remove(i);
+                    st.lane = None;
+                    actions.push(PianoRollAction::AutomationChanged);
+                }
+            }
         }
         if ui
             .add(egui::Button::selectable(st.ghosts, "Ghosts"))
@@ -932,7 +1080,7 @@ fn grid_input(
         ) {
             sort_notes(notes, &mut st.selected);
         }
-        if !matches!(st.drag, Some(Drag::Velocity)) {
+        if !matches!(st.drag, Some(Drag::Velocity | Drag::Automation { .. })) {
             st.drag = None;
         }
         stop_audition(st, actions);
@@ -1502,6 +1650,7 @@ mod tests {
         ctx: egui::Context,
         st: PianoRollState,
         notes: Vec<Note>,
+        automation: Vec<Automation>,
         theme: GloomTheme,
     }
 
@@ -1514,6 +1663,7 @@ mod tests {
                     ..PianoRollState::default()
                 },
                 notes,
+                automation: Vec::new(),
                 theme: GloomTheme::default(),
             };
             h.frame(vec![]);
@@ -1528,6 +1678,8 @@ mod tests {
             };
             let mut actions = Vec::new();
             let (st, notes, theme) = (&mut self.st, &mut self.notes, &self.theme);
+            let automation = &mut self.automation;
+            let automation_names = vec!["Line".to_owned(); automation.len()];
             let mut out = self.ctx.run_ui(input, |ui| {
                 actions = piano_roll(
                     ui,
@@ -1541,6 +1693,8 @@ mod tests {
                         playhead: None,
                         channel_name: "Test",
                         controls: &[],
+                        automation,
+                        automation_names: automation_names.clone(),
                     },
                 );
             });
@@ -1583,6 +1737,41 @@ mod tests {
             a.extend(self.frame(vec![]));
             a
         }
+    }
+
+    #[test]
+    fn the_bottom_lane_draws_and_erases_pattern_automation() {
+        use egui::PointerButton::{Primary, Secondary};
+        let target = gt_core::ParamId::strip_pan(1);
+        let mut h = Harness::new(vec![]);
+        h.automation.push(Automation {
+            target,
+            points: vec![AutoPoint::new(0, 0.5), AutoPoint::new(3840, 0.5)],
+        });
+        h.st.lane = Some(target);
+        h.frame(vec![]);
+        let g = h.st.last_geo.unwrap();
+        let top = g.grid.bottom() + 4.0;
+        let at = |tick: i64, v: f32| pos2(g.x(tick), top + 2.0 + (VELOCITY_H - 4.0) * (1.0 - v));
+        // A drag across a beat at full height, snapped to sixteenths.
+        let a = h.drag(at(960, 1.0), at(1920, 1.0), Primary);
+        assert!(a.contains(&PianoRollAction::AutomationChanged));
+        let pts = &h.automation[0].points;
+        assert!(pts.iter().any(|p| p.at == 960 && p.value > 0.99));
+        assert!(pts.iter().any(|p| p.at == 1920 && p.value > 0.99));
+        assert!(pts.iter().all(|p| p.at % 240 == 0));
+        assert!(
+            pts.windows(2).all(|w| w[0].at < w[1].at),
+            "sorted, one per tick"
+        );
+        let n = pts.len();
+        // A right click removes the point under it.
+        let a = h.button(at(1920, 1.0), Secondary, true);
+        assert!(a.is_empty());
+        let a = h.button(at(1920, 1.0), Secondary, false);
+        assert!(a.contains(&PianoRollAction::AutomationChanged));
+        assert_eq!(h.automation[0].points.len(), n - 1);
+        assert!(h.automation[0].points.iter().all(|p| p.at != 1920));
     }
 
     #[test]
@@ -1712,6 +1901,8 @@ mod tests {
                         playhead: Some(1000),
                         channel_name: "Test",
                         controls: &[],
+                        automation: &mut Vec::new(),
+                        automation_names: Vec::new(),
                     },
                 );
             });

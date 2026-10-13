@@ -31,6 +31,7 @@ use gt_ui::views::{FirstRunState, SettingsPage, ShortcutEditorState};
 use gt_ui::widgets::MeterBallistics;
 use gt_ui::{Command, GloomTheme, Keymap};
 
+mod automate;
 mod bounce;
 mod midi;
 mod plugins;
@@ -187,6 +188,8 @@ pub struct GloomApp {
     fresh_engine: bool,
     /// Audio recording: input routes, the session, the latency measurement.
     record: record::RecordState,
+    /// Automation recording and live values.
+    auto: automate::AutoState,
 }
 
 /// What the plugin panels show for plugin `id`.
@@ -316,6 +319,7 @@ impl GloomApp {
                 octave: settings.midi.octave,
                 mode: gt_ui::views::RecordMode::from_key(&settings.midi.record_mode),
                 passes: gt_ui::views::LoopPasses::from_key(&settings.midi.loop_passes),
+                automation: gt_ui::views::AutoMode::from_key(&settings.midi.automation_mode),
                 ..MidiPanelModel::default()
             },
             sent_live_slot: None,
@@ -329,6 +333,7 @@ impl GloomApp {
             plugin_slot: None,
             fresh_engine: false,
             record: record::RecordState::default(),
+            auto: automate::AutoState::default(),
             settings,
         };
         for port in &app.settings.midi.disabled_ports {
@@ -443,12 +448,14 @@ impl GloomApp {
         } else {
             SongSnapshot::compile(&self.project)
         };
+        let lanes = song.automation.iter().map(|l| l.target).collect();
         let automated: Vec<(usize, usize, usize)> = song
             .automation
             .iter()
             .filter_map(|l| effect_of(&l.dest))
             .collect();
         if self.try_send(EngineCommand::SetSong(Box::new(song))) {
+            self.auto.lanes = lanes;
             let old = std::mem::replace(&mut self.lane_fx, automated);
             self.release_fx(old);
         }
@@ -655,6 +662,10 @@ impl GloomApp {
                 self.tidy_roll_notes();
                 self.push_song();
                 self.pending_edit = Some("Edit notes");
+            }
+            PianoRollAction::AutomationChanged => {
+                self.push_song();
+                self.pending_edit = Some("Edit pattern automation");
             }
             PianoRollAction::AuditionOn { key, velocity } => self.send(EngineCommand::NoteOn {
                 slot,
@@ -894,6 +905,7 @@ impl GloomApp {
             return;
         }
         let plan = ModPlan::compile(p);
+        let targets = plan.targets.iter().map(|t| t.target).collect();
         let modulated: Vec<(usize, usize, usize)> = plan
             .targets
             .iter()
@@ -901,6 +913,7 @@ impl GloomApp {
             .collect();
         if self.try_send(EngineCommand::SetModulation(Box::new(plan))) {
             self.sent_mods = Some(key);
+            self.auto.mods = targets;
             let old = std::mem::replace(&mut self.mod_fx, modulated);
             self.release_fx(old);
         }
@@ -913,6 +926,11 @@ impl GloomApp {
             if let ClipKind::Automation(a) = &c.kind {
                 marks.automated.insert(a.target);
             }
+        }
+        for p in &self.project.patterns {
+            marks
+                .automated
+                .extend(p.automation.iter().map(|a| a.target));
         }
         for m in self.project.modulators.iter().filter(|m| m.enabled) {
             marks.modulated.insert(m.target);
@@ -937,6 +955,25 @@ impl GloomApp {
                 self.transport.song_mode = true;
                 self.push_song();
                 self.pending_edit = Some("Create automation clip");
+            }
+            ParamRequest::AutomatePattern(target) => {
+                let value = target.normalized(&self.project);
+                let pat = self.project.current_pattern_mut();
+                if !pat.automation.iter().any(|a| a.target == target) {
+                    let len = pat.length_ticks();
+                    pat.automation.push(gt_core::Automation {
+                        target,
+                        points: vec![
+                            gt_core::AutoPoint::new(0, value),
+                            gt_core::AutoPoint::new(len, value),
+                        ],
+                    });
+                    self.pending_edit = Some("Automate in pattern");
+                }
+                // Draw it in the piano roll's bottom lane; it plays wherever the pattern does.
+                self.roll.lane = Some(target);
+                self.main_view = MainView::PianoRoll;
+                self.push_song();
             }
             ParamRequest::AddLfo(target) | ParamRequest::AddFollower(target) => {
                 let source = if matches!(req, ParamRequest::AddLfo(_)) {
@@ -1039,6 +1076,13 @@ impl GloomApp {
         };
         let (id, name) = (ch.id, ch.name.clone());
         let bar_ticks = self.project.signatures.sig_of_bar(0).bar_ticks();
+        let automation_names = self
+            .project
+            .current_pattern()
+            .automation
+            .iter()
+            .map(|a| a.target.name(&self.project))
+            .collect();
         let pat = self.project.current_pattern_mut();
         self.roll.set_target(pat.id.0, id.0);
         let pattern_len = pat.length_ticks();
@@ -1046,6 +1090,7 @@ impl GloomApp {
         let mut notes = pat.notes.remove(&id).unwrap_or_default();
         let ghosts: Vec<&[gt_core::Note]> = pat.notes.values().map(Vec::as_slice).collect();
         let controls = pat.controls.get(&id).map_or(&[][..], Vec::as_slice);
+        let automation = &mut pat.automation;
         let actions = piano_roll(
             ui,
             theme,
@@ -1058,6 +1103,8 @@ impl GloomApp {
                 playhead,
                 channel_name: &name,
                 controls,
+                automation,
+                automation_names,
             },
         );
         if !notes.is_empty() {
@@ -1874,6 +1921,7 @@ impl eframe::App for GloomApp {
         self.transport.bpm = self.project.tempo.bpm_at(self.transport.position);
         self.transport.time_sig = self.project.signatures.sig_at(self.transport.position);
         param_ui::set_marks(&ctx, std::sync::Arc::new(self.param_marks()));
+        self.publish_live_values(&ctx);
         // Before any shortcut: in piano mode the typing keyboard takes its keys first.
         self.live_frame(&ctx, dt);
         self.record_frame();
@@ -2223,7 +2271,8 @@ impl eframe::App for GloomApp {
         if let Some(req) = param_ui::take_request(&ctx) {
             self.on_param_request(req);
         }
-        self.sync_plugins(&ctx);
+        let plugin_moves = self.sync_plugins(&ctx);
+        self.automation_frame(&ctx, &plugin_moves);
         self.sync_mixer();
         self.sync_modulation();
         if self.main_view != MainView::PianoRoll {

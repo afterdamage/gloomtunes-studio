@@ -4,8 +4,8 @@ mod fader;
 mod knob;
 mod meter;
 
-pub use fader::{fader, fader_gain, fader_position, stereo_meter};
-pub use knob::knob;
+pub use fader::{fader, fader_gain, fader_ghost, fader_position, stereo_meter};
+pub use knob::{knob, knob_ghost};
 pub use meter::{level_meter, MeterBallistics};
 
 use egui::{RichText, Ui};
@@ -70,6 +70,7 @@ pub fn param_knob(
     }
     if let Some(target) = target {
         crate::param_ui::param_menu(theme, &resp, target);
+        crate::param_ui::param_live(theme, &resp, target, |v| info.to_normalized(v));
     }
     if resp.changed() {
         *value = info.from_normalized(t);

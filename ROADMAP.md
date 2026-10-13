@@ -539,6 +539,35 @@ sound identical; the golden export test stays.
     not written to MIDI files, and polyphonic aftertouch is played but not recorded.
     Captured takes start at their first note rather than on the beat grid.
 
+### Prompt 17: Automation recording and live values
+- Split into two PRs: 1 recording in song mode and live values; 2 per-pattern automation
+  with song-over-pattern precedence.
+- Part 1 delivered (2026-10-13), in review (D111):
+  - With Record on in song mode, moving a knob, fader or plugin slider, a MIDI-learned
+    controller or a control in a plugin's own editor writes automation clips.
+  - Modes in MIDI settings: *Latch* (default: from the first touch until stop), *Touch*
+    (while held; then the old automation returns) and *Write* (every moved control, from
+    where recording started to where it stopped).
+  - Passes are thinned to within 0.4 % of the range; controller moves land on the tick
+    their message plays at, not when the UI saw them.
+  - Knobs, faders and plugin sliders show the value automation or a modulator gives them now
+    (an outer ring or a line), and stay editable.
+  - CPU: one atomic store per automation lane or modulator per quantum.
+  - Limits: plugin editors and controllers have no release, so their touch ends a beat after
+    the last move; a pass reaching another clip on the same track stops there.
+- Part 2 delivered (2026-10-13), in review (D112):
+  - Patterns hold automation lines ("Automate in pattern" on any control's menu). They play
+    wherever the pattern plays: looping in pattern mode, and in every pattern clip in song
+    mode.
+  - A playlist automation clip for the same parameter overrides the pattern's line while it
+    plays; around it the pattern's line goes on where the pattern is.
+  - Recording in pattern mode writes into the current pattern's lines (same modes).
+  - The piano roll's bottom lane can show a line instead of velocities: left-drag draws
+    (snapped), right-click removes a point, ✕ deletes the line. Saved with the pattern.
+  - CPU: none measurable (pattern lanes are ordinary lanes; one modulo per quantum).
+  - Limits: one line per parameter per pattern; lines are drawn with straight segments
+    (curves only by recording or in clips).
+
 ---
 
 ## v1.0 scope
