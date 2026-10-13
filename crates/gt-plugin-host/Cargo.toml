@@ -16,7 +16,7 @@ workspace = true
 gt-core.workspace = true
 gt-engine.workspace = true
 clack-host.workspace = true
-clack-extensions = { workspace = true, features = ["clack-host", "audio-ports", "note-ports", "params", "state", "latency", "gui", "timer", "posix-fd", "log", "render"] }
+clack-extensions = { workspace = true, features = ["clack-host", "audio-ports", "note-ports", "params", "state", "latency", "gui", "timer", "posix-fd", "log", "render", "preset-discovery"] }
 rtrb.workspace = true
 log.workspace = true
 serde.workspace = true

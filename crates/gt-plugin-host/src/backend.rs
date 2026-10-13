@@ -15,6 +15,7 @@ use gt_engine::PluginProcessor;
 
 use crate::catalog::PluginInfo;
 use crate::host::Signals;
+use crate::presets::{Preset, Source};
 use crate::processor::ParamOut;
 
 /// A loaded plugin file.
@@ -64,6 +65,15 @@ pub(crate) trait Instance {
     /// Reads the parameter list (descriptions and the mapping for the processor) and the
     /// current values, normalized.
     fn read_params(&mut self) -> (Vec<PluginParamInfo>, Vec<f32>);
+    /// Names of the stereo outputs after the main one, and whether the plugin sends MIDI.
+    fn outputs(&mut self) -> (Vec<String>, bool) {
+        (Vec::new(), false)
+    }
+    /// Parameter `index` at `value` (normalized) as the plugin writes it, with its unit
+    /// ("-6.0 dB", "Saw"); None if the plugin does not say.
+    fn value_text(&mut self, _index: usize, _value: f32) -> Option<String> {
+        None
+    }
     /// The plugin's state, if it can save one.
     fn save_state(&mut self) -> Option<Vec<u8>>;
     /// Restores a saved state.
@@ -84,6 +94,14 @@ pub(crate) trait Instance {
     fn host_changed(&mut self, _index: usize, _value: f32) {}
     /// The processor reported parameter `index` at `value` (VST3 forwards it to its editor).
     fn plugin_reported(&mut self, _index: usize, _value: f32) {}
+    /// The plugin's own (factory) presets.
+    fn factory_presets(&mut self) -> Vec<Preset> {
+        Vec::new()
+    }
+    /// Loads one of them (the host reads the parameters again afterwards).
+    fn load_factory(&mut self, _source: &Source) -> Result<(), String> {
+        Err(format!("{} cannot load presets", self.info().name))
+    }
     /// Parameter changes made in the plugin's editor that have not reached its processor yet
     /// (VST3's `performEdit`): index and normalized value.
     fn take_edits(&mut self) -> Vec<(usize, f32)> {

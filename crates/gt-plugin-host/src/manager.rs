@@ -21,6 +21,7 @@ use crate::backend::{Entry, Instance};
 use crate::catalog::{self, Catalog, PluginInfo};
 use crate::guard::{CrashReport, Guard};
 use crate::host::{Signals, Waker};
+use crate::presets::{self, Preset, Source};
 use crate::processor::ParamOut;
 
 /// Saved states kept for plugins taken out of the project, so undo brings them back as they
@@ -28,6 +29,8 @@ use crate::processor::ParamOut;
 const STATE_CACHE: usize = 64;
 /// Parameter changes sent to the engine per frame at most (the rest follow next frame).
 const PARAMS_PER_FRAME: usize = 512;
+/// Parameter values written as text per frame at most (the rest follow next frame).
+const TEXTS_PER_FRAME: usize = 256;
 
 /// How a plugin in the project is doing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +69,10 @@ pub(crate) struct Live {
     sent: Vec<f32>,
     out: Option<rtrb::Consumer<ParamOut>>,
     failed: bool,
+    /// Parameter values as the plugin writes them, with the value each was written for.
+    texts: Vec<(f32, Option<String>)>,
+    /// Its presets: the plugin's own, then the user's (None until first asked for).
+    presets: Option<Vec<Preset>>,
     /// Deactivation is needed before the next activation (restart or new engine).
     restart: bool,
 }
@@ -309,6 +316,8 @@ impl PluginHost {
                 sent: Vec::new(),
                 out: None,
                 failed: false,
+                texts: Vec::new(),
+                presets: None,
                 restart: false,
             },
         );
@@ -330,6 +339,7 @@ impl PluginHost {
         p.format = info.format;
         p.params = Arc::from(params);
         p.values = values;
+        mirror_outputs(&mut *plugin, &mut p);
         p.sanitize();
         self.make_live(p.instance, plugin)?;
         Ok(p)
@@ -360,6 +370,7 @@ impl PluginHost {
         p.params = Arc::from(params);
         p.values = values;
         p.path = info.path.clone();
+        mirror_outputs(&mut *plugin, p);
         p.sanitize();
         self.make_live(p.instance, plugin)
     }
@@ -493,6 +504,7 @@ impl PluginHost {
             }
         }
         self.read_outputs(project, &mut out);
+        self.refresh_texts(project);
         self.run_main_thread_work();
         self.poll_editors();
 
@@ -546,6 +558,7 @@ impl PluginHost {
                     out.mirrored = true;
                 }
                 l.sent = values;
+                l.texts.clear();
             }
         }
     }
@@ -681,6 +694,120 @@ impl PluginHost {
                 }
             }
         }
+    }
+
+    /// Asks plugins how they write the values that changed.
+    fn refresh_texts(&mut self, project: &Project) {
+        let mut budget = TEXTS_PER_FRAME;
+        for (&id, l) in self.live.iter_mut() {
+            let Some((_, p)) = project.plugin_by_instance(id) else {
+                continue;
+            };
+            l.texts.resize(p.values.len(), (f32::NAN, None));
+            for (i, (&v, t)) in p.values.iter().zip(l.texts.iter_mut()).enumerate() {
+                if budget == 0 {
+                    return;
+                }
+                if t.0 != v {
+                    *t = (v, l.plugin.value_text(i, v));
+                    budget -= 1;
+                }
+            }
+        }
+    }
+
+    /// Parameter values of plugin `id` as the plugin writes them ("-6.0 dB"), in the order of
+    /// its parameters; None where the plugin does not say.
+    pub fn param_texts(&self, id: PluginInstanceId) -> Vec<Option<String>> {
+        self.live
+            .get(&id)
+            .map(|l| l.texts.iter().map(|(_, t)| t.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    // ---- Presets ----
+
+    /// The presets of plugin `id`: the plugin's own, then the user's. Empty until
+    /// [`Self::list_presets`] read them.
+    pub fn presets(&self, id: PluginInstanceId) -> &[Preset] {
+        self.listed_presets(id).unwrap_or_default()
+    }
+
+    /// The presets of plugin `id`, or None if they have not been read yet.
+    pub fn listed_presets(&self, id: PluginInstanceId) -> Option<&[Preset]> {
+        self.live.get(&id).and_then(|l| l.presets.as_deref())
+    }
+
+    /// Reads the preset list of plugin `id` (again).
+    pub fn list_presets(&mut self, id: PluginInstanceId) {
+        let Some(l) = self.live.get_mut(&id) else {
+            return;
+        };
+        let info = l.plugin.info().clone();
+        let plugin = &mut l.plugin;
+        let mut list = self
+            .guard
+            .run(&info.path, &info.name, "listing the presets of", || {
+                Ok::<_, String>(plugin.factory_presets())
+            })
+            .unwrap_or_default();
+        list.extend(presets::list_user(&presets::user_dir(&self.dir, &info)));
+        l.presets = Some(list);
+    }
+
+    /// Loads preset `index` (of [`Self::presets`]) into plugin `id`, and updates its document
+    /// entry (values and state).
+    pub fn load_preset(
+        &mut self,
+        project: &mut Project,
+        id: PluginInstanceId,
+        index: usize,
+    ) -> Result<(), String> {
+        let l = self.live.get_mut(&id).ok_or("the plugin is not loaded")?;
+        let preset = l
+            .presets
+            .as_ref()
+            .and_then(|p| p.get(index))
+            .cloned()
+            .ok_or("no such preset")?;
+        let info = l.plugin.info().clone();
+        let plugin = &mut l.plugin;
+        self.guard.run(
+            &info.path,
+            &info.name,
+            "loading a preset into",
+            || match &preset.source {
+                Source::User(path) => plugin.load_state(&presets::read_user(path)?),
+                other => plugin.load_factory(other),
+            },
+        )?;
+        let (params, values) = l.plugin.read_params();
+        let state = l.plugin.save_state();
+        // Everything goes to the processor again (a VST3 program change among it).
+        l.sent.clear();
+        l.texts.clear();
+        if let Some(p) = project.plugin_by_instance_mut(id) {
+            p.params = Arc::from(params);
+            p.values = values;
+            if let Some(s) = state {
+                p.state = Arc::from(s);
+            }
+            p.sanitize();
+        }
+        Ok(())
+    }
+
+    /// Saves plugin `id`'s current state as user preset `name` (replacing one of that name).
+    pub fn save_preset(&mut self, id: PluginInstanceId, name: &str) -> Result<(), String> {
+        let l = self.live.get_mut(&id).ok_or("the plugin is not loaded")?;
+        let info = l.plugin.info().clone();
+        let state = l
+            .plugin
+            .save_state()
+            .ok_or_else(|| format!("{} cannot save its state", info.name))?;
+        presets::save_user(&presets::user_dir(&self.dir, &info), name, &state)?;
+        self.list_presets(id);
+        Ok(())
     }
 
     fn run_main_thread_work(&mut self) {
@@ -823,4 +950,11 @@ impl PluginHost {
         }
         self.guard.clean_exit();
     }
+}
+
+/// Copies the plugin's extra outputs and whether it sends MIDI into its document entry.
+fn mirror_outputs(plugin: &mut dyn Instance, p: &mut PluginRef) {
+    let (names, midi) = plugin.outputs();
+    p.set_output_names(names);
+    p.sends_midi = midi;
 }

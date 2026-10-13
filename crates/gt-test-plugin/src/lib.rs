@@ -7,7 +7,8 @@
 //!   reports the last key played through a read-only parameter, which exercises the plugin to
 //!   host parameter path.
 //!
-//! Both save their state. The crate builds as a `cdylib` (the `.clap` file: copy
+//! Both save their state. The tone has two factory presets, listed through CLAP preset
+//! discovery and loaded through the preset-load extension. The crate builds as a `cdylib` (the `.clap` file: copy
 //! `libgt_test_plugin.so`, `gt_test_plugin.dll` or `libgt_test_plugin.dylib` to a CLAP folder
 //! under a `.clap` name) and as an `rlib`, so the host's tests can load it in process. It is
 //! not shipped with the app. Its gain editor exists on Linux (X11) only.
@@ -21,6 +22,7 @@ use clack_plugin::prelude::*;
 mod gain;
 #[cfg(target_os = "linux")]
 mod gui;
+mod presets;
 mod tone;
 
 pub use gain::GainPlugin;
@@ -49,6 +51,9 @@ impl AtomicF32 {
 /// The plugin file's entry point: one factory listing both plugins.
 pub struct TestEntry {
     factory: PluginFactoryWrapper<TestFactory>,
+    presets: clack_extensions::preset_discovery::prelude::PresetDiscoveryFactoryWrapper<
+        presets::PresetFactory,
+    >,
 }
 
 impl Entry for TestEntry {
@@ -65,11 +70,24 @@ impl Entry for TestEntry {
                     .with_version(env!("CARGO_PKG_VERSION"))
                     .with_features([INSTRUMENT, SYNTHESIZER, STEREO]),
             }),
+            presets:
+                clack_extensions::preset_discovery::prelude::PresetDiscoveryFactoryWrapper::new(
+                    presets::PresetFactory {
+                        descriptor:
+                            clack_extensions::preset_discovery::prelude::ProviderDescriptor::new(
+                                presets::PROVIDER_ID,
+                                "GT Test presets",
+                            )
+                            .with_vendor("GloomTunes"),
+                    },
+                ),
         })
     }
 
     fn declare_factories<'a>(&'a self, builder: &mut EntryFactories<'a>) {
-        builder.register_factory(&self.factory);
+        builder
+            .register_factory(&self.factory)
+            .register_factory(&self.presets);
     }
 }
 

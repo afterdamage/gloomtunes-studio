@@ -38,6 +38,7 @@ use crate::backend::{Activated, Instance};
 use crate::catalog::PluginInfo;
 use crate::host::Signals;
 use crate::instance::FRAME;
+use crate::presets::{self, Preset, Source};
 use crate::processor::OUT_QUEUE;
 use crate::window::HostWindow;
 use com::{Frame, Handler, HostApp, MemStream, RunLoop};
@@ -418,6 +419,10 @@ pub(crate) struct Vst3Plugin {
     connection: Option<(ComPtr<IConnectionPoint>, ComPtr<IConnectionPoint>)>,
     /// Parameter ids in the document's order.
     ids: Arc<[u32]>,
+    /// Their units ("dB"), shown after values the plugin writes without them.
+    units: Vec<String>,
+    /// The program-change parameter: its index, unit and number of steps.
+    program: Option<(usize, i32, i32)>,
     offline: bool,
     active: bool,
     token: Arc<()>,
@@ -471,6 +476,8 @@ impl Vst3Plugin {
             separate: false,
             connection: None,
             ids: Arc::from(Vec::new()),
+            units: Vec::new(),
+            program: None,
             offline: false,
             active: false,
             token: Arc::new(()),
@@ -537,6 +544,45 @@ impl Vst3Plugin {
                 c.setComponentState(s.as_ptr());
             }
         }
+    }
+
+    /// The programs of the program-change parameter's unit, as presets.
+    fn programs(&self) -> Vec<Preset> {
+        let (Some(c), Some((index, unit, steps))) = (&self.controller, self.program) else {
+            return Vec::new();
+        };
+        let Some(units) = c.cast::<IUnitInfo>() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        // SAFETY: plain queries with structs we own.
+        unsafe {
+            let mut list = None;
+            for u in 0..units.getUnitCount().clamp(0, 4096) {
+                let mut info: UnitInfo = std::mem::zeroed();
+                if units.getUnitInfo(u, &mut info) == kResultOk && info.id == unit {
+                    list = Some(info.programListId);
+                }
+            }
+            let Some(list) = list.filter(|l| *l != kNoProgramListId) else {
+                return Vec::new();
+            };
+            for k in 0..=steps.min(4096) {
+                let mut name: String128 = std::mem::zeroed();
+                if units.getProgramName(list, k, &mut name) != kResultOk {
+                    continue;
+                }
+                out.push(Preset {
+                    name: wide(&name),
+                    user: false,
+                    source: Source::Vst3Program {
+                        index,
+                        value: k as f32 / steps as f32,
+                    },
+                });
+            }
+        }
+        out
     }
 
     fn save(&self, controller: bool) -> Option<Vec<u8>> {
@@ -616,7 +662,9 @@ impl Instance for Vst3Plugin {
         };
         let mut infos = Vec::new();
         let mut ids = Vec::new();
+        let mut units = Vec::new();
         let mut values = Vec::new();
+        self.program = None;
         // SAFETY: plain queries with structs we own.
         unsafe {
             let count = c.getParameterCount().clamp(0, MAX_PLUGIN_PARAMS as i32);
@@ -637,7 +685,11 @@ impl Instance for Vst3Plugin {
                     automatable: has(kCanAutomate) && !has(kIsReadOnly),
                     hidden: has(kIsHidden),
                 });
+                if has(kIsProgramChange) && p.stepCount > 0 && self.program.is_none() {
+                    self.program = Some((ids.len(), p.unitId, p.stepCount));
+                }
                 ids.push(p.id);
+                units.push(wide(&p.units));
                 let v = c.getParamNormalized(p.id) as f32;
                 values.push(if v.is_finite() {
                     v.clamp(0.0, 1.0)
@@ -647,7 +699,110 @@ impl Instance for Vst3Plugin {
             }
         }
         self.ids = Arc::from(ids);
+        self.units = units;
         (infos, values)
+    }
+
+    fn factory_presets(&mut self) -> Vec<Preset> {
+        let mut out = self.programs();
+        let class = self.info.id.to_ascii_uppercase();
+        for folder in presets::vst3_folders(&self.info.vendor, &self.info.name) {
+            for f in presets::files_in(&folder, Some("vstpreset")) {
+                // Only files for this class (read the header, not the whole file).
+                let mut head = [0u8; 40];
+                let ok = std::fs::File::open(&f)
+                    .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut head))
+                    .is_ok();
+                if !ok
+                    || &head[..4] != b"VST3"
+                    || head[8..40].to_ascii_uppercase() != *class.as_bytes()
+                {
+                    continue;
+                }
+                out.push(Preset {
+                    name: f
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    user: false,
+                    source: Source::Vst3File(f),
+                });
+            }
+        }
+        out
+    }
+
+    fn load_factory(&mut self, source: &Source) -> Result<(), String> {
+        match source {
+            Source::Vst3File(path) => {
+                let bad = || format!("{} is not a preset for {}", path.display(), self.info.name);
+                let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+                let (_, comp, cont) = presets::parse_vstpreset(&bytes).ok_or_else(bad)?;
+                let mut state = STATE_MAGIC.to_vec();
+                state.extend_from_slice(&(comp.len() as u32).to_le_bytes());
+                state.extend_from_slice(&comp);
+                state.extend_from_slice(&(cont.len() as u32).to_le_bytes());
+                state.extend_from_slice(&cont);
+                self.load_state(&state)
+            }
+            &Source::Vst3Program { index, value } => {
+                let c = self.controller.as_ref().ok_or("no controller")?;
+                let id = *self.ids.get(index).ok_or("no program parameter")?;
+                // SAFETY: a plain call. The host sends the value to the processor next.
+                unsafe { c.setParamNormalized(id, f64::from(value)) };
+                Ok(())
+            }
+            _ => Err("not a VST3 preset".to_owned()),
+        }
+    }
+
+    fn outputs(&mut self) -> (Vec<String>, bool) {
+        let (audio, event) = (
+            MediaTypes_::kAudio as MediaType,
+            MediaTypes_::kEvent as MediaType,
+        );
+        let out = BusDirections_::kOutput as BusDirection;
+        // SAFETY: plain queries with structs we own.
+        unsafe {
+            let c = &self.component;
+            let count = c.getBusCount(audio, out).clamp(0, 64);
+            let names = (1..count)
+                .take(gt_core::MAX_EXTRA_OUTPUTS)
+                .map(|i| {
+                    let mut b: BusInfo = std::mem::zeroed();
+                    let name = if c.getBusInfo(audio, out, i, &mut b) == kResultOk {
+                        wide(&b.name)
+                    } else {
+                        String::new()
+                    };
+                    if name.is_empty() {
+                        format!("Out {}", i + 1)
+                    } else {
+                        name
+                    }
+                })
+                .collect();
+            (names, c.getBusCount(event, out) > 0)
+        }
+    }
+
+    fn value_text(&mut self, index: usize, value: f32) -> Option<String> {
+        let c = self.controller.as_ref()?;
+        let id = *self.ids.get(index)?;
+        // SAFETY: a plain query with a buffer we own.
+        let text = unsafe {
+            let mut s: String128 = std::mem::zeroed();
+            if c.getParamStringByValue(id, f64::from(value), &mut s) != kResultOk {
+                return None;
+            }
+            wide(&s)
+        };
+        let unit = self.units.get(index).map_or("", |u| u.as_str());
+        Some(if unit.is_empty() || text.contains(unit) {
+            text
+        } else {
+            format!("{text} {unit}")
+        })
     }
 
     fn save_state(&mut self) -> Option<Vec<u8>> {

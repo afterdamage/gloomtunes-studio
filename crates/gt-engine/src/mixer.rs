@@ -185,7 +185,7 @@ fn balance(gain: f32, pan: f32, invert: bool) -> (f32, f32) {
 }
 
 /// A stereo delay line for delay compensation.
-struct PdcDelay {
+pub(crate) struct PdcDelay {
     l: Box<[f32]>,
     r: Box<[f32]>,
     pos: usize,
@@ -193,7 +193,7 @@ struct PdcDelay {
 }
 
 impl PdcDelay {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             l: vec![0.0; MAX_PDC_FRAMES].into_boxed_slice(),
             r: vec![0.0; MAX_PDC_FRAMES].into_boxed_slice(),
@@ -202,7 +202,7 @@ impl PdcDelay {
         }
     }
 
-    fn set_delay(&mut self, d: usize) {
+    pub(crate) fn set_delay(&mut self, d: usize) {
         let d = d.min(MAX_PDC_FRAMES - 1);
         if d != self.delay {
             self.delay = d;
@@ -212,7 +212,7 @@ impl PdcDelay {
     }
 
     /// Delays the buffers in place by `delay` frames.
-    fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+    pub(crate) fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
         if self.delay == 0 {
             return;
         }
@@ -245,6 +245,13 @@ struct Strip {
     /// Signal from channels.
     direct_l: [f32; Q],
     direct_r: [f32; Q],
+    /// Signal from plugin instruments, already aligned to `inst_latency` (D115).
+    latent_l: [f32; Q],
+    latent_r: [f32; Q],
+    /// Largest latency of the plugin instruments playing into this strip; the direct signal
+    /// is delayed by it so both line up.
+    inst_latency: usize,
+    pdc_inst: PdcDelay,
     /// Frozen track audio, joining at the strip's freeze point (see [`freeze_post_fx`]).
     frozen_l: [f32; Q],
     frozen_r: [f32; Q],
@@ -276,6 +283,10 @@ impl Strip {
             in_r: [0.0; Q],
             direct_l: [0.0; Q],
             direct_r: [0.0; Q],
+            latent_l: [0.0; Q],
+            latent_r: [0.0; Q],
+            inst_latency: 0,
+            pdc_inst: PdcDelay::new(),
             frozen_l: [0.0; Q],
             frozen_r: [0.0; Q],
             has_input: false,
@@ -325,6 +336,7 @@ impl Strip {
                 .iter()
                 .any(|f| f.effect.is_some() || f.plugin.is_some())
             || self.pdc_direct.delay > 0
+            || self.pdc_inst.delay > 0
             || self.pdc_out.delay > 0
             || self.pdc_sends.iter().any(|d| d.delay > 0)
             || self.mean_square[0] > 1e-12
@@ -572,7 +584,41 @@ impl MixerEngine {
 
     /// Delay compensation applied to what channels send into `strip`, in frames.
     pub(crate) fn input_delay(&self, strip: usize) -> usize {
-        self.strips.get(strip).map_or(0, |s| s.pdc_direct.delay)
+        self.strips
+            .get(strip)
+            .map_or(0, |s| s.pdc_direct.delay + s.pdc_inst.delay)
+    }
+
+    /// The input of strip `strip` for a plugin instrument whose signal is already delayed to
+    /// the strip's instrument latency (see [`Self::set_instrument_latency`]).
+    pub(crate) fn latent_mut(&mut self, strip: usize) -> (&mut [f32; Q], &mut [f32; Q]) {
+        let s = if strip < STRIPS { strip } else { MASTER };
+        let st = &mut self.strips[s];
+        st.has_input = true;
+        (&mut st.latent_l, &mut st.latent_r)
+    }
+
+    /// The instrument latency of strip `strip` (0 if out of range).
+    pub(crate) fn instrument_latency(&self, strip: usize) -> usize {
+        self.strips.get(strip).map_or(0, |s| s.inst_latency)
+    }
+
+    /// Sets each strip's instrument latency (the largest latency of the plugin instruments
+    /// routed to it) and recomputes delay compensation when it changed (true then).
+    pub(crate) fn set_instrument_latency(&mut self, lat: &[usize; STRIPS]) -> bool {
+        let lat = lat.map(|l| l.min(MAX_PDC_FRAMES - 1));
+        let changed = self
+            .strips
+            .iter()
+            .zip(&lat)
+            .any(|(s, l)| s.inst_latency != *l);
+        if changed {
+            for (s, l) in self.strips.iter_mut().zip(lat) {
+                s.inst_latency = l;
+            }
+            self.update_latency();
+        }
+        changed
     }
 
     /// Makes [`Self::process`] output a strip's signal instead of the master (offline only).
@@ -584,7 +630,8 @@ impl MixerEngine {
     /// of anything feeding it, and every edge is delayed by the difference, so all paths into
     /// a strip arrive aligned.
     fn update_latency(&mut self) {
-        let mut in_lat = [0_usize; STRIPS];
+        // A strip's input is late by its instruments' latency at least.
+        let mut in_lat: [usize; STRIPS] = std::array::from_fn(|i| self.strips[i].inst_latency);
         let mut out_lat = [0_usize; STRIPS];
         for s in &mut self.strips {
             s.fx_latency =
@@ -621,7 +668,8 @@ impl MixerEngine {
             let send_delays: [usize; SENDS] =
                 std::array::from_fn(|k| in_lat[FIRST_SEND + k].saturating_sub(out_lat[i]));
             let s = &mut self.strips[i];
-            s.pdc_direct.set_delay(d);
+            s.pdc_inst.set_delay(s.inst_latency);
+            s.pdc_direct.set_delay(d - s.inst_latency);
             s.pdc_out.set_delay(if i == MASTER { 0 } else { out_delay });
             for (pd, dd) in s.pdc_sends.iter_mut().zip(send_delays) {
                 pd.set_delay(dd);
@@ -647,6 +695,8 @@ impl MixerEngine {
             st.has_input = false;
             st.direct_l.fill(0.0);
             st.direct_r.fill(0.0);
+            st.latent_l.fill(0.0);
+            st.latent_r.fill(0.0);
             st.frozen_l.fill(0.0);
             st.frozen_r.fill(0.0);
             st.in_l.fill(0.0);
@@ -735,6 +785,9 @@ impl MixerEngine {
         };
         let st = &mut self.strips[s];
         let (mut l, mut r) = (st.direct_l, st.direct_r);
+        st.pdc_inst.process(&mut l, &mut r);
+        add(&mut l, &st.latent_l);
+        add(&mut r, &st.latent_r);
         st.pdc_direct.process(&mut l, &mut r);
         add(&mut l, &st.in_l);
         add(&mut r, &st.in_r);

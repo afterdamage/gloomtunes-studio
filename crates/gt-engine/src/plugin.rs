@@ -82,6 +82,17 @@ pub trait PluginProcessor: Send {
     /// Called on the audio thread right before the processor is handed back for freeing, so
     /// the plugin hears "stop processing" on the thread that processed it.
     fn stop(&mut self) {}
+    /// Stereo outputs besides the main one (multi-output instruments).
+    fn extra_outputs(&self) -> usize {
+        0
+    }
+    /// Extra output `k` (0-based, after the main one) of the last block.
+    fn extra_output(&self, _k: usize) -> Option<(&[f32], &[f32])> {
+        None
+    }
+    /// Hands the MIDI the plugin sent in the last block to `sink` (frame offset, message on
+    /// channel 1; notes as note on/off) and forgets it.
+    fn midi_out(&mut self, _sink: &mut dyn FnMut(u32, [u8; 3])) {}
 }
 
 /// A processor and the instance it belongs to. Built on the UI thread, sent with
@@ -251,11 +262,37 @@ impl PluginTable {
         let Some(e) = self.live(index) else {
             return;
         };
-        if !run_checked(e, l, r, ctx) {
+        if !run_checked(e, l, r, ctx) || !extras_finite(&*e.plugin.processor) {
+            e.failed = true;
             l.fill(0.0);
             r.fill(0.0);
             telemetry.plugin_failed[usize::from(i)].store(true, Ordering::Relaxed);
         }
+    }
+
+    /// Extra stereo outputs of a running instrument (0 if missing or failed).
+    pub(crate) fn extra_outputs(&self, index: Option<u8>) -> usize {
+        self.running(index)
+            .map_or(0, |p| p.extra_outputs().min(gt_core::MAX_EXTRA_OUTPUTS))
+    }
+
+    /// Extra output `k` of a running instrument's last block.
+    pub(crate) fn extra_output(&self, index: Option<u8>, k: usize) -> Option<(&[f32], &[f32])> {
+        self.running(index)?.extra_output(k)
+    }
+
+    /// The MIDI a running plugin sent in its last block.
+    pub(crate) fn midi_out(&mut self, index: Option<u8>, sink: &mut dyn FnMut(u32, [u8; 3])) {
+        if let Some(e) = self.live(index) {
+            e.plugin.processor.midi_out(sink);
+        }
+    }
+
+    fn running(&self, index: Option<u8>) -> Option<&dyn PluginProcessor> {
+        index
+            .and_then(|i| self.entries.get(usize::from(i))?.as_ref())
+            .filter(|e| !e.failed)
+            .map(|e| &*e.plugin.processor)
     }
 
     /// Runs an effect in place; a missing or failed plugin passes the input through.
@@ -286,6 +323,14 @@ impl PluginTable {
             telemetry.plugin_failed[usize::from(i)].store(true, Ordering::Relaxed);
         }
     }
+}
+
+/// True if every extra output of the last block is finite.
+fn extras_finite(p: &dyn PluginProcessor) -> bool {
+    (0..p.extra_outputs().min(gt_core::MAX_EXTRA_OUTPUTS)).all(|k| {
+        p.extra_output(k)
+            .is_none_or(|(a, b)| a.iter().chain(b).all(|x| x.is_finite()))
+    })
 }
 
 /// Processes and checks the output; marks the entry failed on an error or a non-finite sample.

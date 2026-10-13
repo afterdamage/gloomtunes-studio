@@ -431,6 +431,25 @@ impl ChannelSlot {
         self.params.route
     }
 
+    /// Inserts of a multi-output plugin's extra outputs.
+    pub(crate) fn extra_routes(&self) -> &[Option<u8>; gt_core::MAX_EXTRA_OUTPUTS] {
+        &self.params.extra_routes
+    }
+
+    /// The slot that plays the plugin's MIDI output.
+    pub(crate) fn midi_out(&self) -> Option<u16> {
+        self.params.midi_out
+    }
+
+    /// Gain of a plugin's extra outputs: the channel volume with automation, no pan.
+    pub(crate) fn extra_gain(&self) -> f32 {
+        if self.params.silenced {
+            0.0
+        } else {
+            self.ctl.channel[ChannelParam::Volume as usize].unwrap_or(self.params.gain)
+        }
+    }
+
     /// True if any voice is sounding.
     pub(crate) fn is_active(&self) -> bool {
         self.voices.iter().any(SamplerVoice::is_active) || self.synth.is_active()

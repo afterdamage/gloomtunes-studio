@@ -16,7 +16,7 @@ use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
 use vst3::{Class, ComPtr, ComWrapper};
 
-use crate::processor::{ParamOut, MAX_EVENTS};
+use crate::processor::{ParamOut, MAX_EVENTS, MIDI_OUT};
 
 /// Parameters changed in one block at most (the rest of a burst follows a block later).
 const MAX_CHANGED: usize = 256;
@@ -351,6 +351,11 @@ pub(crate) struct Vst3Processor {
     queue: rtrb::Producer<ParamOut>,
     held: [bool; 128],
     processing: bool,
+    /// MIDI the plugin sent in the last block (notes and controllers), and how much.
+    midi: [(u32, [u8; 3]); MIDI_OUT],
+    midi_len: usize,
+    /// Frames of the last block.
+    frames: usize,
 }
 
 // SAFETY: the processor is used by one thread at a time: built on the UI thread, then only
@@ -393,6 +398,9 @@ impl Vst3Processor {
             queue,
             held: [false; 128],
             processing: false,
+            midi: [(0, [0; 3]); MIDI_OUT],
+            midi_len: 0,
+            frames: 0,
         }
     }
 
@@ -471,6 +479,49 @@ impl Vst3Processor {
             }
         }
         self.out_changes.clear();
+        self.midi_len = 0;
+        for i in 0..self.out_events.len() {
+            let Some(e) = self.out_events.get(i) else {
+                break;
+            };
+            let at = e.sampleOffset.max(0) as u32;
+            let seven = |v: f32| (v.clamp(0.0, 1.0) * 127.0).round() as u8;
+            use Event_::EventTypes_::*;
+            // SAFETY: the union member read is the one the event's type names.
+            #[allow(unsafe_code)]
+            let msg = unsafe {
+                match u32::from(e.r#type) {
+                    t if t == kNoteOnEvent as u32 => {
+                        let n = e.__field0.noteOn;
+                        Some([0x90, (n.pitch & 0x7F) as u8, seven(n.velocity).max(1)])
+                    }
+                    t if t == kNoteOffEvent as u32 => {
+                        Some([0x80, (e.__field0.noteOff.pitch & 0x7F) as u8, 0])
+                    }
+                    t if t == kPolyPressureEvent as u32 => {
+                        let p = e.__field0.polyPressure;
+                        Some([0xA0, (p.pitch & 0x7F) as u8, seven(p.pressure)])
+                    }
+                    t if t == kLegacyMIDICCOutEvent as u32 => {
+                        let c = e.__field0.midiCCOut;
+                        let (v, v2) = ((c.value as u8) & 0x7F, (c.value2 as u8) & 0x7F);
+                        match c.controlNumber {
+                            n @ 0..=127 => Some([0xB0, n, v]),
+                            128 => Some([0xD0, v, 0]),
+                            129 => Some([0xE0, v, v2]),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(msg) = msg {
+                if self.midi_len < MIDI_OUT {
+                    self.midi[self.midi_len] = (at, msg);
+                    self.midi_len += 1;
+                }
+            }
+        }
         self.out_events.clear();
     }
 }
@@ -506,6 +557,7 @@ impl PluginProcessor for Vst3Processor {
             }
         }
         self.update_context(ctx);
+        self.frames = n;
         self.in_events.sort();
         let iface = |c: &ComWrapper<ParamChanges>| {
             c.as_com_ref::<IParameterChanges>()
@@ -640,6 +692,26 @@ impl PluginProcessor for Vst3Processor {
 
     fn latency(&self) -> usize {
         self.setup.latency
+    }
+
+    fn extra_outputs(&self) -> usize {
+        self.outputs.bufs.len().saturating_sub(1)
+    }
+
+    fn extra_output(&self, k: usize) -> Option<(&[f32], &[f32])> {
+        let n = self.frames;
+        match self.outputs.bufs.get(k + 1)?.as_slice() {
+            [mono] => Some((&mono[..n], &mono[..n])),
+            [left, right, ..] => Some((&left[..n], &right[..n])),
+            [] => None,
+        }
+    }
+
+    fn midi_out(&mut self, sink: &mut dyn FnMut(u32, [u8; 3])) {
+        for &(offset, msg) in &self.midi[..self.midi_len] {
+            sink(offset, msg);
+        }
+        self.midi_len = 0;
     }
 
     fn stop(&mut self) {

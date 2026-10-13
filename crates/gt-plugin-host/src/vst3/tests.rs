@@ -113,6 +113,30 @@ fn an_instrument_plays_notes_reports_its_parameters_and_follows_mapped_controlle
 }
 
 #[test]
+fn the_sub_output_and_the_midi_echo_reach_the_engine() {
+    let mut p = loaded(&TONE_CID);
+    p.read_params();
+    assert_eq!(p.outputs(), (vec!["Sub".to_owned()], true));
+    let (mut proc, _rx) = p.activate(RATE).unwrap();
+    assert_eq!(proc.extra_outputs(), 1);
+    let (mut l, mut r) = ([0.0_f32; 32], [0.0_f32; 32]);
+    proc.note_on(2, 60, 1.0);
+    assert!(proc.process(&mut l, &mut r, &ctx()));
+    let (sl, sr) = proc.extra_output(0).unwrap();
+    assert!(sl.iter().any(|&x| x != 0.0), "the sub output plays");
+    assert_eq!(sl, sr);
+    assert_ne!(sl, &l[..], "an octave lower than the main output");
+    let mut midi = Vec::new();
+    proc.midi_out(&mut |at, msg| midi.push((at, msg)));
+    assert_eq!(midi, vec![(2, [0x90, 72, 127])]);
+    proc.note_off(7, 60);
+    proc.process(&mut l, &mut r, &ctx());
+    proc.midi_out(&mut |at, msg| midi.push((at, msg)));
+    assert_eq!(midi[1], (7, [0x80, 72, 0]));
+    proc.stop();
+}
+
+#[test]
 fn state_round_trips_and_editor_edits_reach_the_document() {
     let mut a = loaded(&GAIN_CID);
     a.read_params();
@@ -143,6 +167,36 @@ fn state_round_trips_and_editor_edits_reach_the_document() {
     unsafe { tone.handler.performEdit(TONE_VOLUME, 0.25) };
     assert_eq!(tone.take_edits(), vec![(0, 0.25)]);
     assert!(Signals::take(&tone.signals.dirty));
+}
+
+#[test]
+fn values_are_written_with_units_and_vstpreset_files_load() {
+    let mut a = loaded(&GAIN_CID);
+    a.read_params();
+    assert_eq!(a.value_text(0, 0.25).as_deref(), Some("-6.0 dB"));
+    assert_eq!(a.value_text(1, 0.5).as_deref(), Some("NaN"));
+    assert_eq!(a.value_text(7, 0.5), None);
+
+    // A .vstpreset with the gain at 0.75 (the parts of a saved state).
+    let (mut proc, _rx) = a.activate(RATE).unwrap();
+    proc.set_param(0, 0.75);
+    let (mut l, mut r) = ([0.0_f32; 32], [0.0_f32; 32]);
+    proc.process(&mut l, &mut r, &ctx());
+    let comp = a.save(false).unwrap();
+    let cont = a.save(true).unwrap();
+    let file = std::env::temp_dir().join(format!("gt-{}.vstpreset", std::process::id()));
+    std::fs::write(
+        &file,
+        presets::write_vstpreset(&cid_hex(&GAIN_CID), &comp, &cont),
+    )
+    .unwrap();
+    let mut b = loaded(&GAIN_CID);
+    b.read_params();
+    b.load_factory(&Source::Vst3File(file.clone())).unwrap();
+    assert_eq!(b.read_params().1[0], 0.75);
+    std::fs::write(&file, b"VST3 junk").unwrap();
+    assert!(b.load_factory(&Source::Vst3File(file.clone())).is_err());
+    let _ = std::fs::remove_file(file);
 }
 
 fn host() -> PluginHost {
@@ -300,6 +354,20 @@ fn a_real_bundle_is_found_scanned_loaded_and_played() {
     q.load_state(&state).unwrap();
     assert_eq!(q.read_params().1[0], 1.0);
     drop(q);
+
+    // The multi-output instrument from the bundle.
+    let tone = found.iter().find(|p| p.id == cid_hex(&TONE_CID)).unwrap();
+    let mut t = Vst3Plugin::create(&m, tone, Signals::new(Arc::new(|| {}))).unwrap();
+    t.read_params();
+    assert_eq!(t.outputs().0, ["Sub"]);
+    let (mut proc, _rx) = t.activate(RATE).unwrap();
+    proc.note_on(0, 60, 1.0);
+    let (mut l, mut r) = ([0.0_f32; 32], [0.0_f32; 32]);
+    assert!(proc.process(&mut l, &mut r, &ctx()));
+    assert!(proc.extra_output(0).unwrap().0.iter().any(|&x| x != 0.0));
+    proc.stop();
+    drop(proc);
+    drop(t);
     drop(m);
     let _ = std::fs::remove_dir_all(&dir);
 }

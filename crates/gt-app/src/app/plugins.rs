@@ -76,6 +76,21 @@ impl GloomApp {
             }
             PluginAction::CloseEditor(id) => self.plugins.close_editor(id),
             PluginAction::Retry(id) => self.plugins.retry(id, self.audio.engine_mut()),
+            PluginAction::ListPresets(id) => self.plugins.list_presets(id),
+            PluginAction::Routed(_) => {
+                self.push_all_params();
+                self.pending_edit = Some("Plugin routing");
+            }
+            PluginAction::LoadPreset(id, i) => {
+                match self.plugins.load_preset(&mut self.project, id, i) {
+                    Ok(()) => self.pending_edit = Some("Load preset"),
+                    Err(e) => self.toast(format!("Cannot load the preset: {e}")),
+                }
+            }
+            PluginAction::SavePreset(id, name) => match self.plugins.save_preset(id, &name) {
+                Ok(()) => self.toast(format!("Saved preset \"{name}\"")),
+                Err(e) => self.toast(format!("Cannot save the preset: {e}")),
+            },
         }
     }
 

@@ -128,8 +128,27 @@ pub struct PluginRef {
     pub params: Arc<[PluginParamInfo]>,
     /// Current values, normalized, in the order of `params`.
     pub values: Vec<f32>,
+    /// The plugin's stereo outputs after the main one (multi-output instruments), named by the
+    /// plugin, each with the mixer insert it plays into.
+    pub outputs: Vec<PluginOutput>,
+    /// The plugin sends MIDI (an arpeggiator, say), as it reported when loaded.
+    pub sends_midi: bool,
+    /// The channel that plays the plugin's MIDI output; None: it is dropped.
+    pub midi_out: Option<crate::ChannelId>,
     /// The running plugin this document entry belongs to.
     pub instance: PluginInstanceId,
+}
+
+/// Most extra stereo outputs of one plugin that can be routed (the rest are not heard).
+pub const MAX_EXTRA_OUTPUTS: usize = 15;
+
+/// An extra stereo output of a plugin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginOutput {
+    /// Its name, as the plugin gives it.
+    pub name: String,
+    /// The mixer insert it plays into; None: not heard.
+    pub route: Option<u8>,
 }
 
 impl PluginRef {
@@ -145,6 +164,9 @@ impl PluginRef {
             state: Arc::from(Vec::new()),
             params: Arc::from(Vec::new()),
             values: Vec::new(),
+            outputs: Vec::new(),
+            sends_midi: false,
+            midi_out: None,
             instance: PluginInstanceId::fresh(),
         }
     }
@@ -173,6 +195,21 @@ impl PluginRef {
     /// made for when another plugin takes its place (FNV-1a, 32-bit).
     pub fn id_hash(&self) -> u32 {
         hash_id(&self.id)
+    }
+
+    /// Takes the extra output names the plugin reports, keeping the routes of outputs that
+    /// were there before (by position).
+    pub fn set_output_names(&mut self, names: Vec<String>) {
+        let old = std::mem::take(&mut self.outputs);
+        self.outputs = names
+            .into_iter()
+            .take(MAX_EXTRA_OUTPUTS)
+            .enumerate()
+            .map(|(i, name)| PluginOutput {
+                name,
+                route: old.get(i).and_then(|o| o.route),
+            })
+            .collect();
     }
 
     /// Fixes the value count and ranges and caps the parameter list.

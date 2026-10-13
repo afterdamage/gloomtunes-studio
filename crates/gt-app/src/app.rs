@@ -193,7 +193,7 @@ pub struct GloomApp {
 }
 
 /// What the plugin panels show for plugin `id`.
-fn plugin_view(host: &PluginHost, id: PluginInstanceId) -> PluginPanelView {
+fn plugin_view(host: &PluginHost, project: &Project, id: PluginInstanceId) -> PluginPanelView {
     PluginPanelView {
         state: match host.status(id) {
             PluginStatus::Running => PluginState::Running,
@@ -203,6 +203,24 @@ fn plugin_view(host: &PluginHost, id: PluginInstanceId) -> PluginPanelView {
         },
         has_editor: host.has_editor(id),
         editor_open: host.editor_open(id),
+        texts: host.param_texts(id),
+        presets: host
+            .listed_presets(id)
+            .map(|list| list.iter().map(|p| (p.name.clone(), p.user)).collect()),
+        strips: project
+            .mixer
+            .strips
+            .iter()
+            .map(|s| s.name.clone())
+            .collect(),
+        midi_targets: project
+            .channels
+            .iter()
+            .filter(
+                |c| !matches!(&c.instrument, gt_core::Instrument::Plugin(p) if p.instance == id),
+            )
+            .map(|c| (c.id, c.name.clone()))
+            .collect(),
     }
 }
 
@@ -423,8 +441,7 @@ impl GloomApp {
 
     fn push_all_params(&mut self) {
         for i in 0..self.project.channels.len() {
-            let p =
-                ChannelParams::from_channel(&self.project.channels[i], self.project.is_silenced(i));
+            let p = ChannelParams::from_project(&self.project, i);
             self.send(EngineCommand::SetChannelParams {
                 slot: i as u16,
                 params: Box::new(p),
@@ -2030,6 +2047,18 @@ impl eframe::App for GloomApp {
         let show_instrument = matches!(self.main_view, MainView::Rack | MainView::PianoRoll);
         let mut plugin_actions = Vec::new();
         let mut plugin_changed = false;
+        // The selected channel's plugin panel (read before the channel is borrowed to edit).
+        let channel_plugin_view = self
+            .project
+            .channels
+            .get(self.rack.selected)
+            .and_then(|c| match &c.instrument {
+                Instrument::Plugin(p) => {
+                    Some(plugin_view(&self.plugins, &self.project, p.instance))
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
         let (sampler_changed, synth_actions) = if !show_instrument {
             (false, Vec::new())
         } else {
@@ -2089,10 +2118,10 @@ impl eframe::App for GloomApp {
                                 )
                                 .on_hover_text("Channel name");
                             });
-                            let view = plugin_view(&self.plugins, p.instance);
+                            let view = &channel_plugin_view;
                             let owner = gt_core::PluginOwner::Channel(ch.id);
                             plugin_changed =
-                                plugin_controls(ui, &theme, owner, p, &view, &mut plugin_actions);
+                                plugin_controls(ui, &theme, owner, p, view, &mut plugin_actions);
                             (false, Vec::new())
                         }
                     };
@@ -2204,7 +2233,7 @@ impl eframe::App for GloomApp {
                             let strip = &self.project.mixer.strips
                                 [self.mixer_state.selected.min(STRIPS - 1)];
                             let p = strip.slots.get(k)?.as_ref()?.plugin.as_ref()?;
-                            Some(plugin_view(&self.plugins, p.instance))
+                            Some(plugin_view(&self.plugins, &self.project, p.instance))
                         });
                         let view = MixerView {
                             meters: &self.strip_view,

@@ -11,15 +11,17 @@ use clack_extensions::gui::{GuiConfiguration, GuiSize, PluginGui};
 use clack_extensions::latency::PluginLatency;
 use clack_extensions::note_ports::{NoteDialects, NotePortInfoBuffer, PluginNotePorts};
 use clack_extensions::params::{ParamInfoBuffer, ParamInfoFlags, PluginParams};
+use clack_extensions::preset_discovery::prelude::{Location, PluginPresetLoad};
 use clack_extensions::render::{PluginRender, RenderMode};
 use clack_extensions::state::PluginState;
 use clack_host::prelude::*;
-use gt_core::{PluginKind, PluginParamInfo, MAX_PLUGIN_PARAMS};
+use gt_core::{PluginKind, PluginParamInfo, MAX_EXTRA_OUTPUTS, MAX_PLUGIN_PARAMS};
 use gt_engine::RENDER_QUANTUM;
 
 use crate::backend::{Activated, Instance};
 use crate::catalog::PluginInfo;
 use crate::host::{GtHost, MainThread, Shared, Signals};
+use crate::presets::{Preset, Source};
 use crate::processor::{ClapProcessor, Layout, ParamMap, OUT_QUEUE};
 use crate::window::HostWindow;
 
@@ -45,6 +47,8 @@ struct Editor {
 /// A created plugin instance with its extensions.
 pub(crate) struct LoadedPlugin {
     pub(crate) instance: PluginInstance<GtHost>,
+    /// The plugin file (for its preset providers).
+    entry: PluginEntry,
     pub(crate) signals: Arc<Signals>,
     pub(crate) info: PluginInfo,
     params_ext: Option<PluginParams>,
@@ -87,6 +91,7 @@ impl LoadedPlugin {
             audio_ports_ext: h.get_extension(),
             note_ports_ext: h.get_extension(),
             instance,
+            entry: entry.clone(),
             signals,
             info: info.clone(),
             params: Arc::from(Vec::new()),
@@ -192,6 +197,7 @@ impl LoadedPlugin {
             for is_input in [true, false] {
                 let mut main = None;
                 let mut counts = Vec::new();
+                let mut names = Vec::new();
                 for i in 0..ext.count(&h, is_input).min(64) {
                     let info = ext.get(&h, i, is_input, &mut buf);
                     let channels = info
@@ -204,6 +210,12 @@ impl LoadedPlugin {
                     if main.is_none() && (is_main || i == 0) && channels > 0 {
                         main = Some(i as usize);
                     }
+                    if !is_input && channels > 0 {
+                        let name = info.as_ref().map_or_else(String::new, |p| {
+                            String::from_utf8_lossy(trim_nul(p.name)).trim().to_owned()
+                        });
+                        names.push((i as usize, name));
+                    }
                     counts.push(channels);
                 }
                 if is_input {
@@ -212,10 +224,22 @@ impl LoadedPlugin {
                 } else {
                     layout.outputs = counts;
                     layout.main_out = main;
+                    for (i, name) in names.drain(..) {
+                        if Some(i) != main && layout.extra_outs.len() < MAX_EXTRA_OUTPUTS {
+                            let name = if name.is_empty() {
+                                format!("Out {}", layout.extra_outs.len() + 2)
+                            } else {
+                                name
+                            };
+                            layout.extra_outs.push(i);
+                            layout.extra_names.push(name);
+                        }
+                    }
                 }
             }
         }
         if let Some(ext) = self.note_ports_ext {
+            layout.note_out = ext.count(&h, false) > 0;
             let mut buf = NotePortInfoBuffer::new();
             if ext.count(&h, true) > 0 {
                 if let Some(p) = ext.get(&h, 0, true, &mut buf) {
@@ -277,6 +301,48 @@ impl Instance for LoadedPlugin {
 
     fn read_params(&mut self) -> (Vec<PluginParamInfo>, Vec<f32>) {
         LoadedPlugin::read_params(self)
+    }
+
+    fn outputs(&mut self) -> (Vec<String>, bool) {
+        let layout = self.layout();
+        (layout.extra_names, layout.note_out)
+    }
+
+    fn value_text(&mut self, index: usize, value: f32) -> Option<String> {
+        let ext = self.params_ext?;
+        let map = *self.params.get(index)?;
+        let id = ClapId::new(map.id);
+        let mut buf = [0u8; 256];
+        let text = ext
+            .value_to_text(
+                &self.instance.plugin_handle(),
+                id,
+                map.to_plain(value),
+                &mut buf,
+            )
+            .ok()?;
+        let text = String::from_utf8_lossy(trim_nul(text)).trim().to_owned();
+        (!text.is_empty()).then_some(text)
+    }
+
+    fn factory_presets(&mut self) -> Vec<Preset> {
+        crate::presets::clap_factory(&self.entry, &self.info.id)
+    }
+
+    fn load_factory(&mut self, source: &Source) -> Result<(), String> {
+        let Source::Clap { file, key } = source else {
+            return Err("not a CLAP preset".to_owned());
+        };
+        let h = self.instance.plugin_handle();
+        let ext: PluginPresetLoad = h
+            .get_extension()
+            .ok_or_else(|| format!("{} cannot load presets", self.info.name))?;
+        let location = match file {
+            Some(path) => Location::File { path },
+            None => Location::Plugin,
+        };
+        ext.load_from_location(&h, location, key.as_deref())
+            .map_err(|_| format!("{} could not load the preset", self.info.name))
     }
 
     fn save_state(&mut self) -> Option<Vec<u8>> {

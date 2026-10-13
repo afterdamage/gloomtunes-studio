@@ -846,6 +846,10 @@ pub struct ChannelParams {
     pub plugin: Option<gt_core::PluginInstanceId>,
     /// Pitch bend range in semitones (built-in instruments; plugins use their own).
     pub bend_range: f32,
+    /// Mixer insert of each extra stereo output of a multi-output plugin (None: not heard).
+    pub extra_routes: [Option<u8>; gt_core::MAX_EXTRA_OUTPUTS],
+    /// Channel slot that plays the plugin's MIDI output (None: dropped).
+    pub midi_out: Option<u16>,
 }
 
 impl Default for ChannelParams {
@@ -864,6 +868,8 @@ impl Default for ChannelParams {
             route: 0,
             plugin: None,
             bend_range: Channel::DEFAULT_BEND,
+            extra_routes: [None; gt_core::MAX_EXTRA_OUTPUTS],
+            midi_out: None,
         }
     }
 }
@@ -898,7 +904,25 @@ impl ChannelParams {
             Instrument::Plugin(plugin) => {
                 p.kind = InstrumentKind::Plugin;
                 p.plugin = Some(plugin.instance);
+                for (r, o) in p.extra_routes.iter_mut().zip(&plugin.outputs) {
+                    *r = o.route.filter(|&s| usize::from(s) < gt_core::STRIPS);
+                }
             }
+        }
+        p
+    }
+
+    /// Engine parameters for channel `index` of `project`: [`Self::from_channel`] with its
+    /// effective mute and the slot its plugin's MIDI output plays.
+    pub fn from_project(project: &gt_core::Project, index: usize) -> Self {
+        let ch = &project.channels[index];
+        let mut p = Self::from_channel(ch, project.is_silenced(index));
+        if let Instrument::Plugin(plugin) = &ch.instrument {
+            p.midi_out = plugin
+                .midi_out
+                .and_then(|id| project.channel_index(id))
+                .filter(|&i| i != index)
+                .map(|i| i as u16);
         }
         p
     }

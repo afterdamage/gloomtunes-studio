@@ -23,6 +23,7 @@ mod guard;
 mod host;
 mod instance;
 mod manager;
+pub mod presets;
 mod processor;
 #[cfg(test)]
 mod tests;
@@ -33,3 +34,4 @@ pub use catalog::{Catalog, CatalogFile, PluginInfo, SCAN_SWITCH};
 pub use guard::{CrashReport, Guard};
 pub use host::Waker;
 pub use manager::{PluginHost, PluginStatus, SyncOutcome};
+pub use presets::Preset;

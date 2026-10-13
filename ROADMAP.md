@@ -572,6 +572,13 @@ sound identical; the golden export test stays.
 - VST3 (D113): scanned, loaded, played, automated, saved and edited (editor windows on all
   three systems) exactly like CLAP; a plugin shipped in both formats is offered as CLAP.
   Limits: `moduleinfo.json` is not read, so every bundle is loaded once to scan it.
+- Presets and units (D114), both formats: a Presets menu loads the plugin's own presets (CLAP
+  preset discovery, VST3 programs and `.vstpreset` files) and saves and loads user presets in
+  the data folder; sliders show values in the plugin's own text and units.
+- Instrument delay compensation (D115): latent plugin instruments are lined up with the rest.
+- Multi-output instruments and MIDI out (D116): each extra stereo output of a plugin
+  instrument can play into its own insert, and the notes a plugin sends (arpeggiators) can
+  play another channel, a block later.
 
 ---
 

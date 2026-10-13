@@ -6,17 +6,18 @@
 use std::sync::Arc;
 
 use egui::{vec2, RichText, Ui};
-use gt_core::{ParamId, PluginInstanceId, PluginKind, PluginOwner, PluginRef};
+use gt_core::{ChannelId, ParamId, PluginInstanceId, PluginKind, PluginOwner, PluginRef};
 
 use crate::param_ui::{param_live, param_menu};
 use crate::GloomTheme;
 
 /// How a plugin in the project is doing, as the plugin host reports it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum PluginState {
     /// Loaded and running.
     Running,
     /// Loaded, waiting for the audio engine (no device open).
+    #[default]
     Waiting,
     /// Bypassed after an error or invalid output.
     Failed,
@@ -25,7 +26,7 @@ pub enum PluginState {
 }
 
 /// What the plugin controls show besides the document.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PluginPanelView {
     /// Status.
     pub state: PluginState,
@@ -33,10 +34,19 @@ pub struct PluginPanelView {
     pub has_editor: bool,
     /// Its editor is open.
     pub editor_open: bool,
+    /// Parameter values as the plugin writes them ("-6.0 dB"), in parameter order; None
+    /// where it does not say (shown as a percentage).
+    pub texts: Vec<Option<String>>,
+    /// Its presets, name and whether the user saved it (None: not read yet).
+    pub presets: Option<Vec<(String, bool)>>,
+    /// Names of the mixer strips, by index (for routing extra outputs).
+    pub strips: Vec<String>,
+    /// Channels its MIDI output can play: id and name.
+    pub midi_targets: Vec<(ChannelId, String)>,
 }
 
 /// What the user asked of a loaded plugin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginAction {
     /// Open (or raise) the plugin's editor.
     OpenEditor(PluginInstanceId),
@@ -44,6 +54,14 @@ pub enum PluginAction {
     CloseEditor(PluginInstanceId),
     /// Run a bypassed plugin again, or try loading an unavailable one again.
     Retry(PluginInstanceId),
+    /// Read the plugin's preset list (the presets menu was opened).
+    ListPresets(PluginInstanceId),
+    /// Load preset number `.1` of the list.
+    LoadPreset(PluginInstanceId, usize),
+    /// Save the plugin's current sound as a user preset with this name.
+    SavePreset(PluginInstanceId, String),
+    /// Its extra outputs or MIDI output were routed elsewhere (already in the document).
+    Routed(PluginInstanceId),
 }
 
 /// Status line, editor button and the parameter sliders of `plugin`, which sits at `owner`.
@@ -65,7 +83,7 @@ pub fn plugin_controls(
             PluginState::Unavailable(_) => ("Not loaded".to_owned(), theme.warn),
         };
         ui.label(
-            RichText::new(format!("CLAP · {}", plugin.vendor))
+            RichText::new(format!("{} · {}", plugin.format.label(), plugin.vendor))
                 .small()
                 .color(theme.text_dim),
         );
@@ -79,6 +97,9 @@ pub fn plugin_controls(
             .clicked()
         {
             actions.push(PluginAction::Retry(id));
+        }
+        if matches!(view.state, PluginState::Running | PluginState::Waiting) {
+            presets_menu(ui, theme, id, view, actions);
         }
         if view.has_editor {
             let label = if view.editor_open {
@@ -107,7 +128,131 @@ pub fn plugin_controls(
     if let Some(why) = why {
         ui.label(RichText::new(why).small().color(theme.warn));
     }
-    plugin_params(ui, theme, owner, plugin)
+    if matches!(owner, PluginOwner::Channel(_)) && (!plugin.outputs.is_empty() || plugin.sends_midi)
+    {
+        plugin_routing(ui, theme, plugin, view, actions);
+    }
+    plugin_params(ui, theme, owner, plugin, &view.texts)
+}
+
+/// Where a multi-output instrument's extra outputs and a plugin's MIDI output go.
+fn plugin_routing(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    plugin: &mut PluginRef,
+    view: &PluginPanelView,
+    actions: &mut Vec<PluginAction>,
+) {
+    let id = plugin.instance;
+    let strip = |s: Option<u8>| {
+        s.and_then(|s| view.strips.get(usize::from(s)).cloned())
+            .unwrap_or_else(|| "Off".to_owned())
+    };
+    let mut routed = false;
+    ui.horizontal_wrapped(|ui| {
+        for (k, out) in plugin.outputs.iter_mut().enumerate() {
+            ui.label(RichText::new(&out.name).small().color(theme.text_dim));
+            egui::ComboBox::from_id_salt(("gt_plugin_out", id, k))
+                .selected_text(strip(out.route))
+                .width(110.0)
+                .show_ui(ui, |ui| {
+                    routed |= ui.selectable_value(&mut out.route, None, "Off").changed();
+                    for (i, name) in view.strips.iter().enumerate() {
+                        routed |= ui
+                            .selectable_value(&mut out.route, Some(i as u8), name)
+                            .changed();
+                    }
+                })
+                .response
+                .on_hover_text("The mixer insert this output plays into");
+        }
+        if plugin.sends_midi {
+            ui.label(RichText::new("MIDI out").small().color(theme.text_dim));
+            let name = plugin
+                .midi_out
+                .and_then(|c| view.midi_targets.iter().find(|t| t.0 == c))
+                .map_or_else(|| "Off".to_owned(), |t| t.1.clone());
+            egui::ComboBox::from_id_salt(("gt_plugin_midi", id))
+                .selected_text(name)
+                .width(110.0)
+                .show_ui(ui, |ui| {
+                    routed |= ui
+                        .selectable_value(&mut plugin.midi_out, None, "Off")
+                        .changed();
+                    for (c, name) in &view.midi_targets {
+                        routed |= ui
+                            .selectable_value(&mut plugin.midi_out, Some(*c), name)
+                            .changed();
+                    }
+                })
+                .response
+                .on_hover_text("The channel that plays the notes this plugin sends");
+        }
+    });
+    if routed {
+        actions.push(PluginAction::Routed(id));
+    }
+}
+
+/// The presets menu: the plugin's own presets, the user's, and saving the current sound.
+fn presets_menu(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    id: PluginInstanceId,
+    view: &PluginPanelView,
+    actions: &mut Vec<PluginAction>,
+) {
+    ui.menu_button("Presets", |ui| {
+        let Some(list) = &view.presets else {
+            actions.push(PluginAction::ListPresets(id));
+            ui.label(RichText::new("Reading…").small().color(theme.text_dim));
+            return;
+        };
+        egui::ScrollArea::vertical()
+            .max_height(320.0)
+            .show(ui, |ui| {
+                for user in [false, true] {
+                    let head = if user { "Yours" } else { "The plugin's" };
+                    ui.label(RichText::new(head).small().color(theme.text_dim));
+                    let mut any = false;
+                    for (i, (name, u)) in list.iter().enumerate() {
+                        if *u == user {
+                            any = true;
+                            if ui.button(name).clicked() {
+                                actions.push(PluginAction::LoadPreset(id, i));
+                                ui.close();
+                            }
+                        }
+                    }
+                    if !any {
+                        ui.label(RichText::new("None").small().color(theme.text_dim));
+                    }
+                    ui.separator();
+                }
+            });
+        let name_id = egui::Id::new(("gt_preset_name", id));
+        let mut name: String = ui.data(|d| d.get_temp(name_id)).unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut name)
+                    .hint_text("Preset name")
+                    .desired_width(140.0),
+            );
+            if ui
+                .add_enabled(!name.trim().is_empty(), egui::Button::new("Save"))
+                .on_hover_text("Save the current sound as a preset of yours")
+                .clicked()
+            {
+                actions.push(PluginAction::SavePreset(id, name.trim().to_owned()));
+                name.clear();
+                ui.close();
+            }
+        });
+        ui.data_mut(|d| d.insert_temp(name_id, name));
+        if ui.small_button("Refresh").clicked() {
+            actions.push(PluginAction::ListPresets(id));
+        }
+    });
 }
 
 /// One slider per visible parameter, with a filter for plugins that have many. Returns true if
@@ -117,6 +262,7 @@ fn plugin_params(
     theme: &GloomTheme,
     owner: PluginOwner,
     plugin: &mut PluginRef,
+    texts: &[Option<String>],
 ) -> bool {
     let params = Arc::clone(&plugin.params);
     let visible = params.iter().filter(|p| !p.hidden).count();
@@ -155,11 +301,20 @@ fn plugin_params(
                         }
                         fixed_label(ui, 130.0, RichText::new(&info.name).small());
                         let mut v = plugin.values.get(i).copied().unwrap_or(info.default);
+                        // The plugin's own text for the shown value (it lags a frame while
+                        // dragging), else a percentage or the step.
+                        let text = texts.get(i).cloned().flatten();
                         let r = if info.steps > 0 && info.steps <= 128 {
                             let mut s = (v * info.steps as f32).round() as u32;
+                            let shown = s;
                             let r = ui.add_enabled(
                                 info.automatable,
-                                egui::Slider::new(&mut s, 0..=info.steps),
+                                egui::Slider::new(&mut s, 0..=info.steps).custom_formatter(
+                                    |x, _| match &text {
+                                        Some(t) if x as u32 == shown => t.clone(),
+                                        _ => format!("{x:.0}"),
+                                    },
+                                ),
                             );
                             if r.changed() {
                                 v = s as f32 / info.steps as f32;
@@ -168,8 +323,12 @@ fn plugin_params(
                         } else {
                             ui.add_enabled(
                                 info.automatable,
-                                egui::Slider::new(&mut v, 0.0..=1.0)
-                                    .custom_formatter(|x, _| format!("{:.1} %", x * 100.0)),
+                                egui::Slider::new(&mut v, 0.0..=1.0).custom_formatter(|x, _| {
+                                    match &text {
+                                        Some(t) => t.clone(),
+                                        None => format!("{:.1} %", x * 100.0),
+                                    }
+                                }),
                             )
                         };
                         let r = if info.automatable {
