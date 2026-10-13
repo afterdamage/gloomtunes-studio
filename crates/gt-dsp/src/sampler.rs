@@ -355,6 +355,13 @@ impl SamplerVoice {
         self.filter_env.release_scaled(self.release_scale);
     }
 
+    /// Cuts the voice with a 5 ms fade (choke groups).
+    pub fn choke(&mut self) {
+        let fast = AdsrParams::new(self.sr, 0.0, 0.0, 1.0, 5.0);
+        self.env.release_with(fast);
+        self.filter_env.release_with(fast);
+    }
+
     /// Retargets a sounding voice to a new read step without restarting it (legato), gliding
     /// over `frames`.
     pub fn legato_to(&mut self, key: u8, step: f64, frames: u32) {

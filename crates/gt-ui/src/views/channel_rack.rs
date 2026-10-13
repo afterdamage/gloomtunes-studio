@@ -109,14 +109,21 @@ pub fn channel_rack(
                     .on_hover_text("Add an empty sampler channel; load a sample from the browser")
                     .clicked()
                 {
-                    add = Some(false);
+                    add = Some(0);
+                }
+                if ui
+                    .button("+ Drum pads")
+                    .on_hover_text("Add a drum pad channel: banks of 16 pads with layers, choke groups and outputs")
+                    .clicked()
+                {
+                    add = Some(2);
                 }
                 if ui
                     .button("+ Gloom Synth")
                     .on_hover_text("Add a Gloom Synth channel")
                     .clicked()
                 {
-                    add = Some(true);
+                    add = Some(1);
                 }
                 if ui
                     .button("+ Plugin")
@@ -127,12 +134,12 @@ pub fn channel_rack(
                 }
             });
         });
-    if let Some(synth) = add {
+    if let Some(kind) = add {
         let n = project.channels.len() + 1;
-        let added = if synth {
-            project.add_synth_channel(&format!("Synth {n}"), gt_core::SynthPatch::default())
-        } else {
-            project.add_channel(&format!("Sampler {n}"), None)
+        let added = match kind {
+            1 => project.add_synth_channel(&format!("Synth {n}"), gt_core::SynthPatch::default()),
+            2 => project.add_drum_channel(&format!("Drums {n}")),
+            _ => project.add_channel(&format!("Sampler {n}"), None),
         };
         if added.is_some() {
             state.selected = project.channels.len() - 1;

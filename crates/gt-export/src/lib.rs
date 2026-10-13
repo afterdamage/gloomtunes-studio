@@ -501,19 +501,14 @@ fn load_engine(
         EngineCommand::SetSignatures(Box::new(project.signatures.clone())),
     );
     for (i, ch) in project.channels.iter().enumerate() {
-        let (sample, zones) = match ch.sampler() {
-            Some(s) => {
-                // Time-stretch mode: render the fitted sample now, as playback does on a worker.
-                let fitted = s
-                    .sample
-                    .as_ref()
-                    .and_then(|src| samples.get(src))
-                    .and_then(|d| Some((gt_engine::stretch::fit_job(project, s, d)?, d)))
-                    .map(|(job, d)| Arc::new(job.render(d)));
-                gt_engine::zones::sampler_sources(s, |src| samples.get(src).map(Arc::clone), fitted)
-            }
-            None => (None, None),
-        };
+        // Time-stretch mode: render the fitted sample now, as playback does on a worker.
+        let fitted = ch.sampler().and_then(|s| {
+            let d = samples.get(s.sample.as_ref()?)?;
+            let job = gt_engine::stretch::fit_job(project, s, d)?;
+            Some(Arc::new(job.render(d)))
+        });
+        let (sample, zones) =
+            gt_engine::zones::channel_sources(ch, |src| samples.get(src).map(Arc::clone), fitted);
         send(
             h,
             p,

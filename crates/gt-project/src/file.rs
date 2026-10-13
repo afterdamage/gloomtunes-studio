@@ -32,12 +32,13 @@ use gt_core::modulation::SYNC_RATES;
 use gt_core::synth::{ModDest, ModSlot, ModSource, SynthParam, SynthPatch, MOD_SLOTS};
 use gt_core::{
     Adsr, AudioEdit, AudioInput, AudioTake, AutoPoint, Automation, BuiltInSample, Channel,
-    ChannelId, Clip, ClipId, ClipKind, ClipStretch, Curve, EffectSlot, Fade, FadeCurve, Frozen,
-    Gap, Instrument, Interp, KeyZone, LfoRate, LfoShape, LfoTarget, LoopMode, Marker, MidiControl,
-    ModSourceKind, Modulator, ModulatorId, Note, ParamId, Pattern, PatternId, PluginFormat,
-    PluginInstanceId, PluginKind, PluginParamInfo, PluginRef, Project, SampleSource, SamplerFilter,
-    SamplerFilterMode, SamplerLfo, SamplerSettings, SigChange, StretchMode, TempoMap, TempoPoint,
-    Tick, TimeSig, TimeSigMap, Track, TrackId, WarpMarker, FX_SLOTS, SENDS,
+    ChannelId, Clip, ClipId, ClipKind, ClipStretch, Curve, DrumKit, EffectSlot, Fade, FadeCurve,
+    Frozen, Gap, Instrument, Interp, KeyZone, LfoRate, LfoShape, LfoTarget, LoopMode, Marker,
+    MidiControl, ModSourceKind, Modulator, ModulatorId, Note, Pad, PadLayer, ParamId, Pattern,
+    PatternId, PluginFormat, PluginInstanceId, PluginKind, PluginParamInfo, PluginRef, Project,
+    SampleSource, SamplerFilter, SamplerFilterMode, SamplerLfo, SamplerSettings, SigChange,
+    StretchMode, TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, Track, TrackId, WarpMarker,
+    FX_SLOTS, SENDS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -322,9 +323,7 @@ pub fn relink(project: &mut Project, from: &Path, to: &Path) -> usize {
         }
     };
     for c in &mut project.channels {
-        if let Some(s) = c.sampler_mut() {
-            s.sources_mut().for_each(&mut fix);
-        }
+        c.samples_mut().for_each(&mut fix);
     }
     for c in &mut project.playlist.clips {
         if let ClipKind::Audio { source, takes, .. } = &mut c.kind {
@@ -492,6 +491,31 @@ enum InstrumentDto {
     },
     /// A third-party plugin (Step 11).
     Plugin { plugin: PluginDto },
+    /// Drum pads (Prompt 23).
+    Drums { banks: Vec<Vec<PadDto>> },
+}
+
+#[derive(Serialize, Deserialize)]
+struct PadLayerDto {
+    sample: SampleDto,
+    vel_lo: f32,
+    vel_hi: f32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PadDto {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    layers: Vec<PadLayerDto>,
+    tune: f32,
+    gain: f32,
+    pan: f32,
+    env: EnvDto,
+    #[serde(default)]
+    choke: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1128,6 +1152,34 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                 Instrument::Plugin(plugin) => InstrumentDto::Plugin {
                     plugin: plugin_dto(plugin),
                 },
+                Instrument::Drums(kit) => InstrumentDto::Drums {
+                    banks: kit
+                        .banks
+                        .iter()
+                        .map(|bank| {
+                            bank.iter()
+                                .map(|p| PadDto {
+                                    name: p.name.clone(),
+                                    layers: p
+                                        .layers
+                                        .iter()
+                                        .map(|l| PadLayerDto {
+                                            sample: sample_dto(&l.sample, dir, embedded),
+                                            vel_lo: l.vel_lo,
+                                            vel_hi: l.vel_hi,
+                                        })
+                                        .collect(),
+                                    tune: p.tune,
+                                    gain: p.gain,
+                                    pan: p.pan,
+                                    env: EnvDto::of(&p.adsr),
+                                    choke: p.choke,
+                                    output: p.output,
+                                })
+                                .collect()
+                        })
+                        .collect(),
+                },
                 Instrument::Synth(patch) => InstrumentDto::Synth {
                     preset_name: patch.name.clone(),
                     params: SynthParam::ALL
@@ -1592,6 +1644,36 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                 Some(pl) => Instrument::Plugin(Box::new(pl)),
                 None => continue,
             },
+            InstrumentDto::Drums { banks } => {
+                let banks = banks
+                    .into_iter()
+                    .map(|bank| {
+                        bank.into_iter()
+                            .map(|d| Pad {
+                                name: d.name,
+                                layers: d
+                                    .layers
+                                    .into_iter()
+                                    .filter_map(|l| {
+                                        Some(PadLayer {
+                                            sample: sample(l.sample, &mut warnings)?,
+                                            vel_lo: l.vel_lo,
+                                            vel_hi: l.vel_hi,
+                                        })
+                                    })
+                                    .collect(),
+                                tune: d.tune,
+                                gain: d.gain,
+                                pan: d.pan,
+                                adsr: d.env.adsr(),
+                                choke: d.choke,
+                                output: d.output,
+                            })
+                            .collect()
+                    })
+                    .collect();
+                Instrument::Drums(Box::new(DrumKit { banks }))
+            }
         };
         p.channels.push(Channel {
             id: ChannelId(c.id),
@@ -2497,9 +2579,39 @@ mod tests {
     }
 
     #[test]
+    fn drum_kits_round_trip() {
+        let mut p = Project::demo();
+        let id = p.add_drum_channel("Kit").unwrap();
+        let i = p.channel_index(id).unwrap();
+        let k = p.channels[i].drums_mut().unwrap();
+        k.banks.push(vec![Pad::default(); gt_core::pads::PADS_PER_BANK]);
+        let pad = &mut k.banks[1][5];
+        pad.name = "Hat".into();
+        pad.set_layers(vec![
+            SampleSource::File("/tmp/k/hat soft.wav".into()),
+            SampleSource::File("/tmp/k/hat hard.wav".into()),
+        ]);
+        pad.tune = -2.0;
+        pad.gain = 0.5;
+        pad.pan = 0.25;
+        pad.adsr.decay_ms = 120.0;
+        pad.adsr.sustain = 0.0;
+        pad.choke = 2;
+        pad.output = Some(4);
+        let want = p.channels[i].instrument.clone();
+        let v = to_value(&p, None, &HashMap::new());
+        let back = from_value(v, None).unwrap().project;
+        assert_eq!(back.channels[i].instrument, want);
+    }
+
+    #[test]
     fn sampler2_settings_and_zones_round_trip() {
         let mut p = Project::demo();
-        let i = p.channels.iter().position(|c| c.sampler().is_some()).unwrap();
+        let i = p
+            .channels
+            .iter()
+            .position(|c| c.sampler().is_some())
+            .unwrap();
         // A plain sampler writes no Sampler 2 block.
         let v = to_value(&p, None, &HashMap::new());
         assert!(v["project"]["channels"][i]["instrument"]

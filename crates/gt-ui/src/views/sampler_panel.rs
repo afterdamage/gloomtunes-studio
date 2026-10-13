@@ -193,7 +193,11 @@ fn playback_row(
     ui.separator();
     if s.zones.is_empty() {
         ui.label(dim("Root"));
-        changed |= key_drag(ui, &mut s.root_key, "Key at which the sample plays at its own pitch");
+        changed |= key_drag(
+            ui,
+            &mut s.root_key,
+            "Key at which the sample plays at its own pitch",
+        );
         ui.label(dim("Keys"));
         changed |= key_drag(ui, &mut s.key_lo, "Lowest key the sample answers");
         changed |= key_drag(ui, &mut s.key_hi, "Highest key the sample answers");
@@ -224,7 +228,9 @@ fn playback_row(
             .on_hover_text(zone_summary(s));
         changed |= ui
             .checkbox(&mut s.round_robin, "Round robin")
-            .on_hover_text("Zones answering the same key and velocity take turns instead of layering")
+            .on_hover_text(
+                "Zones answering the same key and velocity take turns instead of layering",
+            )
             .changed();
         if ui
             .small_button("Clear zones")
@@ -322,14 +328,22 @@ fn filter_row(
         return changed;
     }
     let mut oct = (f.cutoff / 20.0).log2() / 10.0;
-    let r = labeled_knob(ui, theme, "Cutoff", &mut oct, 0.0..=1.0, (8000.0_f32 / 20.0).log2() / 10.0, |t| {
-        let hz = 20.0 * (t * 10.0).exp2();
-        if hz >= 1000.0 {
-            format!("Cutoff {:.2} kHz", hz / 1000.0)
-        } else {
-            format!("Cutoff {hz:.0} Hz")
-        }
-    });
+    let r = labeled_knob(
+        ui,
+        theme,
+        "Cutoff",
+        &mut oct,
+        0.0..=1.0,
+        (8000.0_f32 / 20.0).log2() / 10.0,
+        |t| {
+            let hz = 20.0 * (t * 10.0).exp2();
+            if hz >= 1000.0 {
+                format!("Cutoff {:.2} kHz", hz / 1000.0)
+            } else {
+                format!("Cutoff {hz:.0} Hz")
+            }
+        },
+    );
     if r.changed() {
         f.cutoff = (20.0 * (oct * 10.0).exp2()).clamp(20.0, 20_000.0);
     }
@@ -380,9 +394,15 @@ fn lfo_ui(ui: &mut Ui, theme: &GloomTheme, i: usize, l: &mut gt_core::SamplerLfo
     });
     if l.target != LfoTarget::Off {
         let mut t = (l.rate / 0.05).log2() / 10.0;
-        let r = labeled_knob(ui, theme, "Rate", &mut t, 0.0..=1.0, (4.0_f32 / 0.05).log2() / 10.0, |t| {
-            format!("Rate {:.2} Hz", 0.05 * (t * 10.0).exp2())
-        });
+        let r = labeled_knob(
+            ui,
+            theme,
+            "Rate",
+            &mut t,
+            0.0..=1.0,
+            (4.0_f32 / 0.05).log2() / 10.0,
+            |t| format!("Rate {:.2} Hz", 0.05 * (t * 10.0).exp2()),
+        );
         if r.changed() {
             l.rate = (0.05 * (t * 10.0).exp2()).clamp(0.01, 50.0);
             changed = true;

@@ -15,6 +15,7 @@ pub mod midi;
 pub mod mixer;
 pub mod modulation;
 pub mod note_tools;
+pub mod pads;
 pub mod param;
 pub mod params;
 pub mod peaks;
@@ -36,6 +37,7 @@ pub use mixer::{Mixer, MixerStrip, StripKind, FX_SLOTS, INSERTS, MASTER, SENDS, 
 pub use modulation::{
     LfoRate, LfoShape, MidiControl, ModSourceKind, Modulator, ModulatorId, MAX_MODULATORS,
 };
+pub use pads::{DrumKit, Pad, PadLayer};
 pub use param::{ParamCurve, ParamInfo, ParamUnit};
 pub use params::{ChannelParam, ParamId, StripParam, MASTER_VOLUME};
 pub use peaks::Peaks;

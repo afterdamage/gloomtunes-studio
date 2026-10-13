@@ -12,7 +12,8 @@ use gt_dsp::{
 };
 
 use crate::song::{ChannelParams, InstrumentKind, PatchValues};
-use crate::zones::ZoneMap;
+use crate::zones::{ZoneMap, MAX_AUX};
+use crate::RENDER_QUANTUM;
 
 /// Zone index of a voice playing the channel's single sample (no key map).
 const MAIN_ZONE: u16 = u16::MAX;
@@ -62,6 +63,8 @@ pub(crate) struct ChannelSlot {
     /// How voices read and shape the sample (from the params, with automation).
     voice_set: VoiceSettings,
     voices: [SamplerVoice; VOICES_PER_CHANNEL],
+    /// Separate outputs of the key map's zones (drum pads), one quantum each.
+    aux: Box<[[[f32; RENDER_QUANTUM]; 2]; MAX_AUX]>,
     gain_l: LinearRamp,
     gain_r: LinearRamp,
     ramp_frames: u32,
@@ -115,6 +118,7 @@ impl ChannelSlot {
             turn: 0,
             voice_set: VoiceSettings::default(),
             voices: [SamplerVoice::new(sample_rate); VOICES_PER_CHANNEL],
+            aux: Box::new([[[0.0; RENDER_QUANTUM]; 2]; MAX_AUX]),
             gain_l: LinearRamp::new(0.0),
             gain_r: LinearRamp::new(0.0),
             ramp_frames: (sample_rate * GAIN_RAMP_S) as u32,
@@ -387,16 +391,41 @@ impl ChannelSlot {
         let glide_frames = (sp.glide_ms.max(0.0) * 0.001 * self.sr) as u32;
         let mut first = true;
         for &zone in &picked[..n] {
-            let (root, tune, zgain, rate, frames) = match &self.zones {
+            let (root, tune, zgain, rate, frames, zpan, zenv, choke) = match &self.zones {
                 Some(m) if zone != MAIN_ZONE => {
                     let z = &m.zones[usize::from(zone)];
-                    (z.root, z.tune, z.gain, z.data.sample_rate, z.data.frames())
+                    let env = z.env.map(|a| {
+                        AdsrParams::new(self.sr, a.attack_ms, a.decay_ms, a.sustain, a.release_ms)
+                    });
+                    let (rate, frames) = (z.data.sample_rate, z.data.frames());
+                    (z.root, z.tune, z.gain, rate, frames, z.pan, env, z.choke)
                 }
                 _ => match &self.sample {
-                    Some(s) => (sp.root_key, 0.0, 1.0, s.sample_rate, s.frames()),
+                    Some(s) => (
+                        sp.root_key,
+                        0.0,
+                        1.0,
+                        s.sample_rate,
+                        s.frames(),
+                        0.0,
+                        None,
+                        0,
+                    ),
                     None => continue,
                 },
             };
+            if choke > 0 {
+                if let Some(m) = &self.zones {
+                    for v in self.voices.iter_mut().filter(|v| v.is_active()) {
+                        if m.zones
+                            .get(usize::from(v.zone))
+                            .is_some_and(|z| z.choke == choke)
+                        {
+                            v.choke();
+                        }
+                    }
+                }
+            }
             if frames == 0 {
                 continue;
             }
@@ -452,12 +481,17 @@ impl ChannelSlot {
                 _ => step,
             };
             let voice = &mut self.voices[idx];
-            voice.trigger(key, gain, from, region, self.env, age);
+            voice.trigger(key, gain, from, region, zenv.unwrap_or(self.env), age);
             voice.zone = zone;
             if self.voice_set != VoiceSettings::default() {
                 voice.set_settings(self.voice_set);
             }
-            voice.set_note_values(e.pan, tone_coef(self.sr, &e), e.release_scale());
+            let pan = if zpan == 0.0 {
+                e.pan
+            } else {
+                (e.pan + zpan).clamp(-1.0, 1.0)
+            };
+            voice.set_note_values(pan, tone_coef(self.sr, &e), e.release_scale());
             if from != step {
                 let frames = if sp.mono && glide_frames > 0 && e.glide != Glide::Porta {
                     glide_frames
@@ -642,8 +676,40 @@ impl ChannelSlot {
         self.voices.iter().any(SamplerVoice::is_active) || self.synth.is_active()
     }
 
-    /// Adds the voices (dry, before channel gain) into the two buffers.
+    /// Adds the voices (dry, before channel gain) into the two buffers; voices of zones with
+    /// a separate output too.
     pub(crate) fn render_voices(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
+        self.render_voices_at(out_l, out_r, None);
+    }
+
+    /// The mixer inserts of the separate outputs (drum pads), in aux order.
+    pub(crate) fn aux_routes(&self) -> &[u8] {
+        self.zones.as_ref().map_or(&[], |m| m.routes.as_slice())
+    }
+
+    /// Hands each separate output's quantum (with the channel's volume) to `f` with its
+    /// insert, then clears it.
+    pub(crate) fn drain_aux(&mut self, mut f: impl FnMut(u8, &[f32], &[f32], f32)) {
+        let gain = self.extra_gain();
+        let Some(m) = &self.zones else {
+            return;
+        };
+        for (k, &route) in m.routes.iter().enumerate().take(MAX_AUX) {
+            let [l, r] = &mut self.aux[k];
+            f(route, l, r, gain);
+            l.fill(0.0);
+            r.fill(0.0);
+        }
+    }
+
+    /// Like [`Self::render_voices`]; with `aux_at`, the frames start at that offset in the
+    /// quantum and voices of zones with a separate output go to their aux buffers instead.
+    pub(crate) fn render_voices_at(
+        &mut self,
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+        aux_at: Option<usize>,
+    ) {
         if self.synth.is_active() {
             self.synth.render(out_l, out_r);
         }
@@ -652,13 +718,29 @@ impl ChannelSlot {
                 continue;
             }
             let zone = self.voices[i].zone;
-            let data = match (&self.zones, zone) {
-                (Some(m), z) if z != MAIN_ZONE => m.zones.get(usize::from(z)).map(|z| &z.data),
-                _ => self.sample.as_ref(),
+            let (data, aux) = match (&self.zones, zone) {
+                (Some(m), z) if z != MAIN_ZONE => match m.zones.get(usize::from(z)) {
+                    Some(z) => (Some(&z.data), z.aux),
+                    None => (None, 0),
+                },
+                _ => (self.sample.as_ref(), 0),
             };
-            match data {
-                Some(d) => self.voices[i].render(d.left(), d.right(), out_l, out_r),
-                None => self.voices[i].kill(),
+            let Some(d) = data else {
+                self.voices[i].kill();
+                continue;
+            };
+            let n = out_l.len();
+            match aux_at {
+                Some(at) if aux > 0 && at + n <= RENDER_QUANTUM => {
+                    let [l, r] = &mut self.aux[usize::from(aux - 1) % MAX_AUX];
+                    self.voices[i].render(
+                        d.left(),
+                        d.right(),
+                        &mut l[at..at + n],
+                        &mut r[at..at + n],
+                    );
+                }
+                _ => self.voices[i].render(d.left(), d.right(), out_l, out_r),
             }
         }
     }
@@ -887,7 +969,10 @@ mod tests {
 
     fn zoned(zones: Vec<crate::zones::Zone>, sp: crate::song::SamplerParams) -> ChannelSlot {
         let mut ch = ChannelSlot::new(48_000.0);
-        ch.set_zones(Some(Arc::new(ZoneMap { zones })));
+        ch.set_zones(Some(Arc::new(ZoneMap {
+            zones,
+            routes: Vec::new(),
+        })));
         ch.set_params_now(ChannelParams {
             gain: 1.0,
             looped: true,
@@ -1010,5 +1095,58 @@ mod tests {
             "glided an octave up: {}",
             v.step()
         );
+    }
+
+    fn kit_channel() -> ChannelSlot {
+        use gt_core::{DrumKit, SampleSource};
+        let mut kit = DrumKit::default();
+        let src = |n: &str| SampleSource::File(n.into());
+        kit.banks[0][0].set_layers(vec![src("open")]);
+        kit.banks[0][0].choke = 1;
+        kit.banks[0][1].set_layers(vec![src("closed")]);
+        kit.banks[0][1].choke = 1;
+        kit.banks[0][2].set_layers(vec![src("snare")]);
+        kit.banks[0][2].output = Some(3);
+        let map = ZoneMap::kit(&kit, |_| Some(dc(0.5))).unwrap();
+        assert_eq!(map.routes, [3]);
+        let mut ch = ChannelSlot::new(48_000.0);
+        ch.set_zones(Some(Arc::new(map)));
+        ch.set_params_now(ChannelParams {
+            gain: 1.0,
+            ..ChannelParams::default()
+        });
+        ch
+    }
+
+    #[test]
+    fn a_pad_chokes_its_group() {
+        let mut ch = kit_channel();
+        ch.note_on(60, 1.0, 1); // open hat
+        ch.note_on(62, 1.0, 2); // snare, no group
+        let (mut l, mut r) = (vec![0.0; 480], vec![0.0; 480]);
+        ch.render_voices(&mut l, &mut r);
+        ch.note_on(61, 1.0, 3); // closed hat cuts the open one
+        assert!(!ch.voices.iter().any(|v| v.key() == 60 && v.is_held()));
+        // A 5 ms fade: gone well within 20 ms.
+        ch.render_voices(&mut l, &mut r);
+        ch.render_voices(&mut l, &mut r);
+        assert_eq!(playing(&ch), [(61, 1), (62, 2)]);
+    }
+
+    #[test]
+    fn a_pad_with_its_own_output_renders_there() {
+        let mut ch = kit_channel();
+        ch.note_on(62, 1.0, 1);
+        let (mut l, mut r) = (vec![0.0; 32], vec![0.0; 32]);
+        ch.render_voices_at(&mut l, &mut r, Some(0));
+        assert!(l.iter().all(|&x| x == 0.0), "not in the channel's output");
+        let mut got = Vec::new();
+        ch.drain_aux(|route, a, _, gain| got.push((route, a[10] * gain)));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, 3);
+        assert!((got[0].1 - 0.5).abs() < 1e-3, "{got:?}");
+        // Without an offset (preview, tests) it plays in the channel's output.
+        ch.render_voices(&mut l, &mut r);
+        assert!(l[10] > 0.4);
     }
 }

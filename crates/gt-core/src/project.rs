@@ -245,6 +245,8 @@ pub enum Instrument {
     Synth(Box<SynthPatch>),
     /// A third-party instrument plugin.
     Plugin(Box<PluginRef>),
+    /// Drum pads (Prompt 23).
+    Drums(Box<crate::pads::DrumKit>),
 }
 
 impl Channel {
@@ -252,7 +254,7 @@ impl Channel {
     pub fn sampler(&self) -> Option<&SamplerSettings> {
         match &self.instrument {
             Instrument::Sampler(s) => Some(s),
-            Instrument::Synth(_) | Instrument::Plugin(_) => None,
+            _ => None,
         }
     }
 
@@ -260,7 +262,7 @@ impl Channel {
     pub fn sampler_mut(&mut self) -> Option<&mut SamplerSettings> {
         match &mut self.instrument {
             Instrument::Sampler(s) => Some(s),
-            Instrument::Synth(_) | Instrument::Plugin(_) => None,
+            _ => None,
         }
     }
 
@@ -268,7 +270,7 @@ impl Channel {
     pub fn synth(&self) -> Option<&SynthPatch> {
         match &self.instrument {
             Instrument::Synth(p) => Some(p),
-            Instrument::Sampler(_) | Instrument::Plugin(_) => None,
+            _ => None,
         }
     }
 
@@ -276,7 +278,23 @@ impl Channel {
     pub fn synth_mut(&mut self) -> Option<&mut SynthPatch> {
         match &mut self.instrument {
             Instrument::Synth(p) => Some(p),
-            Instrument::Sampler(_) | Instrument::Plugin(_) => None,
+            _ => None,
+        }
+    }
+
+    /// The drum kit, if this is a drum pad channel.
+    pub fn drums(&self) -> Option<&crate::pads::DrumKit> {
+        match &self.instrument {
+            Instrument::Drums(k) => Some(k),
+            _ => None,
+        }
+    }
+
+    /// Mutable drum kit, if this is a drum pad channel.
+    pub fn drums_mut(&mut self) -> Option<&mut crate::pads::DrumKit> {
+        match &mut self.instrument {
+            Instrument::Drums(k) => Some(k),
+            _ => None,
         }
     }
 
@@ -301,11 +319,25 @@ impl Channel {
         self.sampler().and_then(|s| s.sample.as_ref())
     }
 
-    /// Every sample the channel plays (its sample and its key zones').
+    /// Every sample the channel plays (a sampler's sample and key zones, a kit's pads).
     pub fn samples(&self) -> impl Iterator<Item = &SampleSource> {
         self.sampler()
             .into_iter()
             .flat_map(SamplerSettings::sources)
+            .chain(
+                self.drums()
+                    .into_iter()
+                    .flat_map(crate::pads::DrumKit::sources),
+            )
+    }
+
+    /// Every sample the channel plays, mutably.
+    pub fn samples_mut(&mut self) -> Box<dyn Iterator<Item = &mut SampleSource> + '_> {
+        match &mut self.instrument {
+            Instrument::Sampler(s) => Box::new(s.sources_mut()),
+            Instrument::Drums(k) => Box::new(k.sources_mut()),
+            Instrument::Synth(_) | Instrument::Plugin(_) => Box::new(std::iter::empty()),
+        }
     }
 }
 
@@ -909,6 +941,7 @@ impl Project {
                 }
                 Instrument::Synth(p) => p.sanitize(),
                 Instrument::Plugin(p) => p.sanitize(),
+                Instrument::Drums(k) => k.sanitize(INSERTS),
             }
         }
         // Patterns: unique ids, valid lengths, notes of existing channels only, sorted.
@@ -983,6 +1016,11 @@ impl Project {
     /// Adds a Gloom Synth channel at the bottom of the rack. `None` when the rack is full.
     pub fn add_synth_channel(&mut self, name: &str, patch: SynthPatch) -> Option<ChannelId> {
         self.add_instrument(name, Instrument::Synth(Box::new(patch)))
+    }
+
+    /// Adds an empty drum pad channel at the bottom of the rack. `None` when the rack is full.
+    pub fn add_drum_channel(&mut self, name: &str) -> Option<ChannelId> {
+        self.add_instrument(name, Instrument::Drums(Box::default()))
     }
 
     /// Adds a channel playing an instrument plugin at the bottom of the rack. `None` when the

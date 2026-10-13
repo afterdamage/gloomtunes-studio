@@ -1030,6 +1030,9 @@ impl ChannelParams {
                     mods: patch.mods,
                 };
             }
+            // Pads play through the sampler's voices with a key map of their own; the
+            // channel's sampler settings stay at their defaults (one-shot, open filter).
+            Instrument::Drums(_) => {}
             Instrument::Plugin(plugin) => {
                 p.kind = InstrumentKind::Plugin;
                 p.plugin = Some(plugin.instance);

@@ -101,6 +101,8 @@ pub struct GloomApp {
 
     main_view: MainView,
     roll: PianoRollState,
+    /// Shown bank and pad of the drum pad panel.
+    drum_state: gt_ui::views::DrumPadState,
     history: History,
     /// Label of the document change made since the last undo step, if any. Committed to the
     /// history once the gesture ends (no mouse button down, no text field focused).
@@ -297,6 +299,7 @@ impl GloomApp {
             activity: [0.0; MAX_CHANNELS],
             main_view: MainView::Playlist,
             roll: PianoRollState::default(),
+            drum_state: gt_ui::views::DrumPadState::default(),
             history,
             pending_edit: None,
             humanize_seed: 0x9E37_79B9_7F4A_7C15,
@@ -433,20 +436,18 @@ impl GloomApp {
     /// previous sample playing.
     fn push_sample(&mut self, i: usize) {
         let rate = self.rate();
-        let (sample, zones) = match self.project.channels[i].sampler() {
-            None => (None, None),
-            Some(s) => {
-                for src in s.sources() {
-                    if self.library.get(src).is_none() {
-                        self.library.request(&src.clone(), rate);
-                    }
-                }
-                let lib = &self.library;
-                let get = |src: &gt_core::SampleSource| lib.get(src).map(|l| Arc::clone(&l.data));
-                let fitted = self.stretch.fitted(&self.project, s, &get);
-                gt_engine::zones::sampler_sources(s, get, fitted)
+        let ch = &self.project.channels[i];
+        for src in ch.samples() {
+            if self.library.get(src).is_none() {
+                self.library.request(&src.clone(), rate);
             }
-        };
+        }
+        let lib = &self.library;
+        let get = |src: &gt_core::SampleSource| lib.get(src).map(|l| Arc::clone(&l.data));
+        let fitted = ch
+            .sampler()
+            .and_then(|s| self.stretch.fitted(&self.project, s, &get));
+        let (sample, zones) = gt_engine::zones::channel_sources(ch, get, fitted);
         self.send(EngineCommand::SetChannelSample {
             slot: i as u16,
             sample,
@@ -555,6 +556,100 @@ impl GloomApp {
         self.pending_edit = Some("Load samples");
     }
 
+    /// Acts on the drum pad panel: resend the kit, play a pad, load samples.
+    fn on_drum_panel(&mut self, out: gt_ui::views::DrumPadOut) {
+        let i = self.rack.selected;
+        let (bank, pad) = (self.drum_state.bank, self.drum_state.pad);
+        if out.changed {
+            self.push_sample(i);
+            self.pending_edit = Some("Drum pads");
+        }
+        if let Some(key) = out.audition {
+            self.send(EngineCommand::NoteOn {
+                slot: i as u16,
+                key,
+                velocity: 0.8,
+            });
+            self.send(EngineCommand::NoteOff {
+                slot: i as u16,
+                key,
+            });
+        }
+        if let Some(add) = out.load {
+            let d = rfd::FileDialog::new().add_filter("Audio", &gt_project::AUDIO_EXTENSIONS);
+            if let Some(path) = d.pick_file() {
+                if let Some(p) = self
+                    .project
+                    .channels
+                    .get_mut(i)
+                    .and_then(gt_core::Channel::drums_mut)
+                    .and_then(|k| k.banks.get_mut(bank)?.get_mut(pad))
+                {
+                    let src = gt_core::SampleSource::File(path);
+                    let mut layers: Vec<_> = if add {
+                        p.layers.iter().map(|l| l.sample.clone()).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    layers.push(src);
+                    p.set_layers(layers);
+                    self.push_sample(i);
+                    self.pending_edit = Some("Load pad sample");
+                }
+            }
+        }
+        if out.load_folder {
+            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                let files = gt_project::list_audio_files(&dir);
+                self.fill_pads(&files);
+            }
+        }
+    }
+
+    /// Puts `files` on the selected kit's pads from the selected pad on.
+    fn fill_pads(&mut self, files: &[std::path::PathBuf]) {
+        let i = self.rack.selected;
+        let start = self.drum_state.bank * gt_core::pads::PADS_PER_BANK + self.drum_state.pad;
+        let Some(kit) = self
+            .project
+            .channels
+            .get_mut(i)
+            .and_then(gt_core::Channel::drums_mut)
+        else {
+            return;
+        };
+        let sources: Vec<_> = files
+            .iter()
+            .filter(|p| gt_project::is_audio_file(p))
+            .map(|p| gt_core::SampleSource::File(p.clone()))
+            .collect();
+        if sources.is_empty() {
+            return;
+        }
+        // Keep the pads before the selected one: fill a copy from there and splice it in.
+        let mut rest = gt_core::DrumKit {
+            banks: vec![vec![gt_core::Pad::default(); gt_core::pads::PADS_PER_BANK]],
+        };
+        rest.fill(sources);
+        let pads: Vec<gt_core::Pad> = rest.banks.into_iter().flatten().collect();
+        for (k, p) in pads.into_iter().enumerate() {
+            let at = start + k;
+            let (b, n) = (at / gt_core::pads::PADS_PER_BANK, at % gt_core::pads::PADS_PER_BANK);
+            if b >= gt_core::pads::MAX_BANKS {
+                break;
+            }
+            while kit.banks.len() <= b {
+                kit.banks
+                    .push(vec![gt_core::Pad::default(); gt_core::pads::PADS_PER_BANK]);
+            }
+            if !p.layers.is_empty() {
+                kit.banks[b][n] = p;
+            }
+        }
+        self.push_sample(i);
+        self.pending_edit = Some("Fill pads");
+    }
+
     /// Files dropped on the window: audio files (or folders of them) go to the selected
     /// sampler, one as its sample and several as zones.
     fn on_dropped_files(&mut self, paths: &[std::path::PathBuf]) {
@@ -566,7 +661,16 @@ impl GloomApp {
                 files.push(p.clone());
             }
         }
-        self.load_zones(&files);
+        if self
+            .project
+            .channels
+            .get(self.rack.selected)
+            .is_some_and(|c| c.drums().is_some())
+        {
+            self.fill_pads(&files);
+        } else {
+            self.load_zones(&files);
+        }
     }
 
     /// Sends every channel's sample and settings, clears slots no longer used, and the song.
@@ -2213,6 +2317,7 @@ impl eframe::App for GloomApp {
             })
             .unwrap_or_default();
         let mut sampler_out = gt_ui::views::SamplerPanelOut::default();
+        let mut drum_out = gt_ui::views::DrumPadOut::default();
         let (sampler_changed, synth_actions) = if !show_instrument {
             (false, Vec::new())
         } else {
@@ -2256,6 +2361,16 @@ impl eframe::App for GloomApp {
                             sampler_out = out;
                             (out.changed, Vec::new())
                         }
+                        Instrument::Drums(kit) => {
+                            drum_out = gt_ui::views::drum_pads(
+                                ui,
+                                &theme,
+                                &mut ch.name,
+                                kit,
+                                &mut self.drum_state,
+                            );
+                            (false, Vec::new())
+                        }
                         Instrument::Synth(patch) => {
                             let view = SynthPanelView {
                                 scope: &self.scope,
@@ -2293,6 +2408,7 @@ impl eframe::App for GloomApp {
             self.push_sample(self.rack.selected);
             self.pending_edit = Some("Instrument settings");
         }
+        self.on_drum_panel(drum_out);
         if sampler_out.load_folder {
             if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                 let files = gt_project::list_audio_files(&dir);

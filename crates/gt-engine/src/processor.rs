@@ -666,7 +666,7 @@ impl AudioProcessor {
         let mut cursor = 0;
         for e in events.iter().filter(touches) {
             let at = (e.offset as usize).min(Q);
-            ch.render_voices(&mut sl[cursor..at], &mut sr[cursor..at]);
+            ch.render_voices_at(&mut sl[cursor..at], &mut sr[cursor..at], Some(cursor));
             cursor = at;
             match e.kind {
                 EventKind::NoteOn {
@@ -694,9 +694,21 @@ impl AudioProcessor {
                 EventKind::Beat { .. } | EventKind::Control { .. } => {}
             }
         }
-        ch.render_voices(&mut sl[cursor..], &mut sr[cursor..]);
+        ch.render_voices_at(&mut sl[cursor..], &mut sr[cursor..], Some(cursor));
         let (ml, mr) = self.mixer.direct_mut(usize::from(ch.route()));
-        let peak = ch.mix_into((sl, sr), (ml, mr));
+        let mut peak = ch.mix_into((sl, sr), (ml, mr));
+        // Pads with their own output (Prompt 23), each into its insert.
+        if !ch.aux_routes().is_empty() {
+            let mixer = &mut self.mixer;
+            ch.drain_aux(|route, l, r, gain| {
+                let (ml, mr) = mixer.direct_mut(usize::from(route).min(gt_core::STRIPS - 1));
+                for (((m, &x), n), &y) in ml.iter_mut().zip(l).zip(mr.iter_mut()).zip(r) {
+                    *m += x * gain;
+                    *n += y * gain;
+                    peak = peak.max((x * gain).abs()).max((y * gain).abs());
+                }
+            });
+        }
         self.telemetry.channel_peaks[slot].fetch_max(peak, Ordering::Relaxed);
         if self.scope_slot == Some(slot) {
             for (l, r) in self.scratch_l.iter_mut().zip(&self.scratch_r) {

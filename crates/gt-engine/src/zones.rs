@@ -4,7 +4,10 @@
 
 use std::sync::Arc;
 
-use gt_core::{SampleData, SampleSource, SamplerSettings};
+use gt_core::{Adsr, DrumKit, SampleData, SampleSource, SamplerSettings};
+
+/// Most separate outputs (mixer inserts) of one channel's pads.
+pub const MAX_AUX: usize = 8;
 
 /// One sample of a key map.
 #[derive(Debug, Clone)]
@@ -25,6 +28,14 @@ pub struct Zone {
     pub tune: f32,
     /// Linear gain.
     pub gain: f32,
+    /// Pan, -1 to 1 (added to the note's).
+    pub pan: f32,
+    /// Its own amplitude envelope (drum pads); `None` uses the channel's.
+    pub env: Option<Adsr>,
+    /// Choke group (0: none): starting it cuts the sounding voices of the group.
+    pub choke: u8,
+    /// Separate output: 1 + index into [`ZoneMap::routes`] (0: the channel's own).
+    pub aux: u8,
 }
 
 impl Zone {
@@ -39,6 +50,10 @@ impl Zone {
             vel_hi: 1.0,
             tune: 0.0,
             gain: 1.0,
+            pan: 0.0,
+            env: None,
+            choke: 0,
+            aux: 0,
         }
     }
 
@@ -58,6 +73,8 @@ pub struct ZoneMap {
     /// Zones; several may answer the same note (velocity layers overlap only at their edges,
     /// round-robin takes share a range).
     pub zones: Vec<Zone>,
+    /// Mixer inserts of the separate outputs zones use (see [`Zone::aux`]).
+    pub routes: Vec<u8>,
 }
 
 impl ZoneMap {
@@ -88,11 +105,58 @@ impl ZoneMap {
                         vel_hi: z.vel_hi,
                         tune: z.tune,
                         gain: z.gain,
+                        ..Zone::new(Arc::new(SampleData::default()), 0)
                     })
                 })
                 .collect()
         };
-        (!zones.is_empty()).then_some(Self { zones })
+        (!zones.is_empty()).then_some(Self {
+            zones,
+            routes: Vec::new(),
+        })
+    }
+
+    /// The key map of a drum kit: each loaded layer of each pad, on the pad's key, with the
+    /// pad's tuning, gain, pan, envelope, choke group and output. `None` when nothing is
+    /// loaded.
+    pub fn kit(
+        kit: &DrumKit,
+        sample: impl Fn(&SampleSource) -> Option<Arc<SampleData>>,
+    ) -> Option<Self> {
+        let mut map = Self::default();
+        for (key, pad) in kit.pads() {
+            let aux = match pad.output.and_then(|o| u8::try_from(o).ok()) {
+                None => 0,
+                Some(o) => match map.routes.iter().position(|&r| r == o) {
+                    Some(i) => i as u8 + 1,
+                    None if map.routes.len() < MAX_AUX => {
+                        map.routes.push(o);
+                        map.routes.len() as u8
+                    }
+                    None => 0,
+                },
+            };
+            for l in &pad.layers {
+                let Some(data) = sample(&l.sample) else {
+                    continue;
+                };
+                map.zones.push(Zone {
+                    data,
+                    root: key,
+                    key_lo: key,
+                    key_hi: key,
+                    vel_lo: l.vel_lo,
+                    vel_hi: l.vel_hi,
+                    tune: pad.tune,
+                    gain: pad.gain,
+                    pan: pad.pan,
+                    env: Some(pad.adsr),
+                    choke: pad.choke,
+                    aux,
+                });
+            }
+        }
+        (!map.zones.is_empty()).then_some(map)
     }
 
     /// The zones that answer `key` at `velocity`: every one (layered), or with `round_robin`
@@ -150,6 +214,20 @@ pub fn sampler_sources(
     }
 }
 
+/// What channel `ch` plays from samples: a sampler's ([`sampler_sources`]) or a drum kit's
+/// key map. `fitted` is a sampler's time-stretch render, if ready.
+pub fn channel_sources(
+    ch: &gt_core::Channel,
+    sample: impl Fn(&SampleSource) -> Option<Arc<SampleData>>,
+    fitted: Option<Arc<SampleData>>,
+) -> (Option<Arc<SampleData>>, Option<Arc<ZoneMap>>) {
+    match &ch.instrument {
+        gt_core::Instrument::Sampler(s) => sampler_sources(s, sample, fitted),
+        gt_core::Instrument::Drums(k) => (None, ZoneMap::kit(k, sample).map(Arc::new)),
+        _ => (None, None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +253,7 @@ mod tests {
                 z(60, 127, 0.0, 1.0),
                 z(60, 127, 0.0, 1.0),
             ],
+            routes: Vec::new(),
         }
     }
 
