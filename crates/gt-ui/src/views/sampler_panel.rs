@@ -1,7 +1,7 @@
 //! Settings of the selected sampler channel: sample, waveform with start/end, pitch, loop mode
-//! and the ADSR envelope; Sampler 2 (Prompt 23): quality, reverse, keys, voices, glide,
-//! time-stretch, multi-sample zones, the filter with its envelope and two LFOs, and the beat
-//! slicer.
+//! and the ADSR envelope; Sampler 2 (Prompt 23): quality, reverse, time-stretch, multi-sample
+//! zones, the filter with its envelope and two LFOs, and the beat slicer. Root, keys, voices
+//! and mono moved to the channel settings tab (Prompt 27).
 
 use egui::{pos2, vec2, RichText, Sense, Stroke, Ui};
 use gt_core::{
@@ -175,7 +175,7 @@ pub fn sampler_panel(
     out
 }
 
-/// Quality, reverse, keys, voices, glide, time-stretch and zones.
+/// Quality, reverse, time-stretch and zones.
 fn playback_row(
     ui: &mut Ui,
     theme: &GloomTheme,
@@ -183,7 +183,6 @@ fn playback_row(
     out: &mut SamplerPanelOut,
 ) -> bool {
     let mut changed = false;
-    let dim = |t: &str| RichText::new(t).color(theme.text_dim);
     egui::ComboBox::from_id_salt("sampler_interp")
         .width(110.0)
         .selected_text(s.interp.name())
@@ -204,16 +203,6 @@ fn playback_row(
         .is_some();
     ui.separator();
     if s.zones.is_empty() {
-        ui.label(dim(tr("Root")));
-        changed |= key_drag(
-            ui,
-            &mut s.root_key,
-            "Key at which the sample plays at its own pitch",
-        );
-        ui.label(dim(tr("Keys")));
-        changed |= key_drag(ui, &mut s.key_lo, "Lowest key the sample answers");
-        changed |= key_drag(ui, &mut s.key_hi, "Highest key the sample answers");
-        s.key_hi = s.key_hi.max(s.key_lo);
         let mut stretch = s.stretch_beats > 0.0;
         if ui
             .checkbox(&mut stretch, tr("Stretch"))
@@ -261,31 +250,6 @@ fn playback_row(
     {
         out.load_folder = true;
     }
-    ui.separator();
-    ui.label(dim(tr("Voices")));
-    changed |= ui
-        .add(egui::DragValue::new(&mut s.voices).range(1..=SamplerSettings::MAX_VOICES))
-        .on_hover_text(tr("Most notes sounding at once; the oldest is cut"))
-        .changed();
-    changed |= ui.checkbox(&mut s.mono, tr("Mono")).changed();
-    if s.mono {
-        changed |= ui
-            .checkbox(&mut s.legato, tr("Legato"))
-            .on_hover_text(tr(
-                "A key pressed while another is held glides without restarting",
-            ))
-            .changed();
-    }
-    changed |= ui
-        .add(
-            egui::DragValue::new(&mut s.glide_ms)
-                .range(0.0..=2000.0)
-                .speed(1.0)
-                .prefix(tr("Glide "))
-                .suffix(tr(" ms")),
-        )
-        .on_hover_text(tr("Mono glide time between notes"))
-        .changed();
     changed
 }
 
@@ -431,17 +395,6 @@ fn zone_summary(s: &SamplerSettings) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn key_drag(ui: &mut Ui, key: &mut u8, tip: &str) -> bool {
-    ui.add(
-        egui::DragValue::new(key)
-            .range(0..=127)
-            .custom_formatter(|v, _| crate::views::key_name(v as u8))
-            .speed(0.3),
-    )
-    .on_hover_text(tip)
-    .changed()
 }
 
 /// Filter mode, cutoff, resonance, envelope amount and the filter envelope.

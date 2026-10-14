@@ -138,6 +138,11 @@ impl ChannelSlot {
             .flatten()
     }
 
+    /// The channel's settings.
+    pub(crate) fn params(&self) -> &ChannelParams {
+        &self.params
+    }
+
     /// True for a plugin channel (its notes and audio go through the plugin table).
     pub(crate) fn is_plugin(&self) -> bool {
         self.params.kind == InstrumentKind::Plugin
@@ -596,6 +601,17 @@ impl ChannelSlot {
         self.synth.release_all();
         for v in &mut self.voices {
             v.release();
+        }
+        self.sustained = [false; VOICES_PER_CHANNEL];
+    }
+
+    /// Cuts every voice with a short fade: another channel of its choke group played.
+    pub(crate) fn choke(&mut self) {
+        self.synth.choke_all();
+        for v in &mut self.voices {
+            if v.is_active() {
+                v.choke();
+            }
         }
         self.sustained = [false; VOICES_PER_CHANNEL];
     }

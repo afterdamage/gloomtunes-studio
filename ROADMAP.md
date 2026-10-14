@@ -673,6 +673,22 @@ sound identical; the golden export test stays.
 - Limits: WAV files carry no tags; MP3 above 48 kHz is resampled by LAME; video is the full
   mix only (no stems or regions) and has no title text.
 
+### Prompt 27: Channel rack 2
+- Patterns of any length (1 to 512 steps, the grid scrolls), per-channel swing (the rack's
+  swing by default), and a graph lane under the selected channel for velocity, pan, release,
+  fine pitch, mod X/Y and shift (micro-timing).
+- Choke groups (a note cuts the group's other channels on its exact frame), layer channels
+  (all, velocity split, random or round robin), rack filter groups, pattern colours (shown in
+  the playlist) and Split by channel (D136).
+- Step tools in the channel menu: fill every N, rotate, shift, randomize (seed, density), copy
+  steps to another channel, clear.
+- Root key, key range, mono/legato/glide and voices are in a Channel settings tab for every
+  instrument (the sampler keeps its own per-voice handling).
+- Tests: a 300-step pattern plays and loops on the exact frames; choke starts on the choking
+  note's frame; layer fan-out per mode; step tools; key settings routing.
+- Limits: legato and glide stay sampler-only; layer children play at the note's velocity (no
+  velocity scaling); swing applies to odd 1/16 steps only.
+
 ---
 
 ## v1.0 scope

@@ -4,6 +4,7 @@ mod analyzer;
 mod audio_panel;
 mod browser;
 mod channel_rack;
+mod channel_settings;
 mod drum_pads;
 mod input_panel;
 mod midi_panel;
@@ -25,7 +26,8 @@ pub use audio_panel::{
 pub use browser::{
     browser, parse_tags, BrowserAction, BrowserEntry, BrowserModel, BrowserRow, BrowserTab, RowItem,
 };
-pub use channel_rack::{channel_rack, RackAction, RackState, RackView};
+pub use channel_rack::{channel_rack, rack_groups, RackAction, RackState, RackView};
+pub use channel_settings::{channel_settings, layer_panel, ChannelSettingsOut};
 pub use drum_pads::{drum_pads, DrumPadOut, DrumPadState};
 pub use input_panel::{
     input_menu, input_panel, offered_inputs, InputAction, InputPanelModel, PairMode,

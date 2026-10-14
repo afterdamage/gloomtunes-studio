@@ -26,6 +26,7 @@ mod load;
 mod mixer;
 mod plugin;
 mod processor;
+mod route;
 pub mod song;
 pub mod stretch;
 pub mod tables;

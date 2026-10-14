@@ -249,10 +249,10 @@ impl SongSnapshot {
     pub fn compile(project: &Project) -> Self {
         let pattern = project.current_pattern();
         let length = pattern.length_ticks();
-        let swing = swing_ticks(project);
         let mut events = Vec::new();
         let mut controls = Vec::new();
         for (slot, ch) in project.channels.iter().enumerate() {
+            let swing = swing_ticks(project, ch);
             for c in pattern.channel_controls(ch.id) {
                 if (0..length).contains(&c.tick) {
                     controls.push(ControlEvent {
@@ -313,9 +313,9 @@ impl SongSnapshot {
             return Self::default();
         };
         let length = pattern.length_ticks();
-        let swing = swing_ticks(project);
         let mut events = Vec::new();
         for (slot, ch) in project.channels.iter().enumerate() {
+            let swing = swing_ticks(project, ch);
             for n in pattern.channel_notes(ch.id) {
                 if n.start < 0 || n.start >= length {
                     continue;
@@ -352,7 +352,6 @@ impl SongSnapshot {
         stretched: impl Fn(u64) -> Option<Arc<SampleData>>,
     ) -> Self {
         let pl = &project.playlist;
-        let swing = swing_ticks(project);
         let tempo = &project.tempo;
         let mut events = Vec::new();
         let mut controls = Vec::new();
@@ -400,7 +399,7 @@ impl SongSnapshot {
             match &clip.kind {
                 ClipKind::Pattern(id) => {
                     if let Some(pat) = project.pattern(*id) {
-                        expand_pattern(project, pat, clip, swing, &mut events, &mut controls);
+                        expand_pattern(project, pat, clip, &mut events, &mut controls);
                         pattern_spans(project, pat, clip, &mut pattern_lanes);
                     }
                 }
@@ -652,13 +651,16 @@ fn subtract<'a>(span: Span<'a>, cuts: &[(i64, i64)]) -> Vec<Span<'a>> {
     out
 }
 
-fn swing_ticks(project: &Project) -> i64 {
-    (f64::from(project.swing.clamp(0.0, 1.0)) * STEP_TICKS as f64 / 2.0).round() as i64
+/// Swing delay of odd steps for channel `ch`: its own swing, else the rack's (Prompt 27).
+fn swing_ticks(project: &Project, ch: &Channel) -> i64 {
+    (f64::from(ch.swing_or(project.swing)) * STEP_TICKS as f64 / 2.0).round() as i64
 }
 
-/// Swing delay of a note starting at `start` (odd 1/16 steps only).
+/// Swing delay of a note starting at `start` (odd 1/16 steps only; a step note shifted off
+/// the grid keeps its step's swing).
 fn swing_of(start: i64, swing: i64) -> i64 {
-    if start.rem_euclid(2 * STEP_TICKS) == STEP_TICKS {
+    let step = (start + gt_core::rack::MAX_SHIFT).div_euclid(STEP_TICKS);
+    if step.rem_euclid(2) == 1 && (start - step * STEP_TICKS).abs() <= gt_core::rack::MAX_SHIFT {
         swing
     } else {
         0
@@ -712,7 +714,6 @@ fn expand_pattern(
     project: &Project,
     pat: &Pattern,
     clip: &gt_core::Clip,
-    swing: i64,
     events: &mut Vec<SongEvent>,
     controls: &mut Vec<ControlEvent>,
 ) {
@@ -724,6 +725,7 @@ fn expand_pattern(
     let first = src_lo.div_euclid(len) - 1; // swing can push a note into the next repetition
     let last = (src_hi - 1).div_euclid(len);
     for (slot, ch) in project.channels.iter().enumerate() {
+        let swing = swing_ticks(project, ch);
         for c in pat.channel_controls(ch.id) {
             if !(0..len).contains(&c.tick) {
                 continue;
@@ -844,6 +846,34 @@ pub enum InstrumentKind {
     Synth,
     /// A hosted instrument plugin (uses `plugin`).
     Plugin,
+    /// A layer: plays other channels (uses `layer`), no sound of its own.
+    Layer,
+}
+
+/// Most children of a layer channel.
+pub const MAX_LAYER_CHILDREN: usize = gt_core::LayerSettings::MAX_CHILDREN;
+
+/// A layer channel's children as the engine uses them (Prompt 27).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LayerParams {
+    /// Child slots; the first `count` are used.
+    pub children: [u16; MAX_LAYER_CHILDREN],
+    /// Number of children.
+    pub count: u8,
+    /// How children are picked.
+    pub mode: gt_core::LayerMode,
+    /// Velocity split.
+    pub split: bool,
+}
+
+/// Root key, key range, mono and voice limit applied to a channel's notes (Prompt 27):
+/// every instrument but the sampler, which applies its own per voice.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct KeyParams {
+    /// Apply these (false: the notes pass unchanged).
+    pub apply: bool,
+    /// The limits.
+    pub limits: gt_core::KeyLimits,
 }
 
 /// Sampler 2 settings as the engine uses them (Prompt 23).
@@ -980,6 +1010,12 @@ pub struct ChannelParams {
     pub midi_out: Option<u16>,
     /// Sampler 2 settings.
     pub sampler: SamplerParams,
+    /// Choke group (0: none).
+    pub choke: u8,
+    /// Key settings of non-sampler instruments.
+    pub keys: KeyParams,
+    /// Children of a layer channel.
+    pub layer: LayerParams,
 }
 
 impl Default for ChannelParams {
@@ -1001,6 +1037,9 @@ impl Default for ChannelParams {
             extra_routes: [None; gt_core::MAX_EXTRA_OUTPUTS],
             midi_out: None,
             sampler: SamplerParams::default(),
+            choke: 0,
+            keys: KeyParams::default(),
+            layer: LayerParams::default(),
         }
     }
 }
@@ -1015,6 +1054,11 @@ impl ChannelParams {
             pan: ch.pan.clamp(-1.0, 1.0),
             route: ch.insert.min(gt_core::STRIPS - 1) as u8,
             bend_range: ch.bend_range.clamp(0.0, Channel::MAX_BEND),
+            choke: ch.choke,
+            keys: KeyParams {
+                apply: ch.sampler().is_none() && ch.keys != gt_core::KeyLimits::default(),
+                limits: ch.keys,
+            },
             ..Self::default()
         };
         match &ch.instrument {
@@ -1036,6 +1080,11 @@ impl ChannelParams {
             // Pads play through the sampler's voices with a key map of their own; the
             // channel's sampler settings stay at their defaults (one-shot, open filter).
             Instrument::Drums(_) => {}
+            Instrument::Layer(l) => {
+                p.kind = InstrumentKind::Layer;
+                p.layer.mode = l.mode;
+                p.layer.split = l.split;
+            }
             Instrument::Plugin(plugin) => {
                 p.kind = InstrumentKind::Plugin;
                 p.plugin = Some(plugin.instance);
@@ -1052,6 +1101,18 @@ impl ChannelParams {
     pub fn from_project(project: &gt_core::Project, index: usize) -> Self {
         let ch = &project.channels[index];
         let mut p = Self::from_channel(ch, project.is_silenced(index));
+        if let Instrument::Layer(l) = &ch.instrument {
+            // Children by slot: existing, not layers themselves, not this channel.
+            let slots = l
+                .children
+                .iter()
+                .filter_map(|id| project.channel_index(*id))
+                .filter(|&i| i != index && project.channels[i].layer().is_none());
+            for (k, s) in slots.take(MAX_LAYER_CHILDREN).enumerate() {
+                p.layer.children[k] = s as u16;
+                p.layer.count = k as u8 + 1;
+            }
+        }
         if let Instrument::Plugin(plugin) = &ch.instrument {
             p.midi_out = plugin
                 .midi_out

@@ -22,6 +22,7 @@ pub mod peaks;
 pub mod playlist;
 pub mod plugin;
 pub mod project;
+pub mod rack;
 pub mod recording;
 pub mod sample;
 pub mod sampler;
@@ -53,6 +54,7 @@ pub use project::{
     Adsr, BuiltInSample, Channel, ChannelId, Instrument, LoopMode, Note, Pattern, PatternId,
     Project, ProjectInfo, SampleSource, SamplerSettings, MAX_CHANNELS, ROOT_KEY, STEP_TICKS,
 };
+pub use rack::{KeyLimits, LayerMode, LayerSettings, StepLane};
 pub use recording::{AudioInput, Gap, MonitorMode, MAX_INPUT_CHANNELS};
 pub use sample::SampleData;
 pub use sampler::{Interp, KeyZone, LfoTarget, SamplerFilter, SamplerFilterMode, SamplerLfo};

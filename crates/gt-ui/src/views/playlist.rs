@@ -2093,7 +2093,11 @@ fn paint(
         let track = &pl.tracks[row];
         let selected = st.selected.contains(&c.id);
         let audible = !c.muted && pl.is_track_audible(c.track);
-        let base = color(track.color);
+        let base = match &c.kind {
+            ClipKind::Pattern(id) => project.pattern(*id).and_then(|p| p.rgb()),
+            _ => None,
+        }
+        .map_or(color(track.color), color);
         let fill = if audible {
             base.gamma_multiply(0.45)
         } else {
