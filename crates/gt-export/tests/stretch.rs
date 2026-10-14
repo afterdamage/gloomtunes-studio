@@ -67,6 +67,7 @@ fn export(p: &Project, samples: &HashMap<SampleSource, Arc<SampleData>>) -> Vec<
         tail: false,
         max_tail_seconds: 0.0,
         stems: false,
+        ..ExportSettings::default()
     };
     let out = render(p, samples, &settings, &Progress::default(), &mut Vec::new()).unwrap();
     out[0].audio.chunks_exact(2).map(|f| f[0]).collect()

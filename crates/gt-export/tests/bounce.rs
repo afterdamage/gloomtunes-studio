@@ -71,6 +71,7 @@ fn mix(p: &Project, samples: &HashMap<SampleSource, Arc<SampleData>>) -> Vec<f32
         tail: true,
         max_tail_seconds: 6.0,
         stems: false,
+        ..ExportSettings::default()
     };
     let mut out = render(p, samples, &settings, &Progress::default(), &mut Vec::new()).unwrap();
     out.remove(0).audio

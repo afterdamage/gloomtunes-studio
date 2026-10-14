@@ -662,6 +662,17 @@ sound identical; the golden export test stays.
   `format!` and some table-driven labels are not in the table yet; the typing keyboard plays
   only while the main window has focus.
 
+### Prompt 26: Export formats
+- FLAC (16/24-bit, bit-identical to the WAV export), Ogg Vorbis (quality 0 to 10) and MP3
+  (CBR or VBR, LAME, LGPL flagged), tagged with the project's title, artist and genre (D135).
+- One file per marker region, named after the marker (also with stems).
+- Optional MP4 video of the mix: spectrum bars, waveform or a still image, made by an external
+  ffmpeg if installed (never bundled).
+- Tests decode every format with symphonia: FLAC equals WAV exactly, Ogg and MP3 within
+  -15 dB error-to-signal (measured about -20 to -23 dB); region lengths and names.
+- Limits: WAV files carry no tags; MP3 above 48 kHz is resampled by LAME; video is the full
+  mix only (no stems or regions) and has no title text.
+
 ---
 
 ## v1.0 scope

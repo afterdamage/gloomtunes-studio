@@ -31,6 +31,16 @@ allow = [
 crate = "epaint_default_fonts"
 allow = ["OFL-1.1", "Ubuntu-font-1.0"]
 
+# LAME (MP3 export, D135) is LGPL-3.0: weak copyleft, compatible with GPL-3.0; flagged in
+# ARCHITECTURE §10 and allowed for these crates only.
+[[licenses.exceptions]]
+crate = "mp3lame-encoder"
+allow = ["LGPL-3.0"]
+
+[[licenses.exceptions]]
+crate = "mp3lame-sys"
+allow = ["LGPL-3.0"]
+
 [licenses.private]
 # The workspace crates themselves are GPL-3.0-or-later and never published.
 ignore = true

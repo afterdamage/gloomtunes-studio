@@ -186,6 +186,7 @@ pub fn render(
         tail: b.tail,
         max_tail_seconds: RENDER_TAIL_S,
         stems: false,
+        ..ExportSettings::default()
     };
     let audio = render_one(
         &p,

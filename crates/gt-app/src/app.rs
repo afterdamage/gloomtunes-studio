@@ -1830,7 +1830,22 @@ impl GloomApp {
         };
         let t = &self.transport;
         let settings = form.settings((t.loop_start.0, t.loop_end.0));
-        if gt_export::range_ticks(&self.project, settings.range).is_none() {
+        if settings.regions && gt_export::marker_regions(&self.project).is_empty() {
+            form.message = Some("No marker regions: add markers to the playlist first.".to_owned());
+            return;
+        }
+        let video = form.video_settings(&self.theme);
+        if let Some(gt_export::video::VideoSettings {
+            style: gt_export::video::VideoStyle::Image(img),
+            ..
+        }) = &video
+        {
+            if !img.is_file() {
+                form.message = Some("Choose an image for the video.".to_owned());
+                return;
+            }
+        }
+        if !settings.regions && gt_export::range_ticks(&self.project, settings.range).is_none() {
             form.message = Some(if form.loop_only {
                 "The loop region is empty or has no clips in it.".to_owned()
             } else {
@@ -1847,7 +1862,14 @@ impl GloomApp {
             .plugins
             .export_processors(&project, settings.sample_rate);
         self.export_job = Some(std::thread::spawn(move || {
-            gt_export::export(&project, &settings, &path, &progress, &mut plugins)
+            gt_export::export_with_video(
+                &project,
+                &settings,
+                &path,
+                &progress,
+                &mut plugins,
+                video.as_ref(),
+            )
         }));
     }
 
@@ -1866,7 +1888,7 @@ impl GloomApp {
         let msg = match result {
             Ok(files) if files.len() == 1 => format!("Exported {}", files[0].display()),
             Ok(files) => format!(
-                "Exported {} stems to {}",
+                "Exported {} files to {}",
                 files.len(),
                 files[0]
                     .parent()

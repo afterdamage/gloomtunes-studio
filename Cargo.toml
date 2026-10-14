@@ -52,6 +52,12 @@ libc = "0.2"
 # MIT; builds the C++ header library with cc and bindgen (needs libclang at build time).
 signalsmith-stretch = "0.1.3"
 rustfft = "6"
+# Apache-2.0, pure Rust FLAC encoder (D135).
+flacenc = "0.5"
+# BSD-3-Clause; builds the aoTuV/Lancer libvorbis C sources with cc (D135).
+vorbis_rs = { version = "0.5", default-features = false }
+# LGPL-3.0 (compatible with GPL-3.0); builds LAME from source with cc (D135).
+mp3lame-encoder = "0.2"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

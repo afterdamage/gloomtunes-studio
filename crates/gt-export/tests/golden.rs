@@ -63,6 +63,7 @@ fn reference_project_exports_to_the_stored_hash() {
         tail: true,
         max_tail_seconds: 4.0,
         stems: false,
+        ..ExportSettings::default()
     };
     let out = dir.join("reference.wav");
     let written = export(
