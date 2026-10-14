@@ -668,9 +668,334 @@ impl SynthPatch {
                 .with_mod(0, ModSource::Lfo2, ModDest::Cutoff, 0.2)
                 .with_mod(1, ModSource::Lfo2, ModDest::Pan, 0.6),
         ];
+        out.extend(Self::gloom_factory());
         out.extend(Self::fm_factory());
         out.extend(Self::wavetable_factory());
         out.extend(Self::bass_factory());
+        out
+    }
+
+    /// More Gloom engine presets (Prompt 28). All original.
+    fn gloom_factory() -> Vec<SynthPatch> {
+        use SynthParam as P;
+        // (name, waves 1/2, osc 2 octave/fine/level, sub, noise, cutoff, reso, env, key track,
+        //  drive, amp ADSR, mod ADSR, unison voices/detune/spread, glide, velocity, volume)
+        #[allow(clippy::type_complexity)]
+        let table: [(
+            &str,
+            [f32; 7],
+            [f32; 5],
+            [f32; 4],
+            [f32; 4],
+            [f32; 3],
+            [f32; 3],
+        ); 24] = [
+            // Triangle and a quiet saw, a soft filter bump on each key: mellow electric keys.
+            (
+                "Velvet Keys",
+                [1.0, 2.0, 0.0, 6.0, 0.35, 0.0, 0.0],
+                [1400.0, 0.15, 2.0, 0.6, 0.1],
+                [2.0, 900.0, 0.4, 450.0],
+                [0.0, 600.0, 0.2, 400.0],
+                [1.0, 0.0, 0.5],
+                [0.0, 0.7, 0.5],
+            ),
+            // Two narrow squares an octave apart through a vowel-ish resonance.
+            (
+                "Hollow Choir",
+                [3.0, 3.0, 1.0, -6.0, 0.5, 0.0, 0.05],
+                [1100.0, 0.4, 1.0, 0.5, 0.0],
+                [400.0, 1200.0, 0.8, 1800.0],
+                [600.0, 1500.0, 0.6, 1500.0],
+                [5.0, 14.0, 0.8],
+                [0.0, 0.3, 0.4],
+            ),
+            // A wide saw ensemble with a slow attack.
+            (
+                "Rust Strings",
+                [2.0, 2.0, 0.0, -11.0, 0.8, 0.0, 0.0],
+                [2600.0, 0.1, 0.6, 0.5, 0.15],
+                [350.0, 1000.0, 0.85, 1400.0],
+                [300.0, 1200.0, 0.7, 1200.0],
+                [6.0, 28.0, 1.0],
+                [0.0, 0.4, 0.38],
+            ),
+            // Saw and square with a filter that swells on the attack like a brass section.
+            (
+                "Cold Brass",
+                [2.0, 3.0, 0.0, 5.0, 0.6, 0.0, 0.0],
+                [700.0, 0.25, 3.2, 0.5, 0.25],
+                [60.0, 700.0, 0.75, 300.0],
+                [40.0, 350.0, 0.35, 300.0],
+                [3.0, 10.0, 0.5],
+                [0.0, 0.7, 0.45],
+            ),
+            // Sine, square an octave up and sub, no envelope movement: a worn organ.
+            (
+                "Tape Organ",
+                [0.0, 3.0, 1.0, 3.0, 0.45, 0.3, 0.0],
+                [4200.0, 0.05, 0.0, 0.3, 0.2],
+                [8.0, 100.0, 1.0, 120.0],
+                [0.0, 400.0, 0.2, 300.0],
+                [1.0, 0.0, 0.5],
+                [0.0, 0.1, 0.42],
+            ),
+            // Square and saw with glide, a bright monophonic lead.
+            (
+                "Moth Lead",
+                [3.0, 2.0, 0.0, 9.0, 0.5, 0.0, 0.0],
+                [2200.0, 0.35, 1.5, 0.6, 0.35],
+                [6.0, 300.0, 0.85, 220.0],
+                [0.0, 500.0, 0.4, 250.0],
+                [1.0, 0.0, 0.5],
+                [60.0, 0.6, 0.45],
+            ),
+            // Sine with a triangle two octaves up, ringing out: a soft bell.
+            (
+                "Fog Bell",
+                [0.0, 1.0, 2.0, 0.0, 0.45, 0.0, 0.0],
+                [6000.0, 0.0, 0.0, 0.6, 0.0],
+                [1.0, 1800.0, 0.0, 1600.0],
+                [0.0, 400.0, 0.0, 300.0],
+                [1.0, 0.0, 0.5],
+                [0.0, 0.7, 0.5],
+            ),
+            // A short square pluck with a little noise in the attack.
+            (
+                "Static Pluck",
+                [3.0, 2.0, 0.0, 0.0, 0.3, 0.0, 0.12],
+                [450.0, 0.5, 5.5, 0.8, 0.2],
+                [0.0, 280.0, 0.0, 260.0],
+                [0.0, 140.0, 0.0, 200.0],
+                [1.0, 0.0, 0.5],
+                [0.0, 0.8, 0.5],
+            ),
+            // Saw over a square an octave down, driven hard.
+            (
+                "Iron Bass",
+                [2.0, 3.0, -1.0, 0.0, 0.7, 0.6, 0.0],
+                [320.0, 0.4, 2.5, 0.3, 0.7],
+                [1.0, 500.0, 0.7, 90.0],
+                [0.0, 250.0, 0.15, 120.0],
+                [1.0, 0.0, 0.5],
+                [0.0, 0.5, 0.45],
+            ),
+            // Sine and sub, round and clean for low lines.
+            (
+                "Soft Sub",
+                [0.0, 1.0, 0.0, 0.0, 0.25, 0.5, 0.0],
+                [600.0, 0.0, 0.0, 0.0, 0.05],
+                [4.0, 800.0, 0.9, 120.0],
+                [0.0, 400.0, 0.2, 300.0],
+                [1.0, 0.0, 0.5],
+                [0.0, 0.3, 0.55],
+            ),
+            // Detuned saw and triangle that bloom slowly and drift.
+            (
+                "Drift Pad",
+                [2.0, 1.0, 0.0, -14.0, 0.6, 0.0, 0.04],
+                [1300.0, 0.3, 1.2, 0.5, 0.1],
+                [1500.0, 2500.0, 0.8, 3500.0],
+                [2500.0, 3500.0, 0.5, 3000.0],
+                [4.0, 35.0, 0.9],
+                [0.0, 0.2, 0.38],
+            ),
+            // A short hollow blip for fast arpeggios.
+            (
+                "Ghost Arp",
+                [1.0, 3.0, 1.0, 0.0, 0.4, 0.0, 0.0],
+                [1700.0, 0.45, 3.0, 0.7, 0.1],
+                [0.0, 220.0, 0.0, 180.0],
+                [0.0, 160.0, 0.0, 150.0],
+                [1.0, 0.0, 0.5],
+                [0.0, 0.8, 0.5],
+            ),
+            // Bright detuned chord stab with a snappy filter.
+            (
+                "Crystal Stab",
+                [2.0, 2.0, 1.0, 12.0, 0.6, 0.0, 0.0],
+                [900.0, 0.55, 4.5, 0.7, 0.2],
+                [0.0, 350.0, 0.1, 250.0],
+                [0.0, 200.0, 0.0, 200.0],
+                [3.0, 18.0, 0.7],
+                [0.0, 0.7, 0.42],
+            ),
+            // Two squares detuned a quarter tone apart: a sour, nasal lead.
+            (
+                "Sour Lead",
+                [3.0, 3.0, 0.0, 22.0, 0.7, 0.0, 0.0],
+                [1500.0, 0.6, 2.0, 0.6, 0.5],
+                [3.0, 400.0, 0.8, 180.0],
+                [0.0, 600.0, 0.3, 200.0],
+                [1.0, 0.0, 0.5],
+                [30.0, 0.5, 0.4],
+            ),
+            // A dark sustained drone for intros and beds.
+            (
+                "Low Drone",
+                [2.0, 2.0, -1.0, -5.0, 0.7, 0.4, 0.03],
+                [300.0, 0.5, 0.8, 0.2, 0.4],
+                [2000.0, 3000.0, 1.0, 4000.0],
+                [3000.0, 4000.0, 0.8, 4000.0],
+                [3.0, 20.0, 0.6],
+                [0.0, 0.0, 0.42],
+            ),
+            // Seven-voice saws spread wide for big chords.
+            (
+                "Wide Saw Chord",
+                [2.0, 2.0, 0.0, 8.0, 0.8, 0.0, 0.0],
+                [3200.0, 0.15, 0.8, 0.5, 0.1],
+                [5.0, 1200.0, 0.8, 600.0],
+                [0.0, 800.0, 0.4, 500.0],
+                [7.0, 30.0, 1.0],
+                [0.0, 0.5, 0.35],
+            ),
+            // Thin pulse waves with a short bloom: digital keys.
+            (
+                "Pulse Keys",
+                [3.0, 3.0, 0.0, 4.0, 0.5, 0.0, 0.0],
+                [2000.0, 0.2, 1.8, 0.6, 0.1],
+                [2.0, 700.0, 0.5, 350.0],
+                [0.0, 500.0, 0.3, 300.0],
+                [2.0, 8.0, 0.6],
+                [0.0, 0.7, 0.45],
+            ),
+            // Triangle pad with a dusty noise layer and a slow filter swell.
+            (
+                "Ashen Pad",
+                [1.0, 2.0, 1.0, -7.0, 0.4, 0.0, 0.08],
+                [800.0, 0.35, 1.6, 0.4, 0.05],
+                [1100.0, 2000.0, 0.7, 3000.0],
+                [1800.0, 2500.0, 0.6, 2500.0],
+                [5.0, 18.0, 0.9],
+                [0.0, 0.2, 0.4],
+            ),
+            // Driven square lead with a saw on top.
+            (
+                "Bitter Square Lead",
+                [3.0, 2.0, 1.0, -3.0, 0.4, 0.2, 0.0],
+                [2600.0, 0.3, 1.0, 0.6, 0.6],
+                [2.0, 300.0, 0.9, 150.0],
+                [0.0, 400.0, 0.5, 200.0],
+                [1.0, 0.0, 0.5],
+                [40.0, 0.5, 0.4],
+            ),
+            // Triangle and sine plucks with a little hiss, like drops.
+            (
+                "Rain Pluck",
+                [1.0, 0.0, 1.0, 0.0, 0.5, 0.0, 0.06],
+                [1200.0, 0.3, 4.0, 0.9, 0.0],
+                [0.0, 600.0, 0.0, 500.0],
+                [0.0, 250.0, 0.0, 300.0],
+                [2.0, 6.0, 0.8],
+                [0.0, 0.8, 0.5],
+            ),
+            // A warm all-round polysynth.
+            (
+                "Warm Poly",
+                [2.0, 3.0, 0.0, -4.0, 0.5, 0.2, 0.0],
+                [1000.0, 0.25, 2.2, 0.5, 0.15],
+                [10.0, 900.0, 0.6, 500.0],
+                [5.0, 600.0, 0.3, 400.0],
+                [2.0, 9.0, 0.6],
+                [0.0, 0.6, 0.42],
+            ),
+            // Noise and a saw through a resonant filter rising over four seconds.
+            (
+                "Lunar Sweep",
+                [2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.6],
+                [200.0, 0.85, 6.0, 0.8, 0.1],
+                [1500.0, 2000.0, 0.9, 2500.0],
+                [4000.0, 1000.0, 1.0, 2500.0],
+                [1.0, 0.0, 0.5],
+                [0.0, 0.2, 0.4],
+            ),
+            // A bouncy, round pluck for basslines.
+            (
+                "Rubber Pluck Bass",
+                [3.0, 0.0, -1.0, 0.0, 0.6, 0.4, 0.0],
+                [250.0, 0.6, 4.0, 0.4, 0.3],
+                [0.0, 380.0, 0.2, 90.0],
+                [0.0, 170.0, 0.0, 100.0],
+                [1.0, 0.0, 0.5],
+                [0.0, 0.7, 0.5],
+            ),
+            // Sines and a soft saw, very slow, for wide sustained chords.
+            (
+                "Cathedral Pad",
+                [0.0, 2.0, 1.0, 5.0, 0.35, 0.2, 0.0],
+                [1800.0, 0.1, 0.5, 0.4, 0.0],
+                [1800.0, 3000.0, 0.9, 5000.0],
+                [2000.0, 3000.0, 0.8, 4000.0],
+                [6.0, 12.0, 1.0],
+                [0.0, 0.1, 0.38],
+            ),
+        ];
+        let mut out: Vec<SynthPatch> = table
+            .iter()
+            .map(|(name, osc, filter, amp, menv, uni, tail)| {
+                SynthPatch {
+                    name: (*name).to_owned(),
+                    ..SynthPatch::default()
+                }
+                .with(P::Osc1Wave, osc[0])
+                .with(P::Osc2Wave, osc[1])
+                .with(P::Osc2Octave, osc[2])
+                .with(P::Osc2Fine, osc[3])
+                .with(P::Osc2Level, osc[4])
+                .with(P::SubLevel, osc[5])
+                .with(P::NoiseLevel, osc[6])
+                .with(P::Cutoff, filter[0])
+                .with(P::Resonance, filter[1])
+                .with(P::FilterEnv, filter[2])
+                .with(P::KeyTrack, filter[3])
+                .with(P::Drive, filter[4])
+                .with(P::AmpAttack, amp[0])
+                .with(P::AmpDecay, amp[1])
+                .with(P::AmpSustain, amp[2])
+                .with(P::AmpRelease, amp[3])
+                .with(P::ModAttack, menv[0])
+                .with(P::ModDecay, menv[1])
+                .with(P::ModSustain, menv[2])
+                .with(P::ModRelease, menv[3])
+                .with(P::UnisonVoices, uni[0])
+                .with(P::UnisonDetune, uni[1])
+                .with(P::UnisonSpread, uni[2])
+                .with(P::Glide, tail[0])
+                .with(P::VelocitySens, tail[1])
+                .with(P::Volume, tail[2])
+            })
+            .collect();
+        // A few get movement from the LFOs.
+        for p in &mut out {
+            match p.name.as_str() {
+                "Moth Lead" | "Sour Lead" | "Bitter Square Lead" => {
+                    p.set(P::Lfo1Rate, 5.0);
+                    p.mods[0] = ModSlot {
+                        source: ModSource::Lfo1,
+                        dest: ModDest::Pitch,
+                        amount: 0.01,
+                    };
+                }
+                "Drift Pad" | "Ashen Pad" | "Low Drone" => {
+                    p.set(P::Lfo2Rate, 0.12);
+                    p.mods[0] = ModSlot {
+                        source: ModSource::Lfo2,
+                        dest: ModDest::Cutoff,
+                        amount: 0.2,
+                    };
+                }
+                "Rust Strings" | "Cathedral Pad" => {
+                    p.set(P::Lfo1Rate, 4.5);
+                    p.mods[0] = ModSlot {
+                        source: ModSource::Lfo1,
+                        dest: ModDest::Pitch,
+                        amount: 0.004,
+                    };
+                }
+                _ => {}
+            }
+        }
         out
     }
 
@@ -1515,8 +1840,8 @@ mod tests {
             assert_eq!(&s, p, "{}", p.name);
         }
         assert_eq!(ModDest::from_key("cutoff"), Some(ModDest::Cutoff));
-        // Prompt 24: twenty or more of each new engine.
-        for engine in [1, 2, 3] {
+        // Prompt 24 and 28: twenty or more of each engine.
+        for engine in [0, 1, 2, 3] {
             assert!(f.iter().filter(|p| p.engine() == engine).count() >= 20);
         }
         let mut all: Vec<_> = f.iter().map(|p| p.name.as_str()).collect();

@@ -29,6 +29,8 @@ pub enum Then {
     Quit,
     /// Open the project the browser asked for (`GloomApp::pending_open`).
     OpenPending,
+    /// Open factory demo `n` (`gt_core::demos::DEMOS`) as a new, unsaved project.
+    Demo(usize),
 }
 
 /// The export dialog's settings.

@@ -705,6 +705,11 @@ sound identical; the golden export test stays.
   not a zip), player save and reload.
 - Limits: a project that embeds its samples does not embed packs; drum synth voices render
   at 48 kHz and are resampled to the device rate.
+- Factory content (all CC0, D140): 24 more Gloom engine presets (95 synth presets), 12 drum
+  synth kits (Synth kits menu on the pads), 3 sound packs rendered from our synth presets with
+  48 player presets (built into the packs folder on first run; `make_content` example writes
+  them anywhere), and 10 demo songs in 10 styles under File > Demo songs. 155 presets in all.
+- Limits: pack samples are one-shots (long notes on pads end with the sample).
 
 ---
 
