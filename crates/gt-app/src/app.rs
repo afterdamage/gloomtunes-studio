@@ -52,7 +52,7 @@ mod views;
 
 use crate::audio_io::AudioIo;
 use crate::files::{self, Dialog, DialogAction, ExportForm, Then};
-use crate::library::{data_folder, default_folder, synth_preset_folder, Library};
+use crate::library::{data_folder, default_folder, packs_folder, synth_preset_folder, Library};
 
 /// Sample rate used for loading while no device is open.
 const FALLBACK_RATE: u32 = 48_000;
@@ -121,6 +121,10 @@ pub struct GloomApp {
     roll: PianoRollState,
     /// Shown bank and pad of the drum pad panel.
     drum_state: gt_ui::views::DrumPadState,
+    /// Sound packs in the packs folder (name, path), Prompt 28.
+    packs: Vec<(String, PathBuf)>,
+    /// Packs opened for the player panel, or why they did not open.
+    opened_packs: HashMap<PathBuf, Result<gt_project::pack::Pack, String>>,
     history: History,
     /// Label of the document change made since the last undo step, if any. Committed to the
     /// history once the gesture ends (no mouse button down, no text field focused).
@@ -330,6 +334,8 @@ impl GloomApp {
             ui_scale: 0.0,
             roll: PianoRollState::default(),
             drum_state: gt_ui::views::DrumPadState::default(),
+            packs: list_packs(),
+            opened_packs: HashMap::new(),
             history,
             pending_edit: None,
             humanize_seed: 0x9E37_79B9_7F4A_7C15,
@@ -592,6 +598,69 @@ impl GloomApp {
         }
         self.project.current_pattern_mut().notes.insert(id, notes);
         self.pending_edit = Some("Export slices");
+    }
+
+    /// Opens the pack at `path` once (cached, failures too).
+    fn open_pack(&mut self, path: &std::path::Path) -> Result<&gt_project::pack::Pack, String> {
+        self.opened_packs
+            .entry(path.to_path_buf())
+            .or_insert_with(|| {
+                gt_project::pack::open(path, &gt_project::pack::default_cache())
+                    .map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    fn on_player_panel(&mut self, out: gt_ui::views::PlayerPanelOut) {
+        let i = self.rack.selected;
+        let Some(current) = self.project.channels.get(i).and_then(|c| c.player()) else {
+            return;
+        };
+        let mut pack = out.pack;
+        if out.open {
+            let d = rfd::FileDialog::new()
+                .add_filter(tr("Sound pack"), &[gt_project::pack::EXTENSION, "zip"])
+                .set_directory(packs_folder());
+            pack = d.pick_file();
+            if let Some(p) = &pack {
+                // A failed open is retried when picked again.
+                self.opened_packs.remove(p);
+            }
+        }
+        let (pack, preset) = match (pack, out.preset) {
+            (Some(p), _) => (p, None),
+            (None, Some(name)) => (current.pack.clone(), Some(name)),
+            (None, None) => {
+                if out.changed {
+                    self.push_all_params();
+                    self.push_sample(i);
+                    self.pending_edit = Some("Player macros");
+                }
+                return;
+            }
+        };
+        let player = match self.open_pack(&pack) {
+            Ok(opened) => {
+                let name = preset.or_else(|| opened.preset_names().next().map(str::to_owned));
+                name.and_then(|n| opened.player(&n))
+            }
+            // The panel shows why (the failure is cached).
+            Err(_) => None,
+        };
+        if let Some(player) = player {
+            if let Some(p) = self
+                .project
+                .channels
+                .get_mut(i)
+                .and_then(|c| c.player_mut())
+            {
+                *p = player;
+            }
+            self.push_all_params();
+            self.push_sample(i);
+            self.pending_edit = Some("Player preset");
+        }
     }
 
     fn on_drum_panel(&mut self, out: gt_ui::views::DrumPadOut) {
@@ -2545,6 +2614,23 @@ impl eframe::App for GloomApp {
                 _ => None,
             })
             .unwrap_or_default();
+        // The selected player's pack, opened before the channel is borrowed.
+        let player_pack = self
+            .project
+            .channels
+            .get(self.rack.selected)
+            .and_then(|c| c.player())
+            .map(|p| p.pack.clone())
+            .filter(|p| !p.as_os_str().is_empty());
+        let (player_presets, player_error) = match player_pack.map(|p| {
+            self.open_pack(&p)
+                .map(|pack| pack.preset_names().map(str::to_owned).collect::<Vec<_>>())
+        }) {
+            Some(Ok(names)) => (Some(names), None),
+            Some(Err(e)) => (None, Some(e)),
+            None => (None, None),
+        };
+        let mut player_out = gt_ui::views::PlayerPanelOut::default();
         let mut sampler_out = gt_ui::views::SamplerPanelOut::default();
         let mut drum_out = gt_ui::views::DrumPadOut::default();
         let mut swing_changed = false;
@@ -2621,6 +2707,16 @@ impl eframe::App for GloomApp {
                             );
                             (false, Vec::new())
                         }
+                        Instrument::Player(pl) => {
+                            let view = gt_ui::views::PlayerPanelView {
+                                packs: &self.packs,
+                                presets: player_presets.as_deref(),
+                                error: player_error.as_deref(),
+                            };
+                            player_out =
+                                gt_ui::views::player_panel(ui, &theme, &mut ch.name, pl, view);
+                            (false, Vec::new())
+                        }
                         Instrument::Synth(patch) => {
                             let view = SynthPanelView {
                                 scope: &self.scope,
@@ -2662,6 +2758,7 @@ impl eframe::App for GloomApp {
             self.pending_edit = Some("Instrument settings");
         }
         self.on_drum_panel(drum_out);
+        self.on_player_panel(player_out);
         if sampler_out.export_pattern {
             self.export_slices(self.rack.selected);
         }
@@ -2783,4 +2880,18 @@ impl eframe::App for GloomApp {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
+}
+
+/// The sound packs in the packs folder, by file name.
+fn list_packs() -> Vec<(String, PathBuf)> {
+    gt_project::pack::list(&packs_folder())
+        .into_iter()
+        .map(|p| {
+            let name = p
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (name, p)
+        })
+        .collect()
 }

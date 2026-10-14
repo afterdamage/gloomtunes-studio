@@ -141,17 +141,23 @@ impl ZoneMap {
                     None => 0,
                 },
             };
-            for l in &pad.layers {
-                let Some(data) = sample(&l.sample) else {
-                    continue;
-                };
+            // A synth pad plays its voice; its sample layers wait unused.
+            let sounds: Vec<(Arc<SampleData>, f32, f32)> = match &pad.synth {
+                Some(v) => vec![(drum_synth_sample(v), 0.0, 1.0)],
+                None => pad
+                    .layers
+                    .iter()
+                    .filter_map(|l| Some((sample(&l.sample)?, l.vel_lo, l.vel_hi)))
+                    .collect(),
+            };
+            for (data, vel_lo, vel_hi) in sounds {
                 map.zones.push(Zone {
                     data,
                     root: key,
                     key_lo: key,
                     key_hi: key,
-                    vel_lo: l.vel_lo,
-                    vel_hi: l.vel_hi,
+                    vel_lo,
+                    vel_hi,
                     tune: pad.tune,
                     gain: pad.gain,
                     pan: pad.pan,
@@ -205,6 +211,54 @@ impl ZoneMap {
     }
 }
 
+/// Rate the drum synth renders at (the sampler resamples to the engine's rate).
+pub const DRUM_SYNTH_RATE: u32 = 48_000;
+
+/// The sample of a drum synth voice, rendered at [`DRUM_SYNTH_RATE`]. Recent renders are
+/// kept, so rebuilding a kit after an edit renders only the voice that changed. Off the audio
+/// thread.
+pub fn drum_synth_sample(v: &gt_core::DrumVoice) -> Arc<SampleData> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    type Key = [u32; 17];
+    static CACHE: Mutex<Option<HashMap<Key, Arc<SampleData>>>> = Mutex::new(None);
+    let key: Key = [
+        v.model as u32,
+        v.length.to_bits(),
+        v.pitch.to_bits(),
+        v.pitch2.to_bits(),
+        v.sweep.to_bits(),
+        v.sweep_time.to_bits(),
+        v.decay.to_bits(),
+        v.tone.to_bits(),
+        v.noise.to_bits(),
+        v.noise_decay.to_bits(),
+        v.noise_freq.to_bits(),
+        v.noise_q.to_bits(),
+        v.click.to_bits(),
+        v.drive.to_bits(),
+        v.spread.to_bits(),
+        v.tail_at.to_bits(),
+        v.seed,
+    ];
+    let mut cache = CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let map = cache.get_or_insert_with(HashMap::new);
+    if let Some(d) = map.get(&key) {
+        return Arc::clone(d);
+    }
+    if map.len() >= 256 {
+        map.clear();
+    }
+    let data = Arc::new(SampleData::mono(
+        DRUM_SYNTH_RATE,
+        gt_dsp::drums::render(v, DRUM_SYNTH_RATE as f32),
+    ));
+    map.insert(key, Arc::clone(&data));
+    data
+}
+
 /// What a sampler channel plays: its single sample (the time-stretch render `fitted` when
 /// there is one) or its key map. Off the audio thread.
 pub fn sampler_sources(
@@ -230,6 +284,7 @@ pub fn channel_sources(
     match &ch.instrument {
         gt_core::Instrument::Sampler(s) => sampler_sources(s, sample, fitted),
         gt_core::Instrument::Drums(k) => (None, ZoneMap::kit(k, sample).map(Arc::new)),
+        gt_core::Instrument::Player(p) => sampler_sources(&p.sampler(), sample, None),
         _ => (None, None),
     }
 }

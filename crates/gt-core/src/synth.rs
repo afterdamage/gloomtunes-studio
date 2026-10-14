@@ -13,7 +13,7 @@ pub const OSC_WAVES: &[&str] = &["Sine", "Triangle", "Saw", "Square"];
 /// LFO waveform names, indexed by value.
 pub const LFO_WAVES: &[&str] = &["Sine", "Triangle", "Saw", "Square", "S&H"];
 /// Sound engines, indexed by value.
-pub const ENGINES: &[&str] = &["Gloom", "FM", "Wavetable"];
+pub const ENGINES: &[&str] = &["Gloom", "FM", "Wavetable", "Bass"];
 /// FM algorithms, indexed by value (the last is the free matrix).
 pub const FM_ALGORITHMS: &[&str] = &[
     "1 Stack",
@@ -129,7 +129,7 @@ synth_params! {
     VelocitySens => "velocity", "Velocity", 0.0, 1.0, 0.6, Linear, Percent;
     Volume => "volume", "Volume", 0.0, 1.0, 0.5, Power(2.0), Gain;
     // Prompt 24: the engine, FM and wavetable parameters (appended: indices are stable).
-    Engine => "engine", "Engine", 0.0, 2.0, 0.0, Stepped, Choice, ENGINES;
+    Engine => "engine", "Engine", 0.0, 3.0, 0.0, Stepped, Choice, ENGINES;
     FmAlgorithm => "fm.algorithm", "Algorithm", 0.0, 8.0, 0.0, Stepped, Choice, FM_ALGORITHMS;
     FmFeedback => "fm.feedback", "Feedback", 0.0, 1.0, 0.0, Linear, Percent;
     Op1Ratio => "fm1.ratio", "Ratio", 0.125, 32.0, 1.0, Power(2.0), Plain;
@@ -254,6 +254,10 @@ synth_params! {
     Wt2Pos => "wt2.pos", "Position", 0.0, 1.0, 0.0, Linear, Percent;
     Wt2Warp => "wt2.warp", "Warp", 0.0, 3.0, 0.0, Stepped, Choice, WT_WARPS;
     Wt2WarpAmt => "wt2.warpamt", "Amount", 0.0, 1.0, 0.0, Linear, Percent;
+    // Prompt 28: the mono bass-line engine.
+    BassAccent => "bass.accent", "Accent", 0.0, 1.0, 0.6, Linear, Percent;
+    BassThreshold => "bass.threshold", "Accent at", 0.5, 1.0, 0.79, Linear, Percent;
+    BassSlide => "bass.slide", "Slide", 5.0, 500.0, 60.0, Power(2.0), Ms;
 }
 
 macro_rules! named_enum {
@@ -371,12 +375,14 @@ pub enum Uses {
     Selector,
     /// Gloom and Wavetable (oscillator pitch and level, sub, noise, unison, filter).
     Oscillators,
-    /// Gloom only (waveform, pulse width).
+    /// Gloom and Bass (waveform, pulse width).
     Gloom,
     /// FM only.
     Fm,
     /// Wavetable only.
     Wavetable,
+    /// Bass only (accent, slide).
+    Bass,
 }
 
 impl SynthParam {
@@ -416,19 +422,21 @@ impl SynthParam {
             _ if i <= P::Drive as usize => Uses::Oscillators,
             _ if i < P::Engine as usize => Uses::All,
             _ if i < P::Wt1Table as usize => Uses::Fm,
-            _ => Uses::Wavetable,
+            _ if i < P::BassAccent as usize => Uses::Wavetable,
+            _ => Uses::Bass,
         }
     }
 
-    /// True when engine `engine` (0 Gloom, 1 FM, 2 Wavetable) uses the parameter.
+    /// True when engine `engine` (0 Gloom, 1 FM, 2 Wavetable, 3 Bass) uses the parameter.
     pub fn used_by(self, engine: u8) -> bool {
         match self.uses() {
             Uses::All => true,
             Uses::Selector => false,
             Uses::Oscillators => engine != 1,
-            Uses::Gloom => engine == 0,
+            Uses::Gloom => engine == 0 || engine == 3,
             Uses::Fm => engine == 1,
             Uses::Wavetable => engine == 2,
+            Uses::Bass => engine == 3,
         }
     }
 }
@@ -662,6 +670,7 @@ impl SynthPatch {
         ];
         out.extend(Self::fm_factory());
         out.extend(Self::wavetable_factory());
+        out.extend(Self::bass_factory());
         out
     }
 
@@ -685,6 +694,321 @@ impl SynthPatch {
     /// Builder-style operator setting.
     pub fn with_opx(self, o: usize, field: OpField, v: f32) -> Self {
         self.with(SynthParam::op(o.clamp(1, FM_OPS) - 1, field), v)
+    }
+
+    /// The bass-line factory presets (Prompt 28). All original: one oscillator into a
+    /// resonant filter with a decaying envelope, set per line by this table.
+    fn bass_factory() -> Vec<SynthPatch> {
+        use SynthParam as P;
+        // (name, wave 2 saw / 3 square, cutoff Hz, resonance, env octaves, mod decay ms,
+        //  accent, slide ms, drive, sub, amp decay ms, amp sustain)
+        #[allow(clippy::type_complexity)]
+        let lines: [(&str, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32); 20] = [
+            (
+                "Acid Line",
+                2.0,
+                260.0,
+                0.82,
+                4.5,
+                260.0,
+                0.7,
+                60.0,
+                0.35,
+                0.0,
+                1200.0,
+                0.9,
+            ),
+            (
+                "Acid Square",
+                3.0,
+                240.0,
+                0.8,
+                4.2,
+                240.0,
+                0.7,
+                60.0,
+                0.3,
+                0.0,
+                1200.0,
+                0.9,
+            ),
+            (
+                "Squelch", 2.0, 180.0, 0.9, 5.5, 180.0, 0.9, 70.0, 0.5, 0.0, 1000.0, 0.9,
+            ),
+            (
+                "Rubber Acid",
+                2.0,
+                320.0,
+                0.7,
+                3.5,
+                420.0,
+                0.6,
+                90.0,
+                0.25,
+                0.2,
+                1500.0,
+                0.9,
+            ),
+            (
+                "Night Crawler",
+                3.0,
+                150.0,
+                0.75,
+                4.0,
+                300.0,
+                0.8,
+                80.0,
+                0.6,
+                0.0,
+                1100.0,
+                0.9,
+            ),
+            (
+                "Warehouse",
+                2.0,
+                200.0,
+                0.86,
+                5.0,
+                200.0,
+                0.8,
+                55.0,
+                0.7,
+                0.0,
+                900.0,
+                0.85,
+            ),
+            (
+                "Soft Acid",
+                2.0,
+                400.0,
+                0.55,
+                2.5,
+                350.0,
+                0.4,
+                80.0,
+                0.1,
+                0.0,
+                1400.0,
+                0.9,
+            ),
+            (
+                "Dub Sub Line",
+                3.0,
+                120.0,
+                0.3,
+                1.5,
+                300.0,
+                0.3,
+                120.0,
+                0.2,
+                0.7,
+                2000.0,
+                1.0,
+            ),
+            (
+                "Pluck Line",
+                2.0,
+                300.0,
+                0.6,
+                4.0,
+                120.0,
+                0.6,
+                50.0,
+                0.2,
+                0.2,
+                260.0,
+                0.0,
+            ),
+            (
+                "Short Stab",
+                3.0,
+                280.0,
+                0.65,
+                4.5,
+                90.0,
+                0.7,
+                40.0,
+                0.3,
+                0.0,
+                180.0,
+                0.0,
+            ),
+            (
+                "Rave Bounce",
+                2.0,
+                350.0,
+                0.78,
+                4.0,
+                160.0,
+                0.75,
+                45.0,
+                0.45,
+                0.3,
+                700.0,
+                0.6,
+            ),
+            (
+                "Gloom Crawl",
+                2.0,
+                110.0,
+                0.88,
+                5.5,
+                520.0,
+                0.85,
+                110.0,
+                0.55,
+                0.3,
+                1600.0,
+                0.9,
+            ),
+            (
+                "Hollow Square",
+                3.0,
+                500.0,
+                0.5,
+                2.0,
+                260.0,
+                0.5,
+                70.0,
+                0.15,
+                0.0,
+                1300.0,
+                0.9,
+            ),
+            (
+                "Distorted 303ish",
+                2.0,
+                230.0,
+                0.84,
+                4.8,
+                230.0,
+                0.85,
+                60.0,
+                0.95,
+                0.0,
+                1200.0,
+                0.9,
+            ),
+            (
+                "Deep Roll",
+                3.0,
+                90.0,
+                0.6,
+                3.0,
+                380.0,
+                0.5,
+                100.0,
+                0.4,
+                0.6,
+                1500.0,
+                0.9,
+            ),
+            (
+                "Chirp", 2.0, 600.0, 0.92, 3.0, 70.0, 0.9, 35.0, 0.3, 0.0, 400.0, 0.4,
+            ),
+            (
+                "Mellow Walk",
+                3.0,
+                700.0,
+                0.3,
+                1.2,
+                400.0,
+                0.3,
+                90.0,
+                0.05,
+                0.4,
+                1200.0,
+                0.8,
+            ),
+            (
+                "Wet Snake",
+                2.0,
+                160.0,
+                0.93,
+                6.0,
+                330.0,
+                0.8,
+                140.0,
+                0.4,
+                0.0,
+                1400.0,
+                0.9,
+            ),
+            (
+                "Tight Electro",
+                3.0,
+                260.0,
+                0.7,
+                4.0,
+                110.0,
+                0.6,
+                40.0,
+                0.5,
+                0.5,
+                300.0,
+                0.3,
+            ),
+            (
+                "Basement Acid",
+                2.0,
+                140.0,
+                0.8,
+                5.2,
+                280.0,
+                1.0,
+                65.0,
+                0.8,
+                0.2,
+                1100.0,
+                0.9,
+            ),
+        ];
+        lines
+            .iter()
+            .map(
+                |&(
+                    name,
+                    wave,
+                    cutoff,
+                    reso,
+                    env,
+                    mdecay,
+                    accent,
+                    slide,
+                    drive,
+                    sub,
+                    decay,
+                    sus,
+                )| {
+                    SynthPatch {
+                        name: name.to_owned(),
+                        ..SynthPatch::default()
+                    }
+                    .with(P::Engine, 3.0)
+                    .with(P::Osc1Wave, wave)
+                    .with(P::Osc1Level, 0.9)
+                    .with(P::Osc2Level, 0.0)
+                    .with(P::SubLevel, sub)
+                    .with(P::Cutoff, cutoff)
+                    .with(P::Resonance, reso)
+                    .with(P::FilterEnv, env)
+                    .with(P::KeyTrack, 0.2)
+                    .with(P::Drive, drive)
+                    .with(P::AmpAttack, 1.0)
+                    .with(P::AmpDecay, decay)
+                    .with(P::AmpSustain, sus)
+                    .with(P::AmpRelease, 30.0)
+                    .with(P::ModAttack, 0.0)
+                    .with(P::ModDecay, mdecay)
+                    .with(P::ModSustain, 0.0)
+                    .with(P::ModRelease, 60.0)
+                    .with(P::VelocitySens, 0.0)
+                    .with(P::Volume, 0.55)
+                    .with(P::BassAccent, accent)
+                    .with(P::BassSlide, slide)
+                },
+            )
+            .collect()
     }
 
     /// The FM factory presets (Prompt 24). All original.
@@ -1192,7 +1516,7 @@ mod tests {
         }
         assert_eq!(ModDest::from_key("cutoff"), Some(ModDest::Cutoff));
         // Prompt 24: twenty or more of each new engine.
-        for engine in [1, 2] {
+        for engine in [1, 2, 3] {
             assert!(f.iter().filter(|p| p.engine() == engine).count() >= 20);
         }
         let mut all: Vec<_> = f.iter().map(|p| p.name.as_str()).collect();

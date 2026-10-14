@@ -207,6 +207,13 @@ pub fn channel_rack(
                     add = Some(2);
                 }
                 if ui
+                    .button(tr("+ Drum synth"))
+                    .on_hover_text(tr("Add a drum synth: kick, snare, hats, clap, toms and percussion made from oscillators and noise, every sound editable"))
+                    .clicked()
+                {
+                    add = Some(6);
+                }
+                if ui
                     .button(tr("+ Gloom Synth"))
                     .on_hover_text(tr("Add a Gloom Synth channel"))
                     .clicked()
@@ -226,6 +233,20 @@ pub fn channel_rack(
                     .clicked()
                 {
                     add = Some(4);
+                }
+                if ui
+                    .button(tr("+ Bass"))
+                    .on_hover_text(tr("Add a mono bass-line synth: resonant filter, accent from velocity, slide from overlapping notes"))
+                    .clicked()
+                {
+                    add = Some(7);
+                }
+                if ui
+                    .button(tr("+ Player"))
+                    .on_hover_text(tr("Add a preset player: plays a sound pack's multi-sampled presets with eight macro knobs"))
+                    .clicked()
+                {
+                    add = Some(8);
                 }
                 if ui
                     .button(tr("+ Layer"))
@@ -249,14 +270,16 @@ pub fn channel_rack(
             1 => project.add_synth_channel(&format!("Synth {n}"), gt_core::SynthPatch::default()),
             2 => project.add_drum_channel(&format!("Drums {n}")),
             5 => project.add_layer_channel(&format!("Layer {n}")),
-            3 | 4 => {
+            6 => project.add_drum_synth_channel(&format!("Drum synth {n}")),
+            8 => project.add_player_channel(&format!("Player {n}"), gt_core::Player::default()),
+            3 | 4 | 7 => {
                 // The engine's first factory preset.
-                let engine = kind - 2;
+                let engine = if kind == 7 { 3 } else { kind - 2 };
                 let patch = gt_core::SynthPatch::factory()
                     .into_iter()
                     .find(|p| p.engine() == engine)
                     .unwrap_or_default();
-                let name = if engine == 1 { "FM" } else { "Wavetable" };
+                let name = ["Synth", "FM", "Wavetable", "Bass"][engine as usize];
                 project.add_synth_channel(&format!("{name} {n}"), patch)
             }
             _ => project.add_channel(&format!("Sampler {n}"), None),

@@ -214,6 +214,11 @@ pub fn default_folder() -> std::path::PathBuf {
 /// `%APPDATA%\GloomTunes Studio` on Windows, `~/Library/Application Support/GloomTunes Studio`
 /// on macOS, `$XDG_DATA_HOME/gloomtunes-studio` (default `~/.local/share/gloomtunes-studio`)
 /// elsewhere.
+/// Where sound packs for the preset player are kept (Prompt 28).
+pub fn packs_folder() -> std::path::PathBuf {
+    data_folder().join("packs")
+}
+
 pub fn data_folder() -> std::path::PathBuf {
     use std::path::PathBuf;
     if cfg!(windows) {

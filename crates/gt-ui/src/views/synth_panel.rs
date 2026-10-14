@@ -91,7 +91,7 @@ pub fn synth_panel(
         let engine = patch.engine();
         egui::ComboBox::from_id_salt("synth_engine")
             .width(80.0)
-            .selected_text(ENGINES[usize::from(engine.min(2))])
+            .selected_text(ENGINES[usize::from(engine).min(ENGINES.len() - 1)])
             .show_ui(ui, |ui| {
                 for (i, name) in ENGINES.iter().enumerate() {
                     if ui
@@ -105,7 +105,8 @@ pub fn synth_panel(
             })
             .response
             .on_hover_text(tr(
-                "Sound engine: Gloom (subtractive), FM (six operators) or Wavetable",
+                "Sound engine: Gloom (subtractive), FM (six operators), Wavetable or Bass \
+                 (mono bass line: accent from velocity, slide from overlapping or slide notes)",
             ));
         if ui
             .button(tr("Save preset"))
@@ -175,6 +176,17 @@ pub fn synth_panel(
                                 filter_curve(ui, theme, patch, view.sample_rate);
                             });
                         });
+                        if engine == 3 {
+                            section(ui, theme, right, "BASS LINE", |ui| {
+                                changed |= knob_rows(
+                                    ui,
+                                    theme,
+                                    ch,
+                                    patch,
+                                    &[&[P::BassAccent, P::BassThreshold, P::BassSlide]],
+                                );
+                            });
+                        }
                     }
                 }
                 section(ui, theme, right, "ENVELOPES", |ui| {
@@ -613,7 +625,7 @@ fn mod_matrix(
 fn dest_used(d: ModDest, engine: u8) -> bool {
     use ModDest as D;
     match d {
-        D::Osc1Pw | D::Osc2Pw => engine == 0,
+        D::Osc1Pw | D::Osc2Pw => engine == 0 || engine == 3,
         D::FmIndex | D::FmFeedback => engine == 1,
         D::Wt1Pos | D::Wt2Pos | D::Wt1Warp | D::Wt2Warp => engine == 2,
         D::Osc1Pitch

@@ -122,6 +122,9 @@ pub fn channel_settings(
             Instrument::Layer(_) => {
                 ui.label(dim(tr("A layer plays its children's own key settings")));
             }
+            Instrument::Player(_) => {
+                ui.label(dim(tr("The pack's preset sets the keys")));
+            }
             _ => out.changed |= key_limits(ui, &mut ch.keys),
         }
     });
