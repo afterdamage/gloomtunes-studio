@@ -25,19 +25,23 @@
 //!   velocity]` array when any is set. Older builds could not read such a note, so the version
 //!   is bumped. The upgrade from 4 changes nothing: version 4 notes are all arrays, which read
 //!   back with neutral values.
+//! - 6 (Prompt 27): patterns of any length (1 to 512 steps) and a colour, layer channels,
+//!   channel swing, choke and filter groups and key settings. Older builds would reset odd
+//!   lengths to 16 steps and could not read a layer, so the version is bumped. The upgrade
+//!   from 5 changes nothing: every new field is optional.
 
 use serde_json::Value;
 
 use crate::file::{FileError, FORMAT};
 
 /// The schema version this build writes.
-pub const CURRENT: u32 = 5;
+pub const CURRENT: u32 = 6;
 
 /// One upgrade: rewrites a tree of version `from` into version `from + 1`.
 pub type Migration = fn(&mut Value) -> Result<(), String>;
 
 /// Upgrades by version: entry `i` turns version `i + 1` into `i + 2`.
-pub const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5];
+pub const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5, v5_to_v6];
 
 /// Version 2 added plugins; a version 1 tree is already a valid version 2 tree.
 fn v1_to_v2(_v: &mut Value) -> Result<(), String> {
@@ -59,6 +63,12 @@ fn v3_to_v4(_v: &mut Value) -> Result<(), String> {
 /// Version 5 added per-note values, all optional; a version 4 tree is already a valid
 /// version 5 tree whose notes are neutral.
 fn v4_to_v5(_v: &mut Value) -> Result<(), String> {
+    Ok(())
+}
+
+/// Version 6 added rack settings and layer channels, all optional; a version 5 tree is
+/// already a valid version 6 tree.
+fn v5_to_v6(_v: &mut Value) -> Result<(), String> {
     Ok(())
 }
 

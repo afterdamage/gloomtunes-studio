@@ -80,6 +80,12 @@ pub enum EventKind {
         /// Its value.
         value: f32,
     },
+    /// Another channel of the slot's choke group started a note: its sound is cut here
+    /// (Prompt 27).
+    Choke {
+        /// Channel slot.
+        slot: u16,
+    },
     /// A metronome beat. `downbeat` is the first beat of a bar.
     Beat {
         /// True on beat 1.
@@ -92,7 +98,7 @@ impl EventKind {
     fn rank(&self) -> u8 {
         match self {
             Self::Wrap => 0,
-            Self::NoteOff { .. } | Self::Control { .. } => 1,
+            Self::NoteOff { .. } | Self::Control { .. } | Self::Choke { .. } => 1,
             Self::NoteOn { .. } | Self::Chase { .. } => 2,
             Self::Beat { .. } => 3,
         }
@@ -101,9 +107,10 @@ impl EventKind {
     /// The channel slot a note event targets.
     pub fn slot(&self) -> Option<u16> {
         match *self {
-            Self::NoteOff { slot, .. } | Self::NoteOn { slot, .. } | Self::Chase { slot, .. } => {
-                Some(slot)
-            }
+            Self::NoteOff { slot, .. }
+            | Self::NoteOn { slot, .. }
+            | Self::Chase { slot, .. }
+            | Self::Choke { slot } => Some(slot),
             _ => None,
         }
     }
@@ -198,6 +205,25 @@ impl EventBuf {
     /// Adds an event in order (live input joining the scheduled events of a quantum).
     pub(crate) fn insert(&mut self, e: ScheduledEvent) {
         self.push(e);
+        self.sort();
+    }
+
+    /// Copies the events into `out` and empties the list of them (the play segments stay),
+    /// for a pass that rewrites them with [`Self::push_unsorted`] and [`Self::finish`].
+    pub(crate) fn take_events(&mut self, out: &mut [ScheduledEvent]) -> usize {
+        let n = self.len.min(out.len());
+        out[..n].copy_from_slice(&self.events[..n]);
+        self.len = 0;
+        n
+    }
+
+    /// Adds an event without sorting (call [`Self::finish`] after the last).
+    pub(crate) fn push_unsorted(&mut self, e: ScheduledEvent) {
+        self.push(e);
+    }
+
+    /// Puts the events back in order after [`Self::push_unsorted`].
+    pub(crate) fn finish(&mut self) {
         self.sort();
     }
 

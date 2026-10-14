@@ -878,6 +878,7 @@ impl GloomApp {
                 slot: i as u16,
                 key: ROOT_KEY,
             }),
+            RackAction::PatternColor => self.pending_edit = Some("Pattern colour"),
         }
     }
 
@@ -2546,6 +2547,16 @@ impl eframe::App for GloomApp {
             .unwrap_or_default();
         let mut sampler_out = gt_ui::views::SamplerPanelOut::default();
         let mut drum_out = gt_ui::views::DrumPadOut::default();
+        let mut swing_changed = false;
+        let rack_swing = self.project.swing;
+        let groups = gt_ui::views::rack_groups(&self.project);
+        let layerable: Vec<(gt_core::ChannelId, String)> = self
+            .project
+            .channels
+            .iter()
+            .filter(|c| c.layer().is_none())
+            .map(|c| (c.id, c.name.clone()))
+            .collect();
         let (sampler_changed, synth_actions) = if !show_instrument {
             (false, Vec::new())
         } else {
@@ -2559,24 +2570,21 @@ impl eframe::App for GloomApp {
                         return (false, Vec::new());
                     };
                     let channel = Some(ch.id);
-                    let bend = ui
-                        .horizontal(|ui| {
-                            ui.label(egui::RichText::new(tr("Pitch bend")).color(theme.text_dim));
-                            ui.add(
-                                egui::DragValue::new(&mut ch.bend_range)
-                                    .range(0.0..=gt_core::Channel::MAX_BEND)
-                                    .speed(0.1)
-                                    .fixed_decimals(0)
-                                    .prefix("±")
-                                    .suffix(tr(" st")),
-                            )
+                    let tab = &mut self.rack.settings_tab;
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(tab, false, tr("Instrument"));
+                        ui.selectable_value(tab, true, tr("Channel settings"))
                             .on_hover_text(tr(
-                                "How far the pitch wheel bends this instrument, in semitones \
-                                 (plugins set their own range)",
-                            ))
-                            .changed()
-                        })
-                        .inner;
+                                "Pitch bend, swing, choke group, rack group, root key, key \
+                                 range, mono and voices",
+                            ));
+                    });
+                    if *tab {
+                        let out =
+                            gt_ui::views::channel_settings(ui, &theme, ch, rack_swing, &groups);
+                        swing_changed = out.swing;
+                        return (out.changed || out.swing, Vec::new());
+                    }
                     let (changed, actions) = match &mut ch.instrument {
                         Instrument::Sampler(s) => {
                             let loaded = s.sample.as_ref().and_then(|x| self.library.get(x));
@@ -2591,6 +2599,17 @@ impl eframe::App for GloomApp {
                             let out = sampler_panel(ui, &theme, &mut ch.name, s, view);
                             sampler_out = out;
                             (out.changed, Vec::new())
+                        }
+                        Instrument::Layer(l) => {
+                            let own = ch.id;
+                            let others: Vec<_> = layerable
+                                .iter()
+                                .filter(|(c, _)| *c != own)
+                                .cloned()
+                                .collect();
+                            let changed =
+                                gt_ui::views::layer_panel(ui, &theme, &mut ch.name, l, &others);
+                            (changed, Vec::new())
                         }
                         Instrument::Drums(kit) => {
                             drum_out = gt_ui::views::drum_pads(
@@ -2627,13 +2646,16 @@ impl eframe::App for GloomApp {
                             (false, Vec::new())
                         }
                     };
-                    (changed || bend, actions)
+                    (changed, actions)
                 })
                 .inner
         };
         if sampler_changed {
             self.push_all_params();
             self.pending_edit = Some("Instrument settings");
+        }
+        if swing_changed {
+            self.push_song();
         }
         if sampler_out.reload {
             self.push_sample(self.rack.selected);

@@ -881,6 +881,21 @@ impl GloomSynth {
         }
     }
 
+    /// Cuts every voice with a 5 ms fade (choke groups).
+    pub fn choke_all(&mut self) {
+        let fast = AdsrParams::new(self.sr, 0.0, 0.0, 1.0, 5.0);
+        // A 5 ms release is about 0.004 of the default release scale of the FM envelopes.
+        for v in &mut self.voices {
+            if v.active {
+                v.held = false;
+                v.sustained = false;
+                v.amp.release_with(fast);
+                v.menv.release_with(fast);
+                v.fm.release(0.01);
+            }
+        }
+    }
+
     /// Silences every voice at once.
     pub fn kill_all(&mut self) {
         for v in &mut self.voices {

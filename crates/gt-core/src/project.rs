@@ -238,6 +238,15 @@ pub struct Channel {
     pub insert: usize,
     /// Pitch bend range in semitones, each way (Prompt 16).
     pub bend_range: f32,
+    /// Swing of this channel's steps, 0 to 1; `None` follows the rack's swing (Prompt 27).
+    pub swing: Option<f32>,
+    /// Choke group, 1 to [`Channel::CHOKE_GROUPS`]: a note on this channel cuts the other
+    /// channels of the group. 0 is none.
+    pub choke: u8,
+    /// Rack filter group ("" is none): the rack can show one group at a time.
+    pub group: String,
+    /// Root key, key range, mono and voice limit of non-sampler instruments.
+    pub keys: crate::rack::KeyLimits,
 }
 
 /// The sound source of a channel.
@@ -251,6 +260,8 @@ pub enum Instrument {
     Plugin(Box<PluginRef>),
     /// Drum pads (Prompt 23).
     Drums(Box<crate::pads::DrumKit>),
+    /// Plays other channels (Prompt 27); makes no sound of its own.
+    Layer(crate::rack::LayerSettings),
 }
 
 impl Channel {
@@ -346,8 +357,29 @@ impl Channel {
             Instrument::Sampler(s) => Box::new(s.sources_mut()),
             Instrument::Drums(k) => Box::new(k.sources_mut()),
             Instrument::Synth(p) => Box::new(p.tables.iter_mut().flatten()),
-            Instrument::Plugin(_) => Box::new(std::iter::empty()),
+            Instrument::Plugin(_) | Instrument::Layer(_) => Box::new(std::iter::empty()),
         }
+    }
+
+    /// The layer settings, if this is a layer channel.
+    pub fn layer(&self) -> Option<&crate::rack::LayerSettings> {
+        match &self.instrument {
+            Instrument::Layer(l) => Some(l),
+            _ => None,
+        }
+    }
+
+    /// Mutable layer settings, if this is a layer channel.
+    pub fn layer_mut(&mut self) -> Option<&mut crate::rack::LayerSettings> {
+        match &mut self.instrument {
+            Instrument::Layer(l) => Some(l),
+            _ => None,
+        }
+    }
+
+    /// The swing this channel plays with, given the rack's.
+    pub fn swing_or(&self, rack: f32) -> f32 {
+        self.swing.unwrap_or(rack).clamp(0.0, 1.0)
     }
 }
 
@@ -361,6 +393,8 @@ impl Channel {
     pub const DEFAULT_BEND: f32 = 2.0;
     /// Largest pitch bend range.
     pub const MAX_BEND: f32 = 48.0;
+    /// Number of choke groups.
+    pub const CHOKE_GROUPS: u8 = 16;
 }
 
 /// A note in a pattern. The step sequencer writes notes of one step at [`ROOT_KEY`]; the piano
@@ -455,8 +489,11 @@ pub struct Pattern {
     pub id: PatternId,
     /// Display name.
     pub name: String,
-    /// Length in steps: 16 or 32.
+    /// Length of the step grid, 1 to [`Pattern::MAX_STEPS`].
     pub steps: u16,
+    /// Colour in the pattern list and the playlist, 0 to [`Pattern::COLORS`] - 1 (0 is the
+    /// track's colour; see [`Pattern::rgb`]).
+    pub color: u8,
     /// Notes per channel, each list sorted by start.
     pub notes: BTreeMap<ChannelId, Vec<Note>>,
     /// Recorded controller data (bend, sustain, mod wheel, aftertouch) per channel, each list
@@ -469,12 +506,17 @@ pub struct Pattern {
 }
 
 impl Pattern {
-    /// Allowed pattern lengths in steps.
-    pub const STEP_COUNTS: [u16; 2] = [16, 32];
+    /// Lengths offered in the length menu, in steps (any length from 1 to
+    /// [`Self::MAX_STEPS`] can be typed).
+    pub const STEP_COUNTS: [u16; 6] = [8, 12, 16, 32, 64, 128];
+    /// Longest step grid.
+    pub const MAX_STEPS: u16 = 512;
+    /// Number of pattern colours.
+    pub const COLORS: u8 = 16;
 
-    /// Length in ticks: the step-grid length, extended to whole bars (4/4) so that every note
-    /// fits. Notes drawn past the grid in the piano roll make the pattern longer, as in other
-    /// pattern-based DAWs.
+    /// Length in ticks: the step grid, or when notes run past it, whole bars (4/4) that fit
+    /// every note. Notes drawn past the grid in the piano roll make the pattern longer, as in
+    /// other pattern-based DAWs; a step note shifted late does not.
     pub fn length_ticks(&self) -> i64 {
         const BAR: i64 = 16 * STEP_TICKS;
         let grid = i64::from(self.steps) * STEP_TICKS;
@@ -485,7 +527,11 @@ impl Pattern {
             .map(|n| n.start + n.length.max(1))
             .max()
             .unwrap_or(0);
-        grid.max((end + BAR - 1).div_euclid(BAR) * BAR)
+        if end <= grid + crate::rack::MAX_SHIFT {
+            grid
+        } else {
+            (end + BAR - 1).div_euclid(BAR) * BAR
+        }
     }
 
     /// The controller data of `channel`, sorted by tick.
@@ -516,17 +562,14 @@ impl Pattern {
         self.notes
             .get(&channel)?
             .iter()
-            .find(|n| n.start == at && n.key == ROOT_KEY)
+            .find(|n| crate::rack::is_step(n, at))
     }
 
     /// Turns a step on (with [`DEFAULT_VELOCITY`]) or off. Returns the new state.
     pub fn toggle_step(&mut self, channel: ChannelId, step: u16) -> bool {
         let at = i64::from(step) * STEP_TICKS;
         let notes = self.notes.entry(channel).or_default();
-        if let Some(i) = notes
-            .iter()
-            .position(|n| n.start == at && n.key == ROOT_KEY)
-        {
+        if let Some(i) = notes.iter().position(|n| crate::rack::is_step(n, at)) {
             notes.remove(i);
             false
         } else {
@@ -542,7 +585,7 @@ impl Pattern {
         if let Some(n) = self
             .notes
             .get_mut(&channel)
-            .and_then(|v| v.iter_mut().find(|n| n.start == at && n.key == ROOT_KEY))
+            .and_then(|v| v.iter_mut().find(|n| crate::rack::is_step(n, at)))
         {
             n.velocity = velocity.clamp(0.0, 1.0);
         }
@@ -976,6 +1019,25 @@ impl Project {
                 Instrument::Synth(p) => p.sanitize(),
                 Instrument::Plugin(p) => p.sanitize(),
                 Instrument::Drums(k) => k.sanitize(INSERTS),
+                Instrument::Layer(_) => {}
+            }
+            c.swing = c.swing.filter(|s| s.is_finite()).map(|s| s.clamp(0.0, 1.0));
+            c.choke = c.choke.min(Channel::CHOKE_GROUPS);
+            c.keys.sanitize();
+        }
+        // Layers play existing, non-layer channels other than themselves, each once.
+        let plain: std::collections::BTreeSet<ChannelId> = self
+            .channels
+            .iter()
+            .filter(|c| c.layer().is_none())
+            .map(|c| c.id)
+            .collect();
+        for c in &mut self.channels {
+            if let Instrument::Layer(l) = &mut c.instrument {
+                let mut seen = std::collections::BTreeSet::new();
+                l.children.retain(|k| plain.contains(k) && seen.insert(*k));
+                l.children
+                    .truncate(crate::rack::LayerSettings::MAX_CHILDREN);
             }
         }
         // Patterns: unique ids, valid lengths, notes of existing channels only, sorted.
@@ -984,9 +1046,8 @@ impl Project {
         let channels: std::collections::BTreeSet<ChannelId> =
             self.channels.iter().map(|c| c.id).collect();
         for p in &mut self.patterns {
-            if !Pattern::STEP_COUNTS.contains(&p.steps) {
-                p.steps = 16;
-            }
+            p.steps = p.steps.clamp(1, Pattern::MAX_STEPS);
+            p.color = p.color.min(Pattern::COLORS - 1);
             p.notes
                 .retain(|ch, v| channels.contains(ch) && !v.is_empty());
             for v in p.notes.values_mut() {
@@ -1055,6 +1116,15 @@ impl Project {
     /// Adds an empty drum pad channel at the bottom of the rack. `None` when the rack is full.
     pub fn add_drum_channel(&mut self, name: &str) -> Option<ChannelId> {
         self.add_instrument(name, Instrument::Drums(Box::default()))
+    }
+
+    /// Adds a layer channel (no children yet) at the bottom of the rack. `None` when the rack
+    /// is full.
+    pub fn add_layer_channel(&mut self, name: &str) -> Option<ChannelId> {
+        self.add_instrument(
+            name,
+            Instrument::Layer(crate::rack::LayerSettings::default()),
+        )
     }
 
     /// Adds a channel playing an instrument plugin at the bottom of the rack. `None` when the
@@ -1175,6 +1245,10 @@ impl Project {
             instrument,
             insert,
             bend_range: Channel::DEFAULT_BEND,
+            swing: None,
+            choke: 0,
+            group: String::new(),
+            keys: crate::rack::KeyLimits::default(),
         });
         Some(id)
     }
@@ -1184,6 +1258,11 @@ impl Project {
         self.channels.retain(|c| c.id != id);
         self.modulators.retain(|m| m.target.channel() != Some(id));
         self.midi_routes.retain(|r| r.target != id);
+        for c in &mut self.channels {
+            if let Some(l) = c.layer_mut() {
+                l.children.retain(|&k| k != id);
+            }
+        }
         for p in &mut self.patterns {
             p.notes.remove(&id);
             p.controls.remove(&id);
@@ -1213,11 +1292,91 @@ impl Project {
             id,
             name,
             steps: 16,
+            color: 0,
             notes: BTreeMap::new(),
             controls: BTreeMap::new(),
             automation: Vec::new(),
         });
         id
+    }
+
+    /// Splits pattern `id` into one pattern per channel with notes, named "<pattern> -
+    /// <channel>" and placed after it. Each playlist clip of the pattern is replaced by one
+    /// clip per new pattern at the same place, on the clip's track and the tracks below it
+    /// (added at the bottom when the playlist runs out). Returns the new patterns, in rack
+    /// order; none when the pattern has notes of fewer than two channels.
+    pub fn split_pattern_by_channel(&mut self, id: PatternId) -> Vec<PatternId> {
+        let Some(i) = self.patterns.iter().position(|p| p.id == id) else {
+            return Vec::new();
+        };
+        let src = self.patterns[i].clone();
+        let used: Vec<&Channel> = self
+            .channels
+            .iter()
+            .filter(|c| {
+                !src.channel_notes(c.id).is_empty() || !src.channel_controls(c.id).is_empty()
+            })
+            .collect();
+        if used.len() < 2 {
+            return Vec::new();
+        }
+        let names: Vec<(ChannelId, String)> = used.iter().map(|c| (c.id, c.name.clone())).collect();
+        let mut out = Vec::new();
+        for (k, (ch, cname)) in names.iter().enumerate() {
+            let new_id = PatternId(self.next_id());
+            let name = self.unique_pattern_name(&format!("{} - {cname}", src.name));
+            let mut p = Pattern {
+                id: new_id,
+                name,
+                notes: BTreeMap::new(),
+                controls: BTreeMap::new(),
+                automation: Vec::new(),
+                ..src.clone()
+            };
+            if let Some(v) = src.notes.get(ch) {
+                p.notes.insert(*ch, v.clone());
+            }
+            if let Some(v) = src.controls.get(ch) {
+                p.controls.insert(*ch, v.clone());
+            }
+            // Pattern automation stays with the first part.
+            if k == 0 {
+                p.automation = src.automation.clone();
+            }
+            self.patterns.insert(i + 1 + k, p);
+            out.push(new_id);
+        }
+        // The playlist: each clip of the pattern becomes one clip per part.
+        let clips: Vec<crate::Clip> = self
+            .playlist
+            .clips
+            .iter()
+            .filter(|c| c.kind == crate::ClipKind::Pattern(id))
+            .cloned()
+            .collect();
+        for clip in clips {
+            let Some(row) = self.playlist.tracks.iter().position(|t| t.id == clip.track) else {
+                continue;
+            };
+            self.playlist.clips.retain(|c| c.id != clip.id);
+            for (k, &pid) in out.iter().enumerate() {
+                while self.playlist.tracks.len() <= row + k {
+                    self.playlist.add_track();
+                }
+                let track = self.playlist.tracks[row + k].id;
+                let cid = self.playlist.add_clip(
+                    track,
+                    clip.start,
+                    clip.length,
+                    crate::ClipKind::Pattern(pid),
+                );
+                if let Some(c) = self.playlist.clips.iter_mut().find(|c| c.id == cid) {
+                    c.offset = clip.offset;
+                    c.muted = clip.muted;
+                }
+            }
+        }
+        out
     }
 
     /// Copies a pattern (notes, length) under a new name, inserted after the original.

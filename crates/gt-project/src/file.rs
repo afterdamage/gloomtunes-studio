@@ -2,7 +2,7 @@
 //! audio files the project uses.
 //!
 //! ```text
-//! project.json          { "format": "gloomtunes-project", "schema_version": 5, "project": {...} }
+//! project.json          { "format": "gloomtunes-project", "schema_version": 6, "project": {...} }
 //! samples/<hash>-<name> embedded copies of the audio files, byte for byte (optional)
 //! plugins/<hash>.bin    the saved state of each third-party plugin, as the plugin wrote it
 //! ```
@@ -481,7 +481,28 @@ struct ChannelDto {
     insert: usize,
     #[serde(default = "default_bend")]
     bend_range: f32,
+    /// Own swing (Prompt 27); absent: the rack's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    swing: Option<f32>,
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    choke: u8,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    group: String,
+    /// Key settings of non-sampler instruments; absent when default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keys: Option<KeysDto>,
     instrument: InstrumentDto,
+}
+
+#[derive(Serialize, Deserialize)]
+struct KeysDto {
+    root: u8,
+    lo: u8,
+    hi: u8,
+    #[serde(default)]
+    mono: bool,
+    #[serde(default)]
+    voices: u8,
 }
 
 fn default_bend() -> f32 {
@@ -518,6 +539,14 @@ enum InstrumentDto {
     Plugin { plugin: PluginDto },
     /// Drum pads (Prompt 23).
     Drums { banks: Vec<Vec<PadDto>> },
+    /// A layer channel (Prompt 27): channel ids it plays.
+    Layer {
+        children: Vec<u32>,
+        #[serde(default)]
+        mode: String,
+        #[serde(default)]
+        split: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -711,6 +740,9 @@ struct PatternDto {
     id: u32,
     name: String,
     steps: u16,
+    /// Colour (Prompt 27); absent: the default.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    color: u8,
     #[serde(default)]
     notes: Vec<ChannelNotesDto>,
     /// Recorded controller data (Prompt 16); absent in older files.
@@ -1175,6 +1207,16 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
             solo: c.solo,
             insert: c.insert,
             bend_range: c.bend_range,
+            swing: c.swing,
+            choke: c.choke,
+            group: c.group.clone(),
+            keys: (c.keys != gt_core::KeyLimits::default()).then_some(KeysDto {
+                root: c.keys.root,
+                lo: c.keys.lo,
+                hi: c.keys.hi,
+                mono: c.keys.mono,
+                voices: c.keys.voices,
+            }),
             instrument: match &c.instrument {
                 Instrument::Sampler(s) => InstrumentDto::Sampler {
                     sample: s.sample.as_ref().map(|s| sample_dto(s, dir, embedded)),
@@ -1219,6 +1261,16 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                         })
                         .collect(),
                 },
+                Instrument::Layer(l) => InstrumentDto::Layer {
+                    children: l.children.iter().map(|c| c.0).collect(),
+                    mode: match l.mode {
+                        gt_core::LayerMode::All => "all",
+                        gt_core::LayerMode::Random => "random",
+                        gt_core::LayerMode::RoundRobin => "round-robin",
+                    }
+                    .to_owned(),
+                    split: l.split,
+                },
                 Instrument::Synth(patch) => InstrumentDto::Synth {
                     preset_name: patch.name.clone(),
                     params: SynthParam::ALL
@@ -1255,6 +1307,7 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
             id: pat.id.0,
             name: pat.name.clone(),
             steps: pat.steps,
+            color: pat.color,
             notes: pat
                 .notes
                 .iter()
@@ -1735,6 +1788,19 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                     .collect();
                 Instrument::Drums(Box::new(DrumKit { banks }))
             }
+            InstrumentDto::Layer {
+                children,
+                mode,
+                split,
+            } => Instrument::Layer(gt_core::LayerSettings {
+                children: children.into_iter().map(ChannelId).collect(),
+                mode: match mode.as_str() {
+                    "random" => gt_core::LayerMode::Random,
+                    "round-robin" => gt_core::LayerMode::RoundRobin,
+                    _ => gt_core::LayerMode::All,
+                },
+                split,
+            }),
         };
         p.channels.push(Channel {
             id: ChannelId(c.id),
@@ -1750,6 +1816,18 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
             } else {
                 Channel::DEFAULT_BEND
             },
+            swing: c.swing,
+            choke: c.choke,
+            group: c.group,
+            keys: c
+                .keys
+                .map_or_else(gt_core::KeyLimits::default, |k| gt_core::KeyLimits {
+                    root: k.root,
+                    lo: k.lo,
+                    hi: k.hi,
+                    mono: k.mono,
+                    voices: k.voices,
+                }),
         });
     }
     for pat in d.patterns {
@@ -1794,6 +1872,7 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
             id: PatternId(pat.id),
             name: pat.name,
             steps: pat.steps,
+            color: pat.color,
             notes,
             controls,
             automation,

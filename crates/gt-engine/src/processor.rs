@@ -118,6 +118,8 @@ pub struct AudioProcessor {
     voice_age: u64,
     /// Channel slot that feeds the oscilloscope.
     scope_slot: Option<usize>,
+    /// Layers, key settings and choke groups between scheduling and rendering.
+    router: crate::route::NoteRouter,
     /// Mixer strips, effects and routing.
     mixer: Box<MixerEngine>,
     /// Hosted plugins (instruments and effects).
@@ -215,6 +217,7 @@ impl AudioProcessor {
             preview,
             voice_age: 0,
             scope_slot: None,
+            router: crate::route::NoteRouter::new(),
             mixer: Box::new(MixerEngine::new(sr)),
             plugins: Box::new(PluginTable::new()),
             click: Click::new(sr),
@@ -337,6 +340,7 @@ impl AudioProcessor {
             &mut self.scheduled,
         );
         self.apply_live();
+        self.router.route(&mut self.scheduled, &self.channels);
         // Recorded controllers, at once for built-in instruments (within a quantum).
         for i in 0..self.scheduled.as_slice().len() {
             if let EventKind::Control { slot, kind, value } = self.scheduled.as_slice()[i].kind {
@@ -554,6 +558,9 @@ impl AudioProcessor {
                     self.plugins.note_off(index, e.offset, key);
                 }
                 EventKind::Wrap => self.plugins.release_all(index, e.offset),
+                EventKind::Choke { slot: s } if usize::from(s) == slot => {
+                    self.plugins.release_all(index, e.offset);
+                }
                 _ => {}
             }
         }
@@ -609,6 +616,34 @@ impl AudioProcessor {
         let Some(ch) = self.channels.get_mut(slot) else {
             return;
         };
+        let p = *ch.params();
+        if p.kind == crate::song::InstrumentKind::Layer {
+            // Every child that answers the velocity (layers of layers never exist).
+            let n = usize::from(p.layer.count);
+            for i in gt_core::rack::layer_candidates(n, p.layer.split, velocity) {
+                self.slot_note_on(usize::from(p.layer.children[i]), key, velocity);
+            }
+            return;
+        }
+        let key = match p.keys.apply.then_some(p.keys.limits) {
+            Some(k) if key < k.lo || key > k.hi => return,
+            Some(k) => {
+                (i16::from(key) + i16::from(ROOT_KEY) - i16::from(k.root)).clamp(0, 127) as u8
+            }
+            None => key,
+        };
+        if p.choke > 0 {
+            for (other, c) in self.channels.iter_mut().enumerate() {
+                if other != slot && c.params().choke == p.choke {
+                    if c.is_plugin() {
+                        self.plugins.release_all(c.plugin, 0);
+                    } else {
+                        c.choke();
+                    }
+                }
+            }
+        }
+        let ch = &mut self.channels[slot];
         if ch.is_plugin() {
             self.plugins.note_on(ch.plugin, 0, key, velocity);
         } else {
@@ -622,6 +657,20 @@ impl AudioProcessor {
         let Some(ch) = self.channels.get_mut(slot) else {
             return;
         };
+        let p = *ch.params();
+        if p.kind == crate::song::InstrumentKind::Layer {
+            for &c in &p.layer.children[..usize::from(p.layer.count)] {
+                self.slot_note_off(usize::from(c), key);
+            }
+            return;
+        }
+        let key = match p.keys.apply.then_some(p.keys.limits) {
+            Some(k) => {
+                (i16::from(key) + i16::from(ROOT_KEY) - i16::from(k.root)).clamp(0, 127) as u8
+            }
+            None => key,
+        };
+        let ch = &mut self.channels[slot];
         if ch.is_plugin() {
             self.plugins.note_off(ch.plugin, 0, key);
         } else {
@@ -691,6 +740,7 @@ impl AudioProcessor {
                 }
                 EventKind::NoteOff { key, .. } => ch.note_off(key),
                 EventKind::Wrap => ch.release_all(),
+                EventKind::Choke { .. } => ch.choke(),
                 EventKind::Beat { .. } | EventKind::Control { .. } => {}
             }
         }
@@ -1048,7 +1098,10 @@ impl AudioProcessor {
             self.cancel_count_in();
         }
         match cmd {
-            EngineCommand::Play => self.transport.play(now),
+            EngineCommand::Play => {
+                self.router.reset();
+                self.transport.play(now);
+            }
             EngineCommand::Pause => self.transport.pause(now),
             EngineCommand::Stop => self.transport.stop(),
             EngineCommand::Locate(t) => {

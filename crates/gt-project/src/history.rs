@@ -220,10 +220,9 @@ fn diff(a: &Project, b: &Project) -> Vec<Edit> {
         && a.tempo == b.tempo
         && a.signatures == b.signatures
         && a.patterns.len() == b.patterns.len()
-        && a.patterns
-            .iter()
-            .zip(&b.patterns)
-            .all(|(x, y)| x.id == y.id && x.name == y.name && x.steps == y.steps);
+        && a.patterns.iter().zip(&b.patterns).all(|(x, y)| {
+            x.id == y.id && x.name == y.name && x.steps == y.steps && x.color == y.color
+        });
     if !same_shape {
         let mut before = a.clone();
         let mut after = b.clone();
