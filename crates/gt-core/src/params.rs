@@ -650,10 +650,13 @@ impl ParamId {
             .filter(|p| !p.sampler_only() || matches!(ch.instrument, Instrument::Sampler(_)))
             .map(|param| Self::Channel { channel, param })
             .collect();
-        if matches!(ch.instrument, Instrument::Synth(_)) {
+        if let Instrument::Synth(patch) = &ch.instrument {
+            // Only what the patch's engine uses (Prompt 24).
+            let engine = patch.engine();
             out.extend(
                 SynthParam::ALL
                     .iter()
+                    .filter(|p| p.used_by(engine))
                     .map(|&param| Self::Synth { channel, param }),
             );
             out.extend((0..MOD_SLOTS).map(|slot| Self::SynthMod { channel, slot }));

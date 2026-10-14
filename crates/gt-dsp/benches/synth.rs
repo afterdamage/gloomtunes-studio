@@ -6,7 +6,10 @@
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use gt_dsp::synth::{GloomSynth, SynthSettings};
+use std::sync::Arc;
+
+use gt_dsp::synth::wavetable::SynthTables;
+use gt_dsp::synth::{Engine, GloomSynth, SynthSettings};
 use gt_dsp::{blep_sample, ladder_g, ladder_k, Ladder, Phase, Wave};
 
 const SR: f32 = 48_000.0;
@@ -53,6 +56,43 @@ fn synth(c: &mut Criterion) {
     g.finish();
 }
 
+/// The FM and wavetable engines at 16 voices (Prompt 24).
+fn engines(c: &mut Criterion) {
+    let mut g = c.benchmark_group("synth_engines_1s");
+    g.sample_size(20);
+    let tables = Arc::new(SynthTables::factory());
+    for (name, engine, unison) in [
+        ("fm_16_voices", Engine::Fm, 1u8),
+        ("wavetable_16_voices", Engine::Wavetable, 1),
+        ("wavetable_16_voices_unison7", Engine::Wavetable, 7),
+    ] {
+        let mut settings = SynthSettings {
+            engine,
+            unison,
+            ..SynthSettings::default()
+        };
+        for op in &mut settings.fm.ops {
+            op.level = 0.5;
+        }
+        g.bench_function(name, |b| {
+            b.iter_batched_ref(
+                || {
+                    let mut s = GloomSynth::new(SR);
+                    s.set_tables(Some(Arc::clone(&tables)));
+                    s.set_settings(&settings);
+                    for k in 0..16u8 {
+                        s.note_on(40 + k * 2, 0.9, u64::from(k) + 1);
+                    }
+                    s
+                },
+                render_second,
+                criterion::BatchSize::LargeInput,
+            );
+        });
+    }
+    g.finish();
+}
+
 fn parts(c: &mut Criterion) {
     let mut g = c.benchmark_group("parts_1s");
     g.bench_function("polyblep_saw", |b| {
@@ -80,5 +120,5 @@ fn parts(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, synth, parts);
+criterion_group!(benches, synth, engines, parts);
 criterion_main!(benches);

@@ -37,6 +37,44 @@ use crate::ladder::{ladder_g, ladder_k, Ladder};
 use crate::lfo::{Lfo, LfoWave, Noise};
 use crate::note::{Glide, NoteExpr};
 
+mod common;
+pub mod fm;
+pub mod wavetable;
+
+use std::sync::Arc;
+
+use common::{key_hz, pan_unit, ModInputs};
+pub use common::{EnvSettings, Expression, LfoSettings, ModDest, ModSlot, ModSource};
+use fm::{FmSettings, FmVoice};
+use wavetable::{mip_for, SynthTables, Warp};
+
+/// Which sound generator the voices run; envelopes, LFOs, the matrix and the voice manager
+/// are shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Engine {
+    /// Two band-limited oscillators, sub and noise into the ladder filter.
+    #[default]
+    Subtractive,
+    /// Six operators in phase modulation ([`fm`]); no filter.
+    Fm,
+    /// Two wavetable oscillators ([`wavetable`]), sub and noise into the ladder filter.
+    Wavetable,
+}
+
+/// One wavetable oscillator's settings (its pitch and level are the matching
+/// [`OscSettings`]).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct WtOscSettings {
+    /// Factory table index (a user table, when loaded, replaces it).
+    pub table: u8,
+    /// Frame position, 0 to 1.
+    pub position: f32,
+    /// Phase warp.
+    pub warp: Warp,
+    /// Warp amount, 0 to 1.
+    pub warp_amount: f32,
+}
+
 /// Voices per synth.
 pub const SYNTH_VOICES: usize = 16;
 /// Most unison copies per oscillator.
@@ -67,124 +105,6 @@ pub struct OscSettings {
     pub level: f32,
     /// Pulse width of the square, 0.05 to 0.95.
     pub pulse_width: f32,
-}
-
-/// Envelope times in milliseconds and sustain level.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct EnvSettings {
-    /// Attack time.
-    pub attack_ms: f32,
-    /// Decay time.
-    pub decay_ms: f32,
-    /// Sustain level, 0 to 1.
-    pub sustain: f32,
-    /// Release time.
-    pub release_ms: f32,
-}
-
-impl EnvSettings {
-    fn params(&self, sr: f32) -> AdsrParams {
-        AdsrParams::new(
-            sr,
-            self.attack_ms,
-            self.decay_ms,
-            self.sustain,
-            self.release_ms,
-        )
-    }
-}
-
-/// LFO settings.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LfoSettings {
-    /// Waveform.
-    pub wave: LfoWave,
-    /// Rate in Hz.
-    pub rate_hz: f32,
-}
-
-/// Modulation sources.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ModSource {
-    /// Unused slot.
-    #[default]
-    Off,
-    /// LFO 1, -1 to 1.
-    Lfo1,
-    /// LFO 2, -1 to 1.
-    Lfo2,
-    /// Mod envelope, 0 to 1.
-    ModEnv,
-    /// Amp envelope, 0 to 1.
-    AmpEnv,
-    /// Note velocity, 0 to 1.
-    Velocity,
-    /// Key position around middle C (60), -1 to 1 over ±5 octaves (clamped above key 120).
-    Note,
-    /// A random value per note, -1 to 1.
-    Random,
-    /// The mod wheel (CC 1), 0 to 1.
-    ModWheel,
-    /// Aftertouch, 0 to 1: the channel's, or the key's own if it is larger.
-    Aftertouch,
-    /// The note's mod X, -1 to 1 (0 for a neutral note).
-    ModX,
-    /// The note's mod Y, -1 to 1.
-    ModY,
-}
-
-/// Modulation destinations. Amount 1.0 means the range given for each.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ModDest {
-    /// Unused slot.
-    #[default]
-    Off,
-    /// Both oscillators, ±12 semitones.
-    Pitch,
-    /// Oscillator 1, ±12 semitones.
-    Osc1Pitch,
-    /// Oscillator 2, ±12 semitones.
-    Osc2Pitch,
-    /// Oscillator 1 pulse width, ±0.45.
-    Osc1Pw,
-    /// Oscillator 2 pulse width, ±0.45.
-    Osc2Pw,
-    /// Oscillator 1 level, ±1.
-    Osc1Level,
-    /// Oscillator 2 level, ±1.
-    Osc2Level,
-    /// Noise level, ±1.
-    NoiseLevel,
-    /// Filter cutoff, ±6 octaves.
-    Cutoff,
-    /// Filter resonance, ±1.
-    Resonance,
-    /// Pan, ±1.
-    Pan,
-    /// Amplitude, ±100 %.
-    Amp,
-    /// LFO 1 rate, ±4 octaves.
-    Lfo1Rate,
-    /// LFO 2 rate, ±4 octaves.
-    Lfo2Rate,
-    /// Unison detune, ±100 cents.
-    UnisonDetune,
-}
-
-impl ModDest {
-    /// Number of destinations (including `Off`).
-    pub const COUNT: usize = 16;
-}
-
-/// One row of the modulation matrix.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct ModSlot {
-    /// Source.
-    pub source: ModSource,
-    /// Destination.
-    pub dest: ModDest,
-    /// Amount, -1 to 1.
-    pub amount: f32,
 }
 
 /// Every setting of the synth, in plain units. Cheap to copy.
@@ -226,6 +146,12 @@ pub struct SynthSettings {
     pub volume: f32,
     /// Modulation matrix.
     pub mods: [ModSlot; MOD_SLOTS],
+    /// Sound generator.
+    pub engine: Engine,
+    /// FM engine settings.
+    pub fm: FmSettings,
+    /// Wavetable oscillators.
+    pub wt: [WtOscSettings; 2],
 }
 
 impl Default for SynthSettings {
@@ -284,23 +210,11 @@ impl Default for SynthSettings {
             velocity_sensitivity: 0.6,
             volume: 0.5,
             mods: [ModSlot::default(); MOD_SLOTS],
+            engine: Engine::Subtractive,
+            fm: FmSettings::default(),
+            wt: [WtOscSettings::default(); 2],
         }
     }
-}
-
-/// Equal-power pan gains scaled so the centre is 1.0 on both sides.
-#[inline]
-fn pan_unit(pan: f32) -> (f32, f32) {
-    let theta = (pan.clamp(-1.0, 1.0) + 1.0) * core::f32::consts::FRAC_PI_4;
-    (
-        theta.cos() * core::f32::consts::SQRT_2,
-        theta.sin() * core::f32::consts::SQRT_2,
-    )
-}
-
-#[inline]
-fn key_hz(semitones: f32) -> f32 {
-    440.0 * ((semitones - 69.0) / 12.0).exp2()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -354,6 +268,12 @@ struct Voice {
     gain_r: f32,
     gain_l_step: f32,
     gain_r_step: f32,
+    /// FM operators.
+    fm: FmVoice,
+    /// Wavetable position, warp amount and mip level of each oscillator.
+    wt_pos: [f32; 2],
+    wt_warp: [f32; 2],
+    wt_mip: [usize; 2],
 }
 
 impl Voice {
@@ -401,6 +321,10 @@ impl Voice {
             gain_r: 0.0,
             gain_l_step: 0.0,
             gain_r_step: 0.0,
+            fm: FmVoice::default(),
+            wt_pos: [0.0; 2],
+            wt_warp: [0.0; 2],
+            wt_mip: [0; 2],
         }
     }
 
@@ -482,24 +406,19 @@ impl Voice {
             self.lfo[0].value(p.lfo[0].wave),
             self.lfo[1].value(p.lfo[1].wave),
         ];
-        let mut m = [0.0_f32; ModDest::COUNT];
-        for slot in &p.mods {
-            let s = match slot.source {
-                ModSource::Off => continue,
-                ModSource::Lfo1 => lfo_v[0],
-                ModSource::Lfo2 => lfo_v[1],
-                ModSource::ModEnv => self.menv.level(),
-                ModSource::AmpEnv => self.amp.level(),
-                ModSource::Velocity => self.velocity,
-                ModSource::Note => ((f32::from(self.key) - 60.0) / 60.0).clamp(-1.0, 1.0),
-                ModSource::Random => self.random,
-                ModSource::ModWheel => x.mod_wheel,
-                ModSource::Aftertouch => x.pressure.max(self.pressure),
-                ModSource::ModX => self.mod_x,
-                ModSource::ModY => self.mod_y,
-            };
-            m[slot.dest as usize] += slot.amount * s;
+        let m = ModInputs {
+            lfo: lfo_v,
+            mod_env: self.menv.level(),
+            amp_env: self.amp.level(),
+            velocity: self.velocity,
+            key: self.key,
+            random: self.random,
+            mod_wheel: x.mod_wheel,
+            pressure: x.pressure.max(self.pressure),
+            mod_x: self.mod_x,
+            mod_y: self.mod_y,
         }
+        .eval(&p.mods);
         let md = |d: ModDest| m[d as usize];
 
         for (j, lfo) in self.lfo.iter_mut().enumerate() {
@@ -572,6 +491,28 @@ impl Voice {
         self.sub_inc = (key_hz(base + o1.octave * 12.0 + o1.semitones - 12.0) / sr).min(nyq);
         self.sub_level = p.sub_level.clamp(0.0, 1.0);
         self.noise_level = (p.noise_level + md(ModDest::NoiseLevel)).clamp(0.0, 1.0);
+        match p.engine {
+            Engine::Subtractive => {}
+            Engine::Fm => {
+                let index = md(ModDest::FmIndex);
+                let feedback = md(ModDest::FmFeedback);
+                self.fm.control(&p.fm, key_hz(base), sr, index, feedback);
+            }
+            Engine::Wavetable => {
+                for o in 0..2 {
+                    let w = &p.wt[o];
+                    let (pos, warp) = if o == 0 {
+                        (ModDest::Wt1Pos, ModDest::Wt1Warp)
+                    } else {
+                        (ModDest::Wt2Pos, ModDest::Wt2Warp)
+                    };
+                    self.wt_pos[o] = (w.position + md(pos)).clamp(0.0, 1.0);
+                    let amount = (w.warp_amount + md(warp)).clamp(0.0, 1.0);
+                    self.wt_warp[o] = amount;
+                    self.wt_mip[o] = mip_for(self.inc[o][n - 1] * w.warp.speed(amount));
+                }
+            }
+        }
 
         let octaves = p.filter_env_octaves * self.menv.level()
             + p.key_track * (self.pitch - 60.0) / 12.0
@@ -602,13 +543,50 @@ impl Voice {
         }
     }
 
-    /// Adds this voice into the buffers. Ends the voice when its amp envelope is done.
+    /// The wavetable oscillators' next sample, added into `l` and `r`. Without tables (not
+    /// sent yet) they play sines.
+    #[inline]
+    fn wt_oscs(
+        &mut self,
+        p: &SynthSettings,
+        tables: Option<&SynthTables>,
+        l: &mut f32,
+        r: &mut f32,
+    ) {
+        for o in 0..2 {
+            let level = self.level[o];
+            if level == 0.0 {
+                continue;
+            }
+            let w = &p.wt[o];
+            let table = tables.and_then(|t| t.get(o, usize::from(w.table)));
+            let (pos, amount, mip) = (self.wt_pos[o], self.wt_warp[o], self.wt_mip[o]);
+            let (mut sl, mut sr_) = (0.0, 0.0);
+            for u in 0..self.n_uni {
+                let t = self.phases[o][u].advance(self.inc[o][u]);
+                let t = w.warp.apply(t, amount);
+                let s = match table {
+                    Some(tb) => tb.read(pos, t, mip),
+                    None => (t * core::f32::consts::TAU).sin(),
+                };
+                sl += s * self.uni_l[u];
+                sr_ += s * self.uni_r[u];
+            }
+            *l += sl * level;
+            *r += sr_ * level;
+        }
+    }
+
+    /// Adds this voice into the buffers. Ends the voice when its amp envelope is done (or, in
+    /// FM, when its carriers are).
+    #[allow(clippy::too_many_arguments)]
     fn render(
         &mut self,
         p: &SynthSettings,
         x: &Expression,
         sr: f32,
         glide_coef: f32,
+        tables: Option<&SynthTables>,
         out_l: &mut [f32],
         out_r: &mut [f32],
     ) {
@@ -627,22 +605,42 @@ impl Voice {
                 self.sustained = false;
                 return;
             }
+            if p.engine == Engine::Fm {
+                if !self.fm.is_sounding() {
+                    self.amp.reset();
+                    self.menv.reset();
+                    self.active = false;
+                    self.held = false;
+                    self.sustained = false;
+                    return;
+                }
+                let y = self.fm.tick();
+                self.gain_l += self.gain_l_step;
+                self.gain_r += self.gain_r_step;
+                *ol += y * a * self.gain_l;
+                *or += y * a * self.gain_r;
+                continue;
+            }
             let (mut l, mut r) = (0.0_f32, 0.0_f32);
-            for (o, &wave) in waves.iter().enumerate() {
-                let level = self.level[o];
-                if level == 0.0 {
-                    continue;
+            if p.engine == Engine::Wavetable {
+                self.wt_oscs(p, tables, &mut l, &mut r);
+            } else {
+                for (o, &wave) in waves.iter().enumerate() {
+                    let level = self.level[o];
+                    if level == 0.0 {
+                        continue;
+                    }
+                    let (mut sl, mut sr_) = (0.0, 0.0);
+                    for u in 0..self.n_uni {
+                        let dt = self.inc[o][u];
+                        let t = self.phases[o][u].advance(dt);
+                        let s = blep_sample(wave, t, dt, self.pw[o]);
+                        sl += s * self.uni_l[u];
+                        sr_ += s * self.uni_r[u];
+                    }
+                    l += sl * level;
+                    r += sr_ * level;
                 }
-                let (mut sl, mut sr_) = (0.0, 0.0);
-                for u in 0..self.n_uni {
-                    let dt = self.inc[o][u];
-                    let t = self.phases[o][u].advance(dt);
-                    let s = blep_sample(wave, t, dt, self.pw[o]);
-                    sl += s * self.uni_l[u];
-                    sr_ += s * self.uni_r[u];
-                }
-                l += sl * level;
-                r += sr_ * level;
             }
             let mut mono = 0.0;
             if self.sub_level > 0.0 {
@@ -665,17 +663,6 @@ impl Voice {
     }
 }
 
-/// What the player does on top of the notes: pitch bend, mod wheel, aftertouch.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct Expression {
-    /// Pitch bend in semitones (the bend times the instrument's range).
-    pub bend_semis: f32,
-    /// Mod wheel, 0 to 1.
-    pub mod_wheel: f32,
-    /// Channel aftertouch, 0 to 1.
-    pub pressure: f32,
-}
-
 /// The synth: settings plus a fixed pool of voices.
 #[derive(Debug, Clone)]
 pub struct GloomSynth {
@@ -688,6 +675,7 @@ pub struct GloomSynth {
     glide_coef: f32,
     voices: [Voice; SYNTH_VOICES],
     last_pitch: Option<f32>,
+    tables: Option<Arc<SynthTables>>,
 }
 
 impl GloomSynth {
@@ -709,7 +697,9 @@ impl GloomSynth {
             glide_coef: 1.0,
             voices,
             last_pitch: None,
+            tables: None,
         };
+        fm::warm_up();
         s.set_settings(&SynthSettings::default());
         s
     }
@@ -735,7 +725,16 @@ impl GloomSynth {
         for v in &mut self.voices {
             v.amp.set_params(self.amp_params);
             v.menv.set_params(self.menv_params);
+            if s.engine == Engine::Fm && v.active {
+                v.fm.update(&s.fm, v.key, v.velocity, self.sr);
+            }
         }
+    }
+
+    /// Hands the wavetable oscillators their tables; returns the previous ones (drop them off
+    /// the audio thread).
+    pub fn set_tables(&mut self, tables: Option<Arc<SynthTables>>) -> Option<Arc<SynthTables>> {
+        std::mem::replace(&mut self.tables, tables)
     }
 
     /// Starts a note. `age` orders voices for stealing (larger is newer).
@@ -768,6 +767,7 @@ impl GloomSynth {
             _ => target,
         };
         let unison = usize::from(self.settings.unison.clamp(1, MAX_UNISON as u8));
+        let stolen = self.voices[idx].active;
         self.voices[idx].start(
             key,
             velocity,
@@ -778,6 +778,10 @@ impl GloomSynth {
             self.menv_params,
         );
         let v = &mut self.voices[idx];
+        if self.settings.engine == Engine::Fm {
+            let fm = &self.settings.fm;
+            v.fm.start(fm, key, v.velocity, self.sr, stolen);
+        }
         v.note_pan = e.pan.clamp(-1.0, 1.0);
         v.mod_x = e.x();
         v.mod_y = e.y();
@@ -822,6 +826,7 @@ impl GloomSynth {
                     v.held = false;
                     v.amp.release_scaled(v.release_scale);
                     v.menv.release_scaled(v.release_scale);
+                    v.fm.release(v.release_scale);
                 }
             }
         }
@@ -839,6 +844,7 @@ impl GloomSynth {
                 v.held = false;
                 v.amp.release_scaled(v.release_scale);
                 v.menv.release_scaled(v.release_scale);
+                v.fm.release(v.release_scale);
             }
         }
     }
@@ -870,6 +876,7 @@ impl GloomSynth {
                 v.sustained = false;
                 v.amp.release();
                 v.menv.release();
+                v.fm.release(1.0);
             }
         }
     }
@@ -882,6 +889,7 @@ impl GloomSynth {
             v.sustained = false;
             v.amp.reset();
             v.menv.reset();
+            v.fm.reset();
         }
         self.last_pitch = None;
     }
@@ -907,6 +915,7 @@ impl GloomSynth {
                     &self.expr,
                     self.sr,
                     self.glide_coef,
+                    self.tables.as_deref(),
                     out_l,
                     out_r,
                 );
@@ -1304,5 +1313,118 @@ mod tests {
             rms(&l[2400..])
         };
         assert!(tail(0.0) > tail(0.5) && tail(0.5) > tail(1.0));
+    }
+
+    /// Energy outside the harmonics of `f0` relative to the total, in dB (Blackman-Harris
+    /// window, five bins either side of each harmonic counted as the harmonic).
+    fn alias_db(x: &[f32], f0: f32) -> f32 {
+        use rustfft::num_complex::Complex32;
+        let n = x.len();
+        let mut buf: Vec<Complex32> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| {
+                let t = std::f32::consts::TAU * i as f32 / n as f32;
+                let w = 0.35875 - 0.48829 * t.cos() + 0.14128 * (2.0 * t).cos()
+                    - 0.01168 * (3.0 * t).cos();
+                Complex32::new(v * w, 0.0)
+            })
+            .collect();
+        rustfft::FftPlanner::new()
+            .plan_fft_forward(n)
+            .process(&mut buf);
+        let bin_hz = SR / n as f32;
+        let (mut total, mut alias) = (0.0_f64, 0.0_f64);
+        for (k, c) in buf.iter().take(n / 2).enumerate().skip(1) {
+            let e = f64::from(c.norm_sqr());
+            total += e;
+            let f = k as f32 * bin_hz;
+            let h = (f / f0).round();
+            if h < 1.0 || (f - h * f0).abs() > 5.0 * bin_hz {
+                alias += e;
+            }
+        }
+        (10.0 * (alias / total).log10()) as f32
+    }
+
+    fn wt_patch() -> SynthSettings {
+        let mut s = sine_patch();
+        s.engine = Engine::Wavetable;
+        s.wt[0] = WtOscSettings {
+            table: 0,
+            // Frame 10 of 16 in "Basic Shapes" is the saw.
+            position: 10.0 / 15.0,
+            ..WtOscSettings::default()
+        };
+        s
+    }
+
+    #[test]
+    fn wavetable_high_notes_do_not_alias() {
+        let mut s = GloomSynth::new(SR);
+        s.set_tables(Some(Arc::new(SynthTables::factory())));
+        s.set_settings(&wt_patch());
+        // Key 100 is 2637 Hz: only 9 harmonics fit under Nyquist.
+        s.note_on(100, 1.0, 1);
+        render(&mut s, 4800);
+        let (l, _) = render(&mut s, 32_768);
+        let f0 = 440.0 * 2f32.powf(31.0 / 12.0);
+        let db = alias_db(&l, f0);
+        assert!(db < -70.0, "{db} dB");
+        // The same saw read from the full-band mip aliases badly: the test can see it.
+        let bank = wavetable::factory_bank();
+        let inc = f0 / SR;
+        let naive: Vec<f32> = (0..32_768)
+            .map(|i| bank.tables[0].read(10.0 / 15.0, (i as f32 * inc).fract(), 0))
+            .collect();
+        assert!(alias_db(&naive, f0) > -40.0);
+    }
+
+    #[test]
+    fn wavetable_position_and_warp_follow_the_matrix() {
+        let mut p = wt_patch();
+        p.wt[0].position = 0.0;
+        p.mods[0] = ModSlot {
+            source: ModSource::Velocity,
+            dest: ModDest::Wt1Pos,
+            amount: 1.0,
+        };
+        p.wt[0].warp = Warp::Sync;
+        p.mods[1] = ModSlot {
+            source: ModSource::Velocity,
+            dest: ModDest::Wt1Warp,
+            amount: 0.5,
+        };
+        let mut s = GloomSynth::new(SR);
+        s.set_tables(Some(Arc::new(SynthTables::factory())));
+        s.set_settings(&p);
+        s.note_on(60, 0.5, 1);
+        render(&mut s, 64);
+        let v = s.voices.iter().find(|v| v.active).unwrap();
+        assert!((v.wt_pos[0] - 0.5).abs() < 1e-6);
+        assert!((v.wt_warp[0] - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fm_engine_plays_and_ends_with_its_carriers() {
+        let mut p = sine_patch();
+        p.engine = Engine::Fm;
+        p.amp_env.release_ms = 5000.0;
+        for op in &mut p.fm.ops {
+            op.env = EnvSettings {
+                attack_ms: 0.0,
+                decay_ms: 50.0,
+                sustain: 0.0,
+                release_ms: 10.0,
+            };
+        }
+        let mut s = GloomSynth::new(SR);
+        s.set_settings(&p);
+        s.note_on(60, 1.0, 1);
+        let (l, _) = render(&mut s, 2400);
+        assert!(rms(&l[..480]) > 0.05);
+        // The carrier decays to nothing well before the amp envelope would.
+        render(&mut s, 48_000);
+        assert!(!s.is_active());
     }
 }

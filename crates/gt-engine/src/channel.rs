@@ -322,6 +322,14 @@ impl ChannelSlot {
     }
 
     /// Swaps the key map, returning the old one (for the garbage queue). Playing voices stop.
+    /// Replaces the synth's wavetables; returns the old ones.
+    pub(crate) fn set_tables(
+        &mut self,
+        t: Option<Arc<gt_dsp::synth::wavetable::SynthTables>>,
+    ) -> Option<Arc<gt_dsp::synth::wavetable::SynthTables>> {
+        self.synth.set_tables(t)
+    }
+
     pub(crate) fn set_zones(&mut self, z: Option<Arc<ZoneMap>>) -> Option<Arc<ZoneMap>> {
         self.kill_all();
         std::mem::replace(&mut self.zones, z)
