@@ -29,6 +29,73 @@ pub struct Settings {
     /// none).
     pub shortcuts: BTreeMap<String, String>,
     pub theme: ThemePrefs,
+    /// The browser's folders, favourites and tags (Prompt 25).
+    pub browser: BrowserPrefs,
+    /// UI size, language and window layout (Prompt 25).
+    pub ui: UiPrefs,
+}
+
+/// The browser's folders, favourites and tags.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserPrefs {
+    /// Folders searched; empty until the user adds one (the Music folder is used then).
+    pub roots: Vec<PathBuf>,
+    /// Starred rows by key (a path, or "synth:Name" and the like).
+    pub favourites: Vec<String>,
+    /// Tags by row key.
+    pub tags: BTreeMap<String, Vec<String>>,
+    /// Open tab.
+    pub tab: String,
+    /// Preview loops at the project tempo.
+    pub sync_preview: bool,
+}
+
+impl Default for BrowserPrefs {
+    fn default() -> Self {
+        Self {
+            roots: Vec::new(),
+            favourites: Vec::new(),
+            tags: BTreeMap::new(),
+            tab: "samples".to_owned(),
+            sync_preview: true,
+        }
+    }
+}
+
+/// UI size, language and window layout.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiPrefs {
+    /// Size of the whole UI, 0.75 to 2.
+    pub scale: f32,
+    /// Language code.
+    pub language: String,
+    pub layout: crate::layout::LayoutPrefs,
+}
+
+/// Smallest and largest UI scale.
+pub const UI_SCALE_RANGE: (f32, f32) = (0.75, 2.0);
+
+impl Default for UiPrefs {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            language: "en".to_owned(),
+            layout: crate::layout::LayoutPrefs::default(),
+        }
+    }
+}
+
+impl UiPrefs {
+    /// The scale, kept in range.
+    pub fn scale(&self) -> f32 {
+        if self.scale.is_finite() {
+            self.scale.clamp(UI_SCALE_RANGE.0, UI_SCALE_RANGE.1)
+        } else {
+            1.0
+        }
+    }
 }
 
 impl Default for Settings {
@@ -41,6 +108,8 @@ impl Default for Settings {
             midi: MidiPrefs::default(),
             shortcuts: BTreeMap::new(),
             theme: ThemePrefs::from_theme(&GloomTheme::gloom()),
+            browser: BrowserPrefs::default(),
+            ui: UiPrefs::default(),
         }
     }
 }
@@ -241,6 +310,12 @@ mod tests {
         theme.set_accent(GloomTheme::ACCENTS[3].1);
         theme.font_size = 14.0;
         s.theme = ThemePrefs::from_theme(&theme);
+        s.browser.roots = vec![PathBuf::from("/music/samples"), PathBuf::from("D:\\Packs")];
+        s.browser.favourites = vec!["synth:Gloom Bass".into()];
+        s.browser
+            .tags
+            .insert("/music/samples/kick.wav".into(), vec!["punchy".into()]);
+        s.ui.scale = 1.25;
         let mut keys = Keymap::default();
         keys.clear(Command::Plugins);
         s.set_keymap(&keys);
@@ -277,6 +352,11 @@ mod tests {
         p.colors.insert("accent".into(), "red".into());
         p.colors.insert("nonsense".into(), "#ffffff".into());
         p.font_size = 99.0;
+        let ui = UiPrefs {
+            scale: 9.0,
+            ..UiPrefs::default()
+        };
+        assert_eq!(ui.scale(), UI_SCALE_RANGE.1);
         let t = p.to_theme();
         assert_eq!(t.accent, GloomTheme::gloom().accent);
         assert_eq!(t.font_size, gt_ui::theme::FONT_SIZE_RANGE.1);

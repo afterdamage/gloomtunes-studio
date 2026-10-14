@@ -9,6 +9,7 @@ use gt_core::{
     LfoRate, LfoShape, MidiControl, ModSourceKind, ModulatorId, ParamId, Project, STRIPS,
 };
 
+use crate::i18n::tr;
 use crate::GloomTheme;
 
 /// What the editor shows.
@@ -29,7 +30,7 @@ pub fn modulators_panel(
     if let Some(f) = st.focus {
         ui.horizontal(|ui| {
             ui.label(RichText::new(f.name(project)).color(theme.text));
-            if ui.small_button("Show all").clicked() {
+            if ui.small_button(tr("Show all")).clicked() {
                 st.focus = None;
             }
         });
@@ -42,7 +43,7 @@ pub fn modulators_panel(
         .collect();
     if ids.is_empty() {
         ui.label(
-            RichText::new("No modulators. Right-click a knob or fader and pick Add LFO or Add envelope follower.")
+            RichText::new(tr("No modulators. Right-click a knob or fader and pick Add LFO or Add envelope follower."))
                 .color(theme.text_dim),
         );
         return false;
@@ -72,7 +73,7 @@ pub fn modulators_panel(
                     };
                     changed |= ui
                         .checkbox(&mut m.enabled, "")
-                        .on_hover_text("On")
+                        .on_hover_text(tr("On"))
                         .changed();
                     ui.scope(|ui| {
                         ui.set_min_width(150.0);
@@ -93,16 +94,16 @@ pub fn modulators_panel(
                                 .suffix(" %")
                                 .fixed_decimals(0),
                         )
-                        .on_hover_text(
+                        .on_hover_text(tr(
                             "Depth: 100 % moves the control over its whole travel. Negative \
                              inverts the source",
-                        )
+                        ))
                         .changed()
                     {
                         m.amount = pct / 100.0;
                         changed = true;
                     }
-                    if ui.small_button("Remove").clicked() {
+                    if ui.small_button(tr("Remove")).clicked() {
                         remove = Some(id);
                     }
                     ui.end_row();
@@ -126,15 +127,15 @@ fn source_editor(ui: &mut Ui, id: ModulatorId, src: &mut ModSourceKind, strips: 
             let is_lfo = matches!(src, ModSourceKind::Lfo { .. });
             let is_fol = matches!(src, ModSourceKind::Follower { .. });
             let is_midi = matches!(src, ModSourceKind::Midi { .. });
-            if ui.selectable_label(is_lfo, "LFO").clicked() && !is_lfo {
+            if ui.selectable_label(is_lfo, tr("LFO")).clicked() && !is_lfo {
                 *src = ModSourceKind::default_lfo();
             }
-            if ui.selectable_label(is_fol, "Follower").clicked() && !is_fol {
+            if ui.selectable_label(is_fol, tr("Follower")).clicked() && !is_fol {
                 *src = ModSourceKind::default_follower(1);
             }
             if ui
-                .selectable_label(is_midi, "MIDI")
-                .on_hover_text("Mod wheel or aftertouch of the target's channel")
+                .selectable_label(is_midi, tr("MIDI"))
+                .on_hover_text(tr("Mod wheel or aftertouch of the target's channel"))
                 .clicked()
                 && !is_midi
             {
@@ -155,8 +156,8 @@ fn source_editor(ui: &mut Ui, id: ModulatorId, src: &mut ModSourceKind, strips: 
                 });
             let mut synced = matches!(rate, LfoRate::Sync(_));
             if ui
-                .checkbox(&mut synced, "Sync")
-                .on_hover_text("Lock the LFO to the song position")
+                .checkbox(&mut synced, tr("Sync"))
+                .on_hover_text(tr("Lock the LFO to the song position"))
                 .changed()
             {
                 *rate = if synced {
@@ -182,7 +183,7 @@ fn source_editor(ui: &mut Ui, id: ModulatorId, src: &mut ModSourceKind, strips: 
                         egui::DragValue::new(hz)
                             .range(lo..=hi)
                             .speed(0.02)
-                            .suffix(" Hz")
+                            .suffix(tr(" Hz"))
                             .max_decimals(2),
                     );
                 }
@@ -196,7 +197,7 @@ fn source_editor(ui: &mut Ui, id: ModulatorId, src: &mut ModSourceKind, strips: 
                         .suffix("°")
                         .fixed_decimals(0),
                 )
-                .on_hover_text("Start phase")
+                .on_hover_text(tr("Start phase"))
                 .changed()
             {
                 *phase = deg / 360.0;
@@ -217,25 +218,25 @@ fn source_editor(ui: &mut Ui, id: ModulatorId, src: &mut ModSourceKind, strips: 
                     }
                 })
                 .response
-                .on_hover_text("Strip whose output level is followed");
+                .on_hover_text(tr("Strip whose output level is followed"));
             ui.add(
                 egui::DragValue::new(attack_ms)
                     .range(0.1..=1000.0)
                     .speed(0.5)
                     .prefix("A ")
-                    .suffix(" ms")
+                    .suffix(tr(" ms"))
                     .max_decimals(1),
             )
-            .on_hover_text("Attack");
+            .on_hover_text(tr("Attack"));
             ui.add(
                 egui::DragValue::new(release_ms)
                     .range(1.0..=5000.0)
                     .speed(2.0)
                     .prefix("R ")
-                    .suffix(" ms")
+                    .suffix(tr(" ms"))
                     .fixed_decimals(0),
             )
-            .on_hover_text("Release");
+            .on_hover_text(tr("Release"));
             ui.add(
                 egui::DragValue::new(gain)
                     .range(0.1..=100.0)
@@ -243,7 +244,7 @@ fn source_editor(ui: &mut Ui, id: ModulatorId, src: &mut ModSourceKind, strips: 
                     .prefix("×")
                     .max_decimals(2),
             )
-            .on_hover_text("Input gain: a peak of 1/gain drives the follower fully");
+            .on_hover_text(tr("Input gain: a peak of 1/gain drives the follower fully"));
         }
         ModSourceKind::Midi { control } => {
             egui::ComboBox::from_id_salt(("mod_midi", id.0))
@@ -255,10 +256,10 @@ fn source_editor(ui: &mut Ui, id: ModulatorId, src: &mut ModSourceKind, strips: 
                     }
                 })
                 .response
-                .on_hover_text(
+                .on_hover_text(tr(
                     "From the target's own channel; mixer and effect targets follow the \
                      selected channel",
-                );
+                ));
         }
     }
     *src != before

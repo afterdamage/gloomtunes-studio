@@ -11,6 +11,7 @@ use gt_core::{
 use gt_dsp::analysis::Scope;
 use gt_dsp::fx::{eq_band_response, BandType};
 
+use crate::i18n::tr;
 use crate::param_ui::{param_live, param_menu};
 use crate::views::analyzer::{analyzer_panel, AnalyzerState};
 use crate::views::plugins::{plugin_controls, PluginAction, PluginPanelView};
@@ -300,7 +301,7 @@ fn detail(
         let name = &mut mixer.strips[i].name;
         changed |= ui
             .add(egui::TextEdit::singleline(name).desired_width(150.0))
-            .on_hover_text("Strip name")
+            .on_hover_text(tr("Strip name"))
             .changed();
         if view.latency_ms > 0.0 && i == MASTER {
             ui.label(
@@ -308,7 +309,7 @@ fn detail(
                     .small()
                     .color(theme.text_dim),
             )
-            .on_hover_text("Effect latency the mixer compensates; everything reaches the output this much later");
+            .on_hover_text(tr("Effect latency the mixer compensates; everything reaches the output this much later"));
         }
     });
 
@@ -317,7 +318,7 @@ fn detail(
         .spacing(vec2(8.0, 4.0))
         .show(ui, |ui| {
             if i != MASTER {
-                ui.label(RichText::new("Output").small().color(theme.text_dim));
+                ui.label(RichText::new(tr("Output")).small().color(theme.text_dim));
                 let current = mixer.strips[i].output;
                 let options: Vec<(usize, String)> = (0..STRIPS)
                     .filter(|&t| t == current || mixer.can_route(i, t))
@@ -338,8 +339,8 @@ fn detail(
                 }
                 ui.end_row();
             }
-            ui.label(RichText::new("Sidechain").small().color(theme.text_dim))
-                .on_hover_text("Key signal for compressors on this strip (switch on Sidechain in the compressor)");
+            ui.label(RichText::new(tr("Sidechain")).small().color(theme.text_dim))
+                .on_hover_text(tr("Key signal for compressors on this strip (switch on Sidechain in the compressor)"));
             let current = mixer.strips[i].sidechain;
             let options: Vec<(usize, String)> = (1..STRIPS)
                 .filter(|&t| Some(t) == current || mixer.can_sidechain(i, t))
@@ -350,7 +351,7 @@ fn detail(
                 .width(180.0)
                 .selected_text(current.map_or("None".to_owned(), |t| strip_label(mixer, t)))
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut sc, None, "None");
+                    ui.selectable_value(&mut sc, None, tr("None"));
                     for (t, label) in &options {
                         ui.selectable_value(&mut sc, Some(*t), label);
                     }
@@ -361,11 +362,11 @@ fn detail(
             }
             ui.end_row();
             if matches!(kind, StripKind::Insert(_)) {
-                ui.label(RichText::new("Input").small().color(theme.text_dim))
+                ui.label(RichText::new(tr("Input")).small().color(theme.text_dim))
                     .on_hover_text(
-                        "A device input heard live through this insert and its effects (live \
+                        tr("A device input heard live through this insert and its effects (live \
                          effects). Record it by arming a playlist track that plays into this \
-                         insert with the same input.",
+                         insert with the same input."),
                     );
                 changed |= crate::views::input_menu(
                     ui,
@@ -381,7 +382,7 @@ fn detail(
     if matches!(kind, StripKind::Insert(_)) {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Sends").small().color(theme.text_dim));
+            ui.label(RichText::new(tr("Sends")).small().color(theme.text_dim));
             for k in 0..SENDS {
                 let name = mixer.strips[FIRST_SEND + k].name.clone();
                 let mut v = mixer.strips[i].sends[k];
@@ -419,7 +420,7 @@ fn detail(
 
     ui.add_space(4.0);
     ui.label(
-        RichText::new("EFFECTS")
+        RichText::new(tr("EFFECTS"))
             .small()
             .strong()
             .color(theme.accent),
@@ -434,7 +435,7 @@ fn detail(
                 let label = RichText::new(format!("{}", k + 1)).small();
                 if ui
                     .add(egui::Button::selectable(open, label).min_size(vec2(18.0, 16.0)))
-                    .on_hover_text("Edit this effect")
+                    .on_hover_text(tr("Edit this effect"))
                     .clicked()
                 {
                     state.slot = if open { None } else { Some(k) };
@@ -449,14 +450,14 @@ fn detail(
                     .height(320.0)
                     .selected_text(RichText::new(shown).small())
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut pick, None, "Empty");
+                        ui.selectable_value(&mut pick, None, tr("Empty"));
                         for kind in EffectKind::ALL {
                             ui.selectable_value(&mut pick, Some(kind), kind.name());
                         }
                         ui.separator();
                         if ui
-                            .selectable_label(false, "Plugin…")
-                            .on_hover_text("Choose a CLAP effect plugin")
+                            .selectable_label(false, tr("Plugin…"))
+                            .on_hover_text(tr("Choose a CLAP effect plugin"))
                             .clicked()
                         {
                             state.plugin_request = Some((i, k));
@@ -471,7 +472,7 @@ fn detail(
                     let text = RichText::new(if s.enabled { "On" } else { "Off" }).small();
                     if ui
                         .add(egui::Button::selectable(s.enabled, text).min_size(vec2(28.0, 16.0)))
-                        .on_hover_text("Bypass")
+                        .on_hover_text(tr("Bypass"))
                         .clicked()
                     {
                         s.enabled = !s.enabled;
@@ -513,7 +514,7 @@ fn detail(
                 if !presets.is_empty() {
                     egui::ComboBox::from_id_salt(("fx_preset", i, k))
                         .width(110.0)
-                        .selected_text(RichText::new("Presets").small())
+                        .selected_text(RichText::new(tr("Presets")).small())
                         .show_ui(ui, |ui| {
                             for preset in presets {
                                 if ui.selectable_label(false, preset.name).clicked() {
@@ -589,8 +590,10 @@ fn file_row(
     let mut changed = false;
     ui.horizontal(|ui| {
         if ui
-            .small_button("Load response…")
-            .on_hover_text("Use your own impulse response (a WAV, FLAC, MP3 or OGG file)")
+            .small_button(tr("Load response…"))
+            .on_hover_text(tr(
+                "Use your own impulse response (a WAV, FLAC, MP3 or OGG file)",
+            ))
             .clicked()
         {
             pick();
@@ -607,14 +610,14 @@ fn file_row(
                     theme.text_dim
                 });
                 ui.label(text).on_hover_text(f.display().to_string());
-                if !using && ui.small_button("Use").clicked() {
+                if !using && ui.small_button(tr("Use")).clicked() {
                     *slot = slot.clone().with("ir", user);
                     changed = true;
                 }
             }
             None => {
                 ui.label(
-                    RichText::new("built-in responses only")
+                    RichText::new(tr("built-in responses only"))
                         .small()
                         .color(theme.text_dim),
                 );

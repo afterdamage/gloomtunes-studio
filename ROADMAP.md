@@ -648,6 +648,20 @@ sound identical; the golden export test stays.
   round-trips; CPU benchmarks at 16 voices (`cargo bench -p gt-dsp --bench synth`).
 - Limits: user wavetables are saved in projects but not in preset files; FM has no filter.
 
+### Prompt 25: Browser and workflow
+- Browser rebuilt: several root folders indexed on a worker thread (name, folder, tags, tempo
+  and key from file names), favourites, user tags, and tabs for samples, instrument presets,
+  effect presets, plugins and projects; loops preview at the project tempo (D132).
+- Project templates (File > Save as template…, chosen on New), undo history window (click to
+  jump), tap tempo, project info (title, artist, genre, notes; saved).
+- Main views float in their own windows (other monitors too) with the layout saved; UI size
+  75 to 200 % (D133).
+- Piano roll, playlist and rack keys are in the shortcut editor; built-in help window with
+  bundled Markdown pages and a live shortcut list; translation table, English only (D134).
+- Limits: tempo and key come from file names only (no audio analysis); strings built with
+  `format!` and some table-driven labels are not in the table yet; the typing keyboard plays
+  only while the main window has focus.
+
 ---
 
 ## v1.0 scope

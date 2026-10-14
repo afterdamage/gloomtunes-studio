@@ -5,6 +5,7 @@
 //! began, so the line follows the pointer until the button comes up.
 
 use super::*;
+use crate::i18n::tr;
 
 /// What the bottom lane shows and edits.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -131,12 +132,12 @@ pub(super) fn lane_selector(
         .width(130.0)
         .selected_text(label)
         .show_ui(ui, |ui| {
-            ui.label(dim("Notes"));
+            ui.label(dim(tr("Notes")));
             for prop in NoteProp::ALL {
                 ui.selectable_value(&mut st.lane, Lane::Note(prop), prop.name());
             }
             ui.separator();
-            ui.label(dim("Controllers"));
+            ui.label(dim(tr("Controllers")));
             let mut kinds: Vec<ControlKind> = ControlKind::ALL.to_vec();
             for c in view.controls.iter() {
                 if !kinds.contains(&c.kind) {
@@ -155,15 +156,15 @@ pub(super) fn lane_selector(
                 ui.add(
                     egui::DragValue::new(&mut st.cc_pick)
                         .range(0..=gt_core::midi::MAX_LEARN_CC)
-                        .prefix("CC "),
+                        .prefix(tr("CC ")),
                 );
-                if ui.button("Show").clicked() {
+                if ui.button(tr("Show")).clicked() {
                     st.lane = Lane::Control(ControlKind::of_cc(st.cc_pick));
                 }
             });
             if !view.automation.is_empty() {
                 ui.separator();
-                ui.label(dim("Automation"));
+                ui.label(dim(tr("Automation")));
             }
             for (a, name) in view.automation.iter().zip(&view.automation_names) {
                 ui.selectable_value(&mut st.lane, Lane::Automation(a.target), name.as_str());
@@ -174,7 +175,7 @@ pub(super) fn lane_selector(
                 .filter(|(p, _)| !view.automation.iter().any(|a| a.target == *p))
                 .collect();
             if !free.is_empty() {
-                ui.menu_button("Automate a parameter", |ui| {
+                ui.menu_button(tr("Automate a parameter"), |ui| {
                     egui::ScrollArea::vertical()
                         .max_height(320.0)
                         .show(ui, |ui| {
@@ -189,10 +190,10 @@ pub(super) fn lane_selector(
             }
         })
         .response
-        .on_hover_text(
+        .on_hover_text(tr(
             "Bottom lane: a note property, a controller or a pattern automation line \
              (left-drag draws, right-click removes a point)",
-        );
+        ));
     for (mode, name, tip) in [
         (LaneDraw::Freehand, "Free", "Draw lane values freehand"),
         (LaneDraw::Line, "Line", "Drag a straight line in the lane"),
@@ -211,9 +212,9 @@ pub(super) fn lane_selector(
             egui::DragValue::new(&mut st.lane_tension)
                 .range(-1.0..=1.0)
                 .speed(0.01)
-                .prefix("Bend "),
+                .prefix(tr("Bend ")),
         )
-        .on_hover_text("Curve tension: positive rises fast then levels off");
+        .on_hover_text(tr("Curve tension: positive rises fast then levels off"));
     }
     let clearable = match st.lane {
         Lane::Control(k) => view.controls.iter().any(|c| c.kind == k).then_some(k),
@@ -222,7 +223,7 @@ pub(super) fn lane_selector(
     if let Some(i) = shown_auto.filter(|_| matches!(st.lane, Lane::Automation(_))) {
         if ui
             .small_button("✕")
-            .on_hover_text("Delete this pattern automation")
+            .on_hover_text(tr("Delete this pattern automation"))
             .clicked()
         {
             view.automation.remove(i);
@@ -232,7 +233,7 @@ pub(super) fn lane_selector(
     } else if let Some(k) = clearable {
         if ui
             .small_button("✕")
-            .on_hover_text("Clear this controller in the pattern")
+            .on_hover_text(tr("Clear this controller in the pattern"))
             .clicked()
         {
             actions.push(PianoRollAction::ClearControls(Some(k)));

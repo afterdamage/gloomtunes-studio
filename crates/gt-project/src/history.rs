@@ -137,6 +137,32 @@ impl History {
     pub fn undo_len(&self) -> usize {
         self.undo.len()
     }
+
+    /// Every step's label in time order (the undoable ones, then the redoable ones) and how
+    /// many of them are applied: the history panel's rows. Position 0 is the state before the
+    /// oldest step.
+    pub fn steps(&self) -> (Vec<&str>, usize) {
+        let labels = self
+            .undo
+            .iter()
+            .chain(self.redo.iter().rev())
+            .map(|t| t.label.as_str())
+            .collect();
+        (labels, self.undo.len())
+    }
+
+    /// Undoes or redoes until `applied` steps are applied (clamped to what exists). Returns
+    /// the number of steps moved.
+    pub fn jump_to(&mut self, project: &mut Project, applied: usize) -> usize {
+        let mut moved = 0;
+        while self.undo.len() > applied && self.undo(project).is_some() {
+            moved += 1;
+        }
+        while self.undo.len() < applied && self.redo(project).is_some() {
+            moved += 1;
+        }
+        moved
+    }
 }
 
 /// Keeps the user's selected pattern if it still exists, else selects the first one.
@@ -366,5 +392,27 @@ mod tests {
         assert_eq!(p.mixer, Project::demo().mixer);
         h.redo(&mut p);
         assert_eq!(p.mixer.strips[3].volume, 0.25);
+    }
+    #[test]
+    fn jumping_moves_through_the_steps_in_order() {
+        let mut p = Project::empty();
+        let mut h = History::new(&p);
+        for (i, label) in ["a", "b", "c"].iter().enumerate() {
+            p.swing = 0.1 * (i + 1) as f32;
+            assert!(h.commit(&p, label));
+        }
+        assert_eq!(h.steps(), (vec!["a", "b", "c"], 3));
+        assert_eq!(h.jump_to(&mut p, 1), 2);
+        assert!((p.swing - 0.1).abs() < 1e-6);
+        assert_eq!(h.steps(), (vec!["a", "b", "c"], 1));
+        assert_eq!(h.jump_to(&mut p, 0), 1);
+        assert_eq!(p.swing, 0.0);
+        assert_eq!(h.jump_to(&mut p, 99), 3);
+        assert!((p.swing - 0.3).abs() < 1e-6);
+        h.jump_to(&mut p, 2);
+        // A new edit drops the steps after the current one.
+        p.swing = 0.9;
+        h.commit(&p, "d");
+        assert_eq!(h.steps(), (vec!["a", "b", "d"], 3));
     }
 }

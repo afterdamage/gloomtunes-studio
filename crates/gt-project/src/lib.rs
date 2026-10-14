@@ -7,6 +7,7 @@
 
 pub mod file;
 pub mod history;
+pub mod index;
 pub mod loader;
 pub mod migrate;
 pub mod ops;

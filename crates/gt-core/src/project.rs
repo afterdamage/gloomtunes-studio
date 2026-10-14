@@ -580,7 +580,29 @@ pub struct Project {
     pub midi_map: Vec<crate::MidiBinding>,
     /// MIDI inputs that play fixed channels (the rest play the selected channel).
     pub midi_routes: Vec<crate::MidiRoute>,
+    /// Title, artist, genre and notes (Prompt 25).
+    pub info: ProjectInfo,
     next_id: u32,
+}
+
+/// What the user wrote about the project: saved with it, shown in the Project info window.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectInfo {
+    /// Song title.
+    pub title: String,
+    /// Artist name.
+    pub artist: String,
+    /// Genre.
+    pub genre: String,
+    /// Free text.
+    pub notes: String,
+}
+
+impl ProjectInfo {
+    /// True when nothing is filled in.
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 impl Default for Project {
@@ -604,6 +626,7 @@ impl Project {
             modulators: Vec::new(),
             midi_map: Vec::new(),
             midi_routes: Vec::new(),
+            info: ProjectInfo::default(),
             next_id: 1,
         };
         let id = p.new_pattern();

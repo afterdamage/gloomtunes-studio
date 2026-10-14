@@ -6,6 +6,7 @@ use egui::{vec2, Color32, RichText, Sense, Stroke, Ui};
 use gt_core::pads::{CHOKE_GROUPS, MAX_BANKS, PADS_PER_BANK};
 use gt_core::{DrumKit, Pad, INSERTS};
 
+use crate::i18n::tr;
 use crate::widgets::labeled_knob;
 use crate::GloomTheme;
 
@@ -45,7 +46,7 @@ pub fn drum_pads(
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.add(egui::TextEdit::singleline(name).desired_width(150.0))
-                .on_hover_text("Channel name");
+                .on_hover_text(tr("Channel name"));
             ui.horizontal(|ui| {
                 for b in 0..kit.banks.len() {
                     let label = format!("Bank {}", (b'A' + b as u8) as char);
@@ -54,7 +55,7 @@ pub fn drum_pads(
                     }
                 }
                 if kit.banks.len() < MAX_BANKS
-                    && ui.small_button("+").on_hover_text("Add a bank of 16 pads").clicked()
+                    && ui.small_button("+").on_hover_text(tr("Add a bank of 16 pads")).clicked()
                 {
                     kit.banks.push(vec![Pad::default(); PADS_PER_BANK]);
                     st.bank = kit.banks.len() - 1;
@@ -62,14 +63,14 @@ pub fn drum_pads(
                 }
             });
             if ui
-                .button("Fill from folder…")
-                .on_hover_text("Put a folder's samples on the pads, from the selected pad on (you can also drop files here)")
+                .button(tr("Fill from folder…"))
+                .on_hover_text(tr("Put a folder's samples on the pads, from the selected pad on (you can also drop files here)"))
                 .clicked()
             {
                 out.load_folder = true;
             }
             ui.label(
-                RichText::new("Steps in the channel rack play pad 1 of bank A; the piano roll plays every pad.")
+                RichText::new(tr("Steps in the channel rack play pad 1 of bank A; the piano roll plays every pad."))
                     .color(theme.text_dim)
                     .small(),
             );
@@ -171,7 +172,7 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
                     .hint_text(hint)
                     .desired_width(180.0),
             )
-            .on_hover_text("Pad name")
+            .on_hover_text(tr("Pad name"))
             .changed();
         let mut remove = None;
         for (i, l) in pad.layers.iter().enumerate() {
@@ -184,7 +185,7 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
                     ));
                 if ui
                     .small_button("✕")
-                    .on_hover_text("Remove this layer")
+                    .on_hover_text(tr("Remove this layer"))
                     .clicked()
                 {
                     remove = Some(i);
@@ -203,12 +204,12 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
             out.changed = true;
         }
         if pad.layers.is_empty() {
-            ui.label(dim("Empty: load a sample"));
+            ui.label(dim(tr("Empty: load a sample")));
         }
         ui.horizontal(|ui| {
             if ui
-                .button("Load…")
-                .on_hover_text("Replace the pad's sample")
+                .button(tr("Load…"))
+                .on_hover_text(tr("Replace the pad's sample"))
                 .clicked()
             {
                 out.load = Some(false);
@@ -216,15 +217,17 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
             if !pad.layers.is_empty()
                 && pad.layers.len() < 8
                 && ui
-                    .button("+ Layer…")
-                    .on_hover_text("Add a velocity layer (the range splits evenly, softest first)")
+                    .button(tr("+ Layer…"))
+                    .on_hover_text(tr(
+                        "Add a velocity layer (the range splits evenly, softest first)",
+                    ))
                     .clicked()
             {
                 out.load = Some(true);
             }
         });
         ui.horizontal(|ui| {
-            ui.label(dim("Choke"));
+            ui.label(dim(tr("Choke")));
             egui::ComboBox::from_id_salt("pad_choke")
                 .width(60.0)
                 .selected_text(if pad.choke == 0 {
@@ -233,7 +236,7 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
                     format!("Group {}", pad.choke)
                 })
                 .show_ui(ui, |ui| {
-                    out.changed |= ui.selectable_value(&mut pad.choke, 0, "None").changed();
+                    out.changed |= ui.selectable_value(&mut pad.choke, 0, tr("None")).changed();
                     for g in 1..=CHOKE_GROUPS {
                         out.changed |= ui
                             .selectable_value(&mut pad.choke, g, format!("Group {g}"))
@@ -241,10 +244,12 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
                     }
                 })
                 .response
-                .on_hover_text("A pad cuts the sounding pads of its group (open and closed hats)");
+                .on_hover_text(tr(
+                    "A pad cuts the sounding pads of its group (open and closed hats)",
+                ));
         });
         ui.horizontal(|ui| {
-            ui.label(dim("Output"));
+            ui.label(dim(tr("Output")));
             egui::ComboBox::from_id_salt("pad_output")
                 .width(80.0)
                 .selected_text(
@@ -253,7 +258,7 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
                 )
                 .show_ui(ui, |ui| {
                     out.changed |= ui
-                        .selectable_value(&mut pad.output, None, "Channel")
+                        .selectable_value(&mut pad.output, None, tr("Channel"))
                         .changed();
                     for o in 1..=INSERTS {
                         out.changed |= ui
@@ -262,7 +267,9 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
                     }
                 })
                 .response
-                .on_hover_text("Send this pad to its own mixer insert (at the channel's volume)");
+                .on_hover_text(tr(
+                    "Send this pad to its own mixer insert (at the channel's volume)",
+                ));
         });
     });
     out.changed |= labeled_knob(ui, theme, "Tune", &mut pad.tune, -24.0..=24.0, 0.0, |v| {

@@ -9,6 +9,7 @@ use gt_core::note_tools::{
 };
 
 use super::*;
+use crate::i18n::tr;
 
 /// A tool from the Tools menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,10 +274,10 @@ pub(super) fn tool_window(
             settings_ui(ui, kind, &mut t, st.scale);
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.button("Apply").clicked() {
+                if ui.button(tr("Apply")).clicked() {
                     close = Some(true);
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(tr("Cancel")).clicked() {
                     close = Some(false);
                 }
             });
@@ -366,32 +367,32 @@ fn settings_ui(ui: &mut Ui, kind: ToolKind, t: &mut ToolSettings, scale: ScaleKi
             ui.add(
                 egui::DragValue::new(&mut t.arp.octaves)
                     .range(1..=4)
-                    .prefix("Octaves "),
+                    .prefix(tr("Octaves ")),
             );
             division(ui, "arp_rate", "Rate", &mut t.arp.rate);
             percent(ui, "Gate", &mut t.arp.gate, 0.05..=1.0);
             if t.arp.pattern == ArpPattern::Random {
-                ui.add(egui::DragValue::new(&mut t.arp.seed).prefix("Seed "));
+                ui.add(egui::DragValue::new(&mut t.arp.seed).prefix(tr("Seed ")));
             }
         }
         ToolKind::Strum => {
             ui.add(
                 egui::DragValue::new(&mut t.strum.time)
                     .range(0..=PPQ * 2)
-                    .prefix("Time ")
-                    .suffix(" ticks"),
+                    .prefix(tr("Time "))
+                    .suffix(tr(" ticks")),
             );
             percent(ui, "Curve", &mut t.strum.curve, -1.0..=1.0);
             percent(ui, "Velocity", &mut t.strum.velocity, -1.0..=1.0);
-            ui.checkbox(&mut t.strum.down, "Strum down (top key first)");
+            ui.checkbox(&mut t.strum.down, tr("Strum down (top key first)"));
         }
         ToolKind::Chop => division(ui, "chop_step", "Pieces", &mut t.chop),
         ToolKind::Flam => {
             ui.add(
                 egui::DragValue::new(&mut t.flam_offset)
                     .range(1..=PPQ)
-                    .prefix("Before ")
-                    .suffix(" ticks"),
+                    .prefix(tr("Before "))
+                    .suffix(tr(" ticks")),
             );
             percent(ui, "Grace velocity", &mut t.flam_velocity, 0.0..=1.0);
         }
@@ -399,24 +400,27 @@ fn settings_ui(ui: &mut Ui, kind: ToolKind, t: &mut ToolSettings, scale: ScaleKi
         ToolKind::Flip => {
             ui.checkbox(
                 &mut t.flip_h,
-                "In time (around the middle of the selection)",
+                tr("In time (around the middle of the selection)"),
             );
-            ui.checkbox(&mut t.flip_v, "In pitch (around the middle of its keys)");
+            ui.checkbox(
+                &mut t.flip_v,
+                tr("In pitch (around the middle of its keys)"),
+            );
         }
         ToolKind::Randomize => {
-            ui.add(egui::DragValue::new(&mut t.random.seed).prefix("Seed "));
+            ui.add(egui::DragValue::new(&mut t.random.seed).prefix(tr("Seed ")));
             ui.add(
                 egui::DragValue::new(&mut t.random.timing)
                     .range(0..=PPQ)
-                    .prefix("Timing ± ")
-                    .suffix(" ticks"),
+                    .prefix(tr("Timing ± "))
+                    .suffix(tr(" ticks")),
             );
             percent(ui, "Velocity ±", &mut t.random.velocity, 0.0..=1.0);
             ui.add(
                 egui::DragValue::new(&mut t.random.pitch)
                     .range(0..=12)
-                    .prefix("Pitch ± ")
-                    .suffix(" st"),
+                    .prefix(tr("Pitch ± "))
+                    .suffix(tr(" st")),
             );
             if t.random.pitch > 0 {
                 let note = if scale == ScaleKind::Off {
@@ -432,19 +436,19 @@ fn settings_ui(ui: &mut Ui, kind: ToolKind, t: &mut ToolSettings, scale: ScaleKi
             percent(ui, "Add", &mut t.vel_add, -1.0..=1.0);
         }
         ToolKind::Generate => {
-            ui.add(egui::DragValue::new(&mut t.gen_seed).prefix("Style seed "));
+            ui.add(egui::DragValue::new(&mut t.gen_seed).prefix(tr("Style seed ")));
             ui.add(
                 egui::DragValue::new(&mut t.gen_bars)
                     .range(1..=64)
-                    .prefix("Bars "),
+                    .prefix(tr("Bars ")),
             );
             ui.add(
                 egui::DragValue::new(&mut t.gen_octave)
                     .range(3..=7)
-                    .prefix("Octave "),
+                    .prefix(tr("Octave ")),
             );
-            ui.checkbox(&mut t.gen_chords, "Chords");
-            ui.checkbox(&mut t.gen_bass, "Bassline");
+            ui.checkbox(&mut t.gen_chords, tr("Chords"));
+            ui.checkbox(&mut t.gen_bass, tr("Bassline"));
             let scale = if scale == ScaleKind::Off {
                 "C major (choose a scale in the toolbar)".to_owned()
             } else {
@@ -457,7 +461,7 @@ fn settings_ui(ui: &mut Ui, kind: ToolKind, t: &mut ToolSettings, scale: ScaleKi
 
 /// The Tools menu and the chord stamp in the toolbar.
 pub(super) fn tools_menu(ui: &mut Ui, st: &mut PianoRollState) {
-    ui.menu_button("Tools", |ui| {
+    ui.menu_button(tr("Tools"), |ui| {
         for k in ToolKind::ALL {
             if k == ToolKind::Generate {
                 ui.separator();
@@ -469,25 +473,27 @@ pub(super) fn tools_menu(ui: &mut Ui, st: &mut PianoRollState) {
         }
     })
     .response
-    .on_hover_text("Tools for the selection (or all notes), with a live preview");
+    .on_hover_text(tr(
+        "Tools for the selection (or all notes), with a live preview",
+    ));
     let label = st.chord.map_or("No chord", |c| c.name());
     egui::ComboBox::from_id_salt("roll_chord")
         .width(96.0)
         .selected_text(label)
         .show_ui(ui, |ui| {
-            ui.selectable_value(&mut st.chord, None, "No chord");
+            ui.selectable_value(&mut st.chord, None, tr("No chord"));
             for c in gt_core::note_tools::ChordKind::ALL {
                 ui.selectable_value(&mut st.chord, Some(c), c.name());
             }
         })
         .response
-        .on_hover_text("Chord stamp: drawing a note places this chord on it");
+        .on_hover_text(tr("Chord stamp: drawing a note places this chord on it"));
     if st.chord.is_some() {
         ui.add(
             egui::DragValue::new(&mut st.chord_inversion)
                 .range(0..=3)
-                .prefix("Inv "),
+                .prefix(tr("Inv ")),
         )
-        .on_hover_text("Inversion: each moves the lowest note up an octave");
+        .on_hover_text(tr("Inversion: each moves the lowest note up an octave"));
     }
 }

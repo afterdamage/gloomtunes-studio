@@ -4,6 +4,7 @@
 use egui::{vec2, RichText, Sense, Stroke, Ui};
 use gt_core::{Channel, ChannelParam, ParamId, Pattern, Project};
 
+use crate::i18n::tr;
 use crate::param_ui::{param_live, param_menu};
 use crate::widgets::{format_gain, format_pan, knob};
 use crate::GloomTheme;
@@ -105,43 +106,43 @@ pub fn channel_rack(
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if ui
-                    .button("+ Sampler")
-                    .on_hover_text("Add an empty sampler channel; load a sample from the browser")
+                    .button(tr("+ Sampler"))
+                    .on_hover_text(tr("Add an empty sampler channel; load a sample from the browser"))
                     .clicked()
                 {
                     add = Some(0);
                 }
                 if ui
-                    .button("+ Drum pads")
-                    .on_hover_text("Add a drum pad channel: banks of 16 pads with layers, choke groups and outputs")
+                    .button(tr("+ Drum pads"))
+                    .on_hover_text(tr("Add a drum pad channel: banks of 16 pads with layers, choke groups and outputs"))
                     .clicked()
                 {
                     add = Some(2);
                 }
                 if ui
-                    .button("+ Gloom Synth")
-                    .on_hover_text("Add a Gloom Synth channel")
+                    .button(tr("+ Gloom Synth"))
+                    .on_hover_text(tr("Add a Gloom Synth channel"))
                     .clicked()
                 {
                     add = Some(1);
                 }
                 if ui
-                    .button("+ FM")
-                    .on_hover_text("Add a six-operator FM synth channel")
+                    .button(tr("+ FM"))
+                    .on_hover_text(tr("Add a six-operator FM synth channel"))
                     .clicked()
                 {
                     add = Some(3);
                 }
                 if ui
-                    .button("+ Wavetable")
-                    .on_hover_text("Add a wavetable synth channel")
+                    .button(tr("+ Wavetable"))
+                    .on_hover_text(tr("Add a wavetable synth channel"))
                     .clicked()
                 {
                     add = Some(4);
                 }
                 if ui
-                    .button("+ Plugin")
-                    .on_hover_text("Add a channel playing a CLAP instrument plugin")
+                    .button(tr("+ Plugin"))
+                    .on_hover_text(tr("Add a channel playing a CLAP instrument plugin"))
                     .clicked()
                 {
                     actions.push(RackAction::AddPlugin);
@@ -177,7 +178,56 @@ pub fn channel_rack(
         actions.push(RackAction::ChannelsChanged);
         actions.push(RackAction::SongChanged);
     }
+    key_commands(ui, project, state, &mut actions);
     actions
+}
+
+/// The rack's own keys (Prompt 25; remappable in the shortcut editor).
+fn key_commands(
+    ui: &Ui,
+    project: &mut Project,
+    state: &mut RackState,
+    actions: &mut Vec<RackAction>,
+) {
+    use crate::keymap::{Command, Scope};
+    let keys = crate::keymap::take_view(ui, Scope::Rack);
+    let n = project.channels.len();
+    for c in keys {
+        match c {
+            Command::RackUp => state.selected = state.selected.saturating_sub(1),
+            Command::RackDown if n > 0 => state.selected = (state.selected + 1).min(n - 1),
+            Command::RackMute | Command::RackSolo => {
+                if let Some(ch) = project.channels.get_mut(state.selected) {
+                    if c == Command::RackMute {
+                        ch.mute = !ch.mute;
+                    } else {
+                        ch.solo = !ch.solo;
+                    }
+                    actions.push(RackAction::ParamsChanged);
+                }
+            }
+            Command::RackNextPattern | Command::RackPrevPattern => {
+                let ids: Vec<_> = project.patterns.iter().map(|p| p.id).collect();
+                let at = ids
+                    .iter()
+                    .position(|&id| id == project.current_pattern)
+                    .unwrap_or(0);
+                let to = if c == Command::RackNextPattern {
+                    (at + 1).min(ids.len() - 1)
+                } else {
+                    at.saturating_sub(1)
+                };
+                if to != at {
+                    project.select_pattern(ids[to]);
+                    actions.push(RackAction::SongChanged);
+                }
+            }
+            Command::RackOpenRoll if state.selected < n => {
+                actions.push(RackAction::OpenPianoRoll(state.selected));
+            }
+            _ => {}
+        }
+    }
 }
 
 struct RowCtx {
@@ -210,14 +260,14 @@ fn channel_row(
 
     let mute = ui
         .add(egui::Button::selectable(ch.mute, "M").min_size(vec2(18.0, 18.0)))
-        .on_hover_text("Mute");
+        .on_hover_text(tr("Mute"));
     if mute.clicked() {
         ch.mute = !ch.mute;
         actions.push(RackAction::ParamsChanged);
     }
     let solo = ui
         .add(egui::Button::selectable(ch.solo, "S").min_size(vec2(18.0, 18.0)))
-        .on_hover_text("Solo (only soloed channels play)");
+        .on_hover_text(tr("Solo (only soloed channels play)"));
     if solo.clicked() {
         ch.solo = !ch.solo;
         actions.push(RackAction::ParamsChanged);
@@ -271,7 +321,7 @@ fn channel_row(
                     }
                 }),
         )
-        .on_hover_text("Mixer insert (drag or type; M = master)")
+        .on_hover_text(tr("Mixer insert (drag or type; M = master)"))
         .changed()
     {
         ch.insert = insert;
@@ -290,7 +340,7 @@ fn channel_row(
                 .min_size(vec2(96.0, 20.0))
                 .truncate(),
         )
-        .on_hover_text("Click to select, hold to hear, right-click for options");
+        .on_hover_text(tr("Click to select, hold to hear, right-click for options"));
     if name.clicked() || name.drag_started() {
         state.selected = i;
     }
@@ -303,12 +353,12 @@ fn channel_row(
         actions.push(RackAction::NoteOff(i));
     }
     name.context_menu(|ui| {
-        if ui.button("Open in piano roll").clicked() {
+        if ui.button(tr("Open in piano roll")).clicked() {
             state.selected = i;
             actions.push(RackAction::OpenPianoRoll(i));
             ui.close();
         }
-        if ui.button("Delete channel").clicked() {
+        if ui.button(tr("Delete channel")).clicked() {
             *remove = Some(i);
             ui.close();
         }
@@ -418,7 +468,7 @@ fn pattern_bar(
 ) {
     let dim = |s: &str| RichText::new(s).color(theme.text_dim);
     ui.horizontal(|ui| {
-        ui.label(dim("Pattern"));
+        ui.label(dim(tr("Pattern")));
         let current = project.current_pattern;
         if let Some(text) = &mut state.renaming {
             let r = ui.add(egui::TextEdit::singleline(text).desired_width(140.0));
@@ -446,8 +496,8 @@ fn pattern_bar(
                 actions.push(RackAction::SongChanged);
             }
             if ui
-                .button("New")
-                .on_hover_text("New empty pattern")
+                .button(tr("New"))
+                .on_hover_text(tr("New empty pattern"))
                 .clicked()
             {
                 let id = project.new_pattern();
@@ -455,8 +505,8 @@ fn pattern_bar(
                 actions.push(RackAction::SongChanged);
             }
             if ui
-                .button("Clone")
-                .on_hover_text("Copy this pattern")
+                .button(tr("Clone"))
+                .on_hover_text(tr("Copy this pattern"))
                 .clicked()
             {
                 if let Some(id) = project.clone_pattern(current) {
@@ -464,13 +514,13 @@ fn pattern_bar(
                     actions.push(RackAction::SongChanged);
                 }
             }
-            if ui.button("Rename").clicked() {
+            if ui.button(tr("Rename")).clicked() {
                 state.renaming = Some(project.current_pattern().name.clone());
             }
         }
 
         ui.separator();
-        ui.label(dim("Steps"));
+        ui.label(dim(tr("Steps")));
         for n in Pattern::STEP_COUNTS {
             let on = project.current_pattern().steps == n;
             if ui
@@ -484,7 +534,7 @@ fn pattern_bar(
         }
 
         ui.separator();
-        ui.label(dim("Swing"));
+        ui.label(dim(tr("Swing")));
         let mut swing = project.swing;
         if knob(ui, theme, &mut swing, 0.0..=1.0, 0.0, 20.0, |s| {
             format!("Swing {:.0} % (67 % is a triplet feel)", s * 100.0)
