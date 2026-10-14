@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use egui::{RichText, Ui};
-use gt_export::{BitDepth, ExportSettings, Progress, Range, SAMPLE_RATES};
+use gt_export::video::{VideoSettings, VideoStyle};
+use gt_export::{
+    BitDepth, ExportSettings, Format, Mp3Mode, Progress, Range, MP3_BITRATES, SAMPLE_RATES,
+};
 use gt_ui::tr;
 use gt_ui::GloomTheme;
 
@@ -40,6 +43,23 @@ pub struct ExportForm {
     pub loop_only: bool,
     pub tail: bool,
     pub stems: bool,
+    /// One file per marker region.
+    pub regions: bool,
+    pub format: Format,
+    /// Ogg Vorbis quality, 0 to 10.
+    pub ogg_quality: f32,
+    /// MP3: variable bitrate at `mp3_quality` instead of `mp3_kbps`.
+    pub mp3_vbr: bool,
+    pub mp3_kbps: u16,
+    /// 0 (best) to 9.
+    pub mp3_quality: u8,
+    /// Also make an MP4 of the mix.
+    pub video: bool,
+    /// 0 spectrum, 1 waveform, 2 still image.
+    pub video_style: usize,
+    pub video_image: String,
+    /// ffmpeg was found when the dialog opened.
+    pub ffmpeg: bool,
     /// The running export's progress.
     pub running: Option<Arc<Progress>>,
     /// Result of the last export.
@@ -58,6 +78,16 @@ impl ExportForm {
             loop_only: false,
             tail: true,
             stems: false,
+            regions: false,
+            format: Format::from_path(&path).unwrap_or_default(),
+            ogg_quality: 6.0,
+            mp3_vbr: false,
+            mp3_kbps: 320,
+            mp3_quality: 2,
+            video: false,
+            video_style: 0,
+            video_image: String::new(),
+            ffmpeg: gt_export::video::find_ffmpeg().is_some(),
             running: None,
             message: None,
         }
@@ -81,6 +111,41 @@ impl ExportForm {
             tail: self.tail,
             max_tail_seconds: 10.0,
             stems: self.stems,
+            regions: self.regions,
+            format: self.format,
+            ogg_quality: self.ogg_quality,
+            mp3: if self.mp3_vbr {
+                Mp3Mode::Vbr(self.mp3_quality)
+            } else {
+                Mp3Mode::Cbr(self.mp3_kbps)
+            },
+        }
+    }
+
+    /// The video to make with the export, in the theme's colours: only for a single mix file.
+    pub fn video_settings(&self, theme: &GloomTheme) -> Option<VideoSettings> {
+        if !self.video || !self.ffmpeg || self.stems || self.regions {
+            return None;
+        }
+        let rgb = |c: egui::Color32| [c.r(), c.g(), c.b()];
+        Some(VideoSettings {
+            style: match self.video_style {
+                0 => VideoStyle::Spectrum,
+                1 => VideoStyle::Waveform,
+                _ => VideoStyle::Image(PathBuf::from(self.video_image.trim())),
+            },
+            background: rgb(theme.bg_deep),
+            accent: rgb(theme.accent),
+            ..VideoSettings::default()
+        })
+    }
+
+    /// Picks a format and gives the file name its extension.
+    fn set_format(&mut self, format: Format) {
+        self.format = format;
+        let p = PathBuf::from(self.path.trim());
+        if !self.path.trim().is_empty() {
+            self.path = p.with_extension(format.extension()).display().to_string();
         }
     }
 }
@@ -528,13 +593,18 @@ fn export_form(ui: &mut Ui, theme: &GloomTheme, f: &mut ExportForm) -> Option<Di
     let running = f.running.clone();
     ui.add_enabled_ui(running.is_none(), |ui| {
         ui.label(RichText::new(tr("File")).color(theme.text_dim));
+        let format = f.format;
         path_row(ui, &mut f.path, |p| {
-            let mut d = rfd::FileDialog::new().add_filter("WAV", &["wav"]);
+            let mut d =
+                rfd::FileDialog::new().add_filter(format.label(), &[format.extension()]);
             if let Some(dir) = start_dir(p) {
                 d = d.set_directory(dir);
             }
             d.save_file()
         });
+        if let Some(fmt) = Format::from_path(Path::new(f.path.trim())) {
+            f.format = fmt;
+        }
         egui::Grid::new("export_grid")
             .num_columns(2)
             .spacing(egui::vec2(10.0, 6.0))
@@ -556,15 +626,70 @@ fn export_form(ui: &mut Ui, theme: &GloomTheme, f: &mut ExportForm) -> Option<Di
                 ui.end_row();
                 ui.label(tr("Format"));
                 ui.horizontal(|ui| {
-                    for d in BitDepth::ALL {
-                        ui.selectable_value(&mut f.depth, d, d.label());
+                    for fmt in Format::ALL {
+                        if ui
+                            .add(egui::Button::selectable(f.format == fmt, fmt.label()))
+                            .clicked()
+                        {
+                            f.set_format(fmt);
+                        }
                     }
                 });
                 ui.end_row();
+                match f.format {
+                    Format::Wav | Format::Flac => {
+                        ui.label(tr("Bit depth"));
+                        ui.horizontal(|ui| {
+                            for d in BitDepth::ALL {
+                                // FLAC is integer only.
+                                if f.format == Format::Wav || d != BitDepth::Float32 {
+                                    ui.selectable_value(&mut f.depth, d, d.label());
+                                }
+                            }
+                        });
+                        if f.format == Format::Flac && f.depth == BitDepth::Float32 {
+                            f.depth = BitDepth::Pcm24;
+                        }
+                    }
+                    Format::Ogg => {
+                        ui.label(tr("Quality"));
+                        ui.add(egui::Slider::new(&mut f.ogg_quality, 0.0..=10.0).step_by(0.5))
+                            .on_hover_text(tr(
+                                "Variable bitrate: 3 is about 112 kbit/s, 6 about 192, 10 about 500",
+                            ));
+                    }
+                    Format::Mp3 => {
+                        ui.label(tr("Bitrate"));
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut f.mp3_vbr, false, tr("Constant"));
+                            ui.selectable_value(&mut f.mp3_vbr, true, tr("Variable"));
+                            if f.mp3_vbr {
+                                ui.add(egui::Slider::new(&mut f.mp3_quality, 0..=9))
+                                    .on_hover_text(tr(
+                                        "0 is the best (about 245 kbit/s), 9 the smallest (about \
+                                         65 kbit/s)",
+                                    ));
+                            } else {
+                                egui::ComboBox::from_id_salt("mp3_kbps")
+                                    .selected_text(format!("{} kbit/s", f.mp3_kbps))
+                                    .show_ui(ui, |ui| {
+                                        for k in MP3_BITRATES {
+                                            ui.selectable_value(
+                                                &mut f.mp3_kbps,
+                                                k,
+                                                format!("{k} kbit/s"),
+                                            );
+                                        }
+                                    });
+                            }
+                        });
+                    }
+                }
+                ui.end_row();
                 ui.label("");
                 ui.add_enabled(
-                    f.depth != BitDepth::Float32,
-                    egui::Checkbox::new(&mut f.dither, "Dither (TPDF)"),
+                    !f.format.lossy() && f.depth != BitDepth::Float32,
+                    egui::Checkbox::new(&mut f.dither, tr("Dither (TPDF)")),
                 )
                 .on_hover_text(tr(
                     "Adds a little noise before rounding to 16 or 24 bits, so quiet passages \
@@ -594,6 +719,53 @@ fn export_form(ui: &mut Ui, theme: &GloomTheme, f: &mut ExportForm) -> Option<Di
                     .on_hover_text(tr(
                         "Each playlist track with patterns or audio, through the mixer",
                     ));
+                ui.end_row();
+                ui.label("");
+                ui.checkbox(&mut f.regions, tr("One file per marker region"))
+                    .on_hover_text(tr(
+                        "From each playlist marker to the next, named after the marker",
+                    ));
+                ui.end_row();
+                ui.label(tr("Video"));
+                ui.vertical(|ui| {
+                    let single = !f.stems && !f.regions;
+                    ui.add_enabled(
+                        f.ffmpeg && single,
+                        egui::Checkbox::new(&mut f.video, tr("Also make an MP4 video")),
+                    )
+                    .on_hover_text(tr(
+                        "Made by ffmpeg next to the audio file. Not with stems or regions",
+                    ));
+                    if !f.ffmpeg {
+                        ui.label(
+                            RichText::new(tr(
+                                "Needs ffmpeg: install it, or set GT_FFMPEG to its path",
+                            ))
+                            .small()
+                            .color(theme.text_dim),
+                        );
+                    } else if f.video && single {
+                        ui.horizontal(|ui| {
+                            for (i, label) in
+                                [tr("Spectrum"), tr("Waveform"), tr("Still image")]
+                                    .into_iter()
+                                    .enumerate()
+                            {
+                                ui.selectable_value(&mut f.video_style, i, label);
+                            }
+                        });
+                        if f.video_style == 2 {
+                            path_row(ui, &mut f.video_image, |p| {
+                                let mut d = rfd::FileDialog::new()
+                                    .add_filter(tr("Images"), &["png", "jpg", "jpeg", "bmp"]);
+                                if let Some(dir) = start_dir(p) {
+                                    d = d.set_directory(dir);
+                                }
+                                d.pick_file()
+                            });
+                        }
+                    }
+                });
                 ui.end_row();
             });
     });

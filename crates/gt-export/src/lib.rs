@@ -8,9 +8,11 @@
 //! bit-identical to what you hear when playing from Stop at the same position (ARCHITECTURE.md
 //! §7.5).
 //!
-//! Options: 16-bit or 24-bit PCM (with optional TPDF dither) or 32-bit float; any sample rate;
-//! peak normalization; the release and effect tails after the end (until silence, up to a
-//! limit); the whole song or the loop region; the full mix or one stem per playlist track.
+//! Options: WAV (16-bit or 24-bit PCM with optional TPDF dither, or 32-bit float), FLAC, Ogg
+//! Vorbis or MP3 ([`formats`]); any sample rate; peak normalization; the release and effect
+//! tails after the end (until silence, up to a limit); the whole song or the loop region; the
+//! full mix, one stem per playlist track, or one file per marker region. [`video`] turns a mix
+//! into an MP4 with an external ffmpeg.
 //!
 //! Third-party plugins come in as processors made by the plugin host for the export (fresh
 //! instances in offline mode, in their current state); each pass of a stem export gets them
@@ -21,7 +23,11 @@
 #![forbid(unsafe_code)]
 
 pub mod bounce;
+pub mod formats;
 pub mod smf;
+pub mod video;
+
+pub use formats::{Format, Mp3Mode, Tags, MP3_BITRATES};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -96,6 +102,15 @@ pub struct ExportSettings {
     pub max_tail_seconds: f32,
     /// One file per playlist track instead of the mix.
     pub stems: bool,
+    /// One file per marker region (from each marker to the next, the last to the song end)
+    /// instead of the range; with `stems`, one file per track and region.
+    pub regions: bool,
+    /// File format.
+    pub format: Format,
+    /// Ogg Vorbis quality, 0 to 10.
+    pub ogg_quality: f32,
+    /// MP3 rate control.
+    pub mp3: Mp3Mode,
 }
 
 impl Default for ExportSettings {
@@ -109,6 +124,10 @@ impl Default for ExportSettings {
             tail: true,
             max_tail_seconds: 10.0,
             stems: false,
+            regions: false,
+            format: Format::Wav,
+            ogg_quality: 6.0,
+            mp3: Mp3Mode::default(),
         }
     }
 }
@@ -294,8 +313,9 @@ pub fn render(
     Ok(out)
 }
 
-/// Renders and writes the export. With stems, `path` names the folder-and-prefix: files are
-/// written as `<path stem> - NN <track>.wav` next to it. Returns the files written.
+/// Renders and writes the export. With stems or regions, `path` names the folder-and-prefix:
+/// files are written as `<path stem> - NN <track or marker>.<ext>` next to it. The extension
+/// follows `settings.format`. Returns the files written.
 pub fn export(
     project: &Project,
     settings: &ExportSettings,
@@ -303,22 +323,104 @@ pub fn export(
     progress: &Progress,
     plugins: &mut Vec<Box<PluginBox>>,
 ) -> Result<Vec<PathBuf>, ExportError> {
+    export_with_video(project, settings, path, progress, plugins, None)
+}
+
+/// [`export`], then (for a single mix file) a video of it next to it, as `<path>.mp4`.
+pub fn export_with_video(
+    project: &Project,
+    settings: &ExportSettings,
+    path: &Path,
+    progress: &Progress,
+    plugins: &mut Vec<Box<PluginBox>>,
+    video: Option<&video::VideoSettings>,
+) -> Result<Vec<PathBuf>, ExportError> {
     let (samples, _) = load_samples(project, settings.sample_rate);
-    let rendered = render(project, &samples, settings, progress, plugins)?;
+    let ext = settings.format.extension();
+    let base = Tags::of(&project.info);
+    let prefix = path
+        .file_stem()
+        .map_or_else(|| "export".to_owned(), |s| s.to_string_lossy().into_owned());
+    // (file name part, tags, range) per pass.
+    let passes: Vec<(Option<String>, Tags, Range)> = if settings.regions {
+        let regions = marker_regions(project);
+        if regions.is_empty() {
+            return Err(ExportError::Empty);
+        }
+        regions
+            .into_iter()
+            .map(|(name, start, end)| {
+                let title = if base.title.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{} - {name}", base.title)
+                };
+                let tags = Tags {
+                    title,
+                    ..base.clone()
+                };
+                (Some(name), tags, Range::Ticks { start, end })
+            })
+            .collect()
+    } else {
+        vec![(None, base.clone(), settings.range)]
+    };
     let mut written = Vec::new();
-    for (k, r) in rendered.iter().enumerate() {
-        let file = if settings.stems {
-            let stem = path
-                .file_stem()
-                .map_or_else(|| "export".to_owned(), |s| s.to_string_lossy().into_owned());
-            path.with_file_name(format!("{stem} - {:02} {}.wav", k + 1, file_safe(&r.name)))
-        } else {
-            path.with_extension("wav")
-        };
-        write_wav(&file, &r.audio, settings, k as u64)?;
-        written.push(file);
+    let mut n = 0;
+    for (region, tags, range) in passes {
+        let s = ExportSettings { range, ..*settings };
+        let rendered = render(project, &samples, &s, progress, plugins)?;
+        for r in rendered.iter() {
+            n += 1;
+            let file = match (&region, settings.stems) {
+                (None, false) => path.with_extension(ext),
+                (None, true) => {
+                    path.with_file_name(format!("{prefix} - {n:02} {}.{ext}", file_safe(&r.name)))
+                }
+                (Some(m), false) => {
+                    path.with_file_name(format!("{prefix} - {n:02} {}.{ext}", file_safe(m)))
+                }
+                (Some(m), true) => path.with_file_name(format!(
+                    "{prefix} - {n:02} {} - {}.{ext}",
+                    file_safe(m),
+                    file_safe(&r.name)
+                )),
+            };
+            formats::write_audio(&file, &r.audio, settings, n as u64 - 1, &tags)?;
+            written.push(file);
+        }
+        if let (Some(v), None, false) = (video, &region, settings.stems) {
+            let out = path.with_extension("mp4");
+            progress.permille.store(0, Ordering::Relaxed);
+            video::export_video(&rendered[0].audio, settings.sample_rate, v, &out, progress)?;
+            written.push(out);
+        }
     }
     Ok(written)
+}
+
+/// The marker regions: from each marker to the next (the last one to the song end), named
+/// after the marker, in time order. Regions that are empty or start after the song are left
+/// out.
+pub fn marker_regions(project: &Project) -> Vec<(String, i64, i64)> {
+    let Some((_, song_end)) = range_ticks(project, Range::Song) else {
+        return Vec::new();
+    };
+    let mut markers: Vec<_> = project.playlist.markers.iter().collect();
+    markers.sort_by_key(|m| m.at);
+    let mut out = Vec::new();
+    for (i, m) in markers.iter().enumerate() {
+        let end = markers.get(i + 1).map_or(song_end, |next| next.at);
+        if m.at >= 0 && end > m.at && m.at < song_end {
+            let name = if m.name.trim().is_empty() {
+                format!("Region {}", i + 1)
+            } else {
+                m.name.trim().to_owned()
+            };
+            out.push((name, m.at, end.min(song_end)));
+        }
+    }
+    out
 }
 
 /// Writes interleaved stereo `audio` as a WAV file. Dither uses a fixed seed (plus `seed`), so

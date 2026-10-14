@@ -19,3 +19,7 @@ gt-engine.workspace = true
 gt-project.workspace = true
 hound.workspace = true
 midly.workspace = true
+flacenc.workspace = true
+vorbis_rs.workspace = true
+mp3lame-encoder.workspace = true
+rustfft.workspace = true
