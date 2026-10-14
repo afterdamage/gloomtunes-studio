@@ -525,6 +525,20 @@ fn load_engine(
                 zones,
             },
         );
+        if let gt_core::Instrument::Synth(patch) = &ch.instrument {
+            let tables =
+                gt_engine::tables::synth_tables(patch, |src| samples.get(src).map(Arc::clone));
+            if tables.is_some() {
+                send(
+                    h,
+                    p,
+                    EngineCommand::SetChannelTables {
+                        slot: i as u16,
+                        tables,
+                    },
+                );
+            }
+        }
         send(
             h,
             p,

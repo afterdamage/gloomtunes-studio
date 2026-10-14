@@ -126,6 +126,20 @@ pub fn channel_rack(
                     add = Some(1);
                 }
                 if ui
+                    .button("+ FM")
+                    .on_hover_text("Add a six-operator FM synth channel")
+                    .clicked()
+                {
+                    add = Some(3);
+                }
+                if ui
+                    .button("+ Wavetable")
+                    .on_hover_text("Add a wavetable synth channel")
+                    .clicked()
+                {
+                    add = Some(4);
+                }
+                if ui
                     .button("+ Plugin")
                     .on_hover_text("Add a channel playing a CLAP instrument plugin")
                     .clicked()
@@ -139,6 +153,16 @@ pub fn channel_rack(
         let added = match kind {
             1 => project.add_synth_channel(&format!("Synth {n}"), gt_core::SynthPatch::default()),
             2 => project.add_drum_channel(&format!("Drums {n}")),
+            3 | 4 => {
+                // The engine's first factory preset.
+                let engine = kind - 2;
+                let patch = gt_core::SynthPatch::factory()
+                    .into_iter()
+                    .find(|p| p.engine() == engine)
+                    .unwrap_or_default();
+                let name = if engine == 1 { "FM" } else { "Wavetable" };
+                project.add_synth_channel(&format!("{name} {n}"), patch)
+            }
             _ => project.add_channel(&format!("Sampler {n}"), None),
         };
         if added.is_some() {

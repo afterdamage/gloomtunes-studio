@@ -34,6 +34,13 @@ use gt_ui::views::{FirstRunState, SettingsPage, ShortcutEditorState};
 use gt_ui::widgets::MeterBallistics;
 use gt_ui::{Command, GloomTheme, Keymap};
 
+/// What a synth channel's wavetables were built from.
+#[derive(Debug, Clone, PartialEq)]
+struct TablesKey {
+    tables: [Option<gt_core::SampleSource>; 2],
+    loaded: [bool; 2],
+}
+
 mod automate;
 mod bounce;
 mod midi;
@@ -120,6 +127,8 @@ pub struct GloomApp {
     /// Mixer settings and effects as last sent to the engine (none: send everything).
     sent_mixer: Option<MixerParams>,
     sent_fx: Vec<[Option<SentEffect>; FX_SLOTS]>,
+    /// Per channel slot, what its synth's wavetables were built from (none: no tables sent).
+    sent_tables: Vec<Option<TablesKey>>,
     strip_meters: Vec<[MeterBallistics; 2]>,
     strip_view: Vec<StripMeter>,
     fx_meters: Vec<[f32; FX_SLOTS]>,
@@ -311,6 +320,7 @@ impl GloomApp {
             mixer_state: MixerState::default(),
             sent_mixer: None,
             sent_fx: vec![Default::default(); STRIPS],
+            sent_tables: Vec::new(),
             strip_meters: vec![Default::default(); STRIPS],
             strip_view: vec![StripMeter::default(); STRIPS],
             fx_meters: vec![[0.0; FX_SLOTS]; STRIPS],
@@ -829,6 +839,17 @@ impl GloomApp {
                 });
                 self.refresh_presets();
             }
+            SynthPanelAction::LoadTable(osc) => {
+                let d = rfd::FileDialog::new().add_filter("Audio", &gt_project::AUDIO_EXTENSIONS);
+                if let Some(path) = d.pick_file() {
+                    if let Some(p) = self.project.channels.get_mut(i).and_then(|c| c.synth_mut()) {
+                        if let Some(t) = p.tables.get_mut(osc) {
+                            *t = Some(gt_core::SampleSource::File(path));
+                            self.pending_edit = Some("Load wavetable");
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1303,6 +1324,54 @@ impl GloomApp {
         }
     }
 
+    /// Sends each synth channel the wavetables its patch needs whenever that changes: the
+    /// engine, a user table, or a user table finishing loading.
+    fn sync_tables(&mut self) {
+        if self.audio.engine().is_none() {
+            return;
+        }
+        let rate = self.rate();
+        let n = self.project.channels.len();
+        self.sent_tables.resize(n, None);
+        for i in 0..n {
+            let key = match &self.project.channels[i].instrument {
+                Instrument::Synth(p) if p.engine() == 2 => {
+                    for src in p.tables.iter().flatten() {
+                        if self.library.get(src).is_none() && self.library.status(src).is_none() {
+                            self.library.request(src, rate);
+                        }
+                    }
+                    let loaded = |k: usize| {
+                        p.tables[k]
+                            .as_ref()
+                            .is_some_and(|s| self.library.get(s).is_some())
+                    };
+                    Some(TablesKey {
+                        tables: p.tables.clone(),
+                        loaded: [loaded(0), loaded(1)],
+                    })
+                }
+                _ => None,
+            };
+            if self.sent_tables[i] == key {
+                continue;
+            }
+            let tables = match &self.project.channels[i].instrument {
+                Instrument::Synth(p) if key.is_some() => {
+                    let lib = &self.library;
+                    gt_engine::tables::synth_tables(p, |s| lib.get(s).map(|l| Arc::clone(&l.data)))
+                }
+                _ => None,
+            };
+            if self.try_send(EngineCommand::SetChannelTables {
+                slot: i as u16,
+                tables,
+            }) {
+                self.sent_tables[i] = key;
+            }
+        }
+    }
+
     /// Brings a freshly created engine up to date with the current settings.
     fn sync_new_engine(&mut self) {
         self.send(EngineCommand::SetTempoMap(Box::new(
@@ -1327,6 +1396,7 @@ impl GloomApp {
         // A new engine has an empty mixer.
         self.sent_mixer = None;
         self.sent_fx = vec![Default::default(); STRIPS];
+        self.sent_tables.clear();
         self.lane_fx.clear();
         self.mod_fx.clear();
         self.sent_mods = None;
@@ -2638,6 +2708,7 @@ impl eframe::App for GloomApp {
         let plugin_moves = self.sync_plugins(&ctx);
         self.automation_frame(&ctx, &plugin_moves);
         self.sync_mixer();
+        self.sync_tables();
         self.sync_modulation();
         if self.main_view != MainView::PianoRoll {
             // Hidden mid-gesture (F6, tab click): the roll never sees the release.

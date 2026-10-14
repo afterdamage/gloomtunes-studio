@@ -9,7 +9,9 @@
 use std::path::PathBuf;
 
 use egui::{pos2, vec2, Pos2, RichText, Sense, Shape, Stroke, Ui};
-use gt_core::synth::{ModDest, ModSource, SynthParam as P, SynthPatch};
+use gt_core::synth::{
+    ModDest, ModSource, OpField, SynthParam as P, SynthPatch, ENGINES, FM_OPS, WT_TABLES,
+};
 use gt_core::{ChannelId, ParamId};
 
 use crate::GloomTheme;
@@ -38,6 +40,8 @@ pub enum SynthPanelAction {
     LoadFile(PathBuf),
     /// Save the patch as a user preset under its name.
     Save,
+    /// Pick a single-cycle WAV as wavetable oscillator `n`'s table.
+    LoadTable(usize),
 }
 
 /// Draws the editor for one synth channel.
@@ -61,7 +65,11 @@ pub fn synth_panel(
             .selected_text(patch.name.clone())
             .show_ui(ui, |ui| {
                 ui.label(RichText::new("Factory").small().color(theme.text_dim));
-                for f in SynthPatch::factory() {
+                let engine = patch.engine();
+                for f in SynthPatch::factory()
+                    .into_iter()
+                    .filter(|f| f.engine() == engine)
+                {
                     if ui.selectable_label(false, &f.name).clicked() {
                         *patch = f;
                         changed = true;
@@ -79,6 +87,23 @@ pub fn synth_panel(
             });
         ui.add(egui::TextEdit::singleline(&mut patch.name).desired_width(110.0))
             .on_hover_text("Preset name (used when saving)");
+        let engine = patch.engine();
+        egui::ComboBox::from_id_salt("synth_engine")
+            .width(80.0)
+            .selected_text(ENGINES[usize::from(engine.min(2))])
+            .show_ui(ui, |ui| {
+                for (i, name) in ENGINES.iter().enumerate() {
+                    if ui
+                        .selectable_label(usize::from(engine) == i, *name)
+                        .clicked()
+                    {
+                        patch.set(P::Engine, i as f32);
+                        changed = true;
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Sound engine: Gloom (subtractive), FM (six operators) or Wavetable");
         if ui
             .button("Save preset")
             .on_hover_text("Save this sound to your preset folder")
@@ -98,59 +123,57 @@ pub fn synth_panel(
     {
         {
             ui.horizontal_wrapped(|ui| {
-                for (title, osc) in [("OSC 1", 0), ("OSC 2", 1)] {
-                    let ps = if osc == 0 {
-                        [
-                            P::Osc1Wave,
-                            P::Osc1Octave,
-                            P::Osc1Semi,
-                            P::Osc1Fine,
-                            P::Osc1Level,
-                            P::Osc1Pw,
-                        ]
-                    } else {
-                        [
-                            P::Osc2Wave,
-                            P::Osc2Octave,
-                            P::Osc2Semi,
-                            P::Osc2Fine,
-                            P::Osc2Level,
-                            P::Osc2Pw,
-                        ]
-                    };
-                    section(ui, theme, right, title, |ui| {
-                        changed |= knob_rows(ui, theme, ch, patch, &[&ps[..3], &ps[3..]]);
-                    });
-                }
-                section(ui, theme, right, "SUB · NOISE · UNISON", |ui| {
-                    changed |= knob_rows(
-                        ui,
-                        theme,
-                        ch,
-                        patch,
-                        &[
-                            &[P::SubLevel, P::NoiseLevel],
-                            &[P::UnisonVoices, P::UnisonDetune, P::UnisonSpread],
-                        ],
-                    );
-                });
-                section(ui, theme, right, "FILTER", |ui| {
-                    ui.horizontal_top(|ui| {
-                        ui.vertical(|ui| {
+                let engine = patch.engine();
+                match engine {
+                    1 => fm_sections(ui, theme, right, ch, patch, &mut changed),
+                    _ => {
+                        for osc in 0..2 {
+                            if engine == 2 {
+                                wt_section(
+                                    ui,
+                                    theme,
+                                    right,
+                                    ch,
+                                    patch,
+                                    osc,
+                                    &mut changed,
+                                    &mut actions,
+                                );
+                            } else {
+                                osc_section(ui, theme, right, ch, patch, osc, &mut changed);
+                            }
+                        }
+                        section(ui, theme, right, "SUB · NOISE · UNISON", |ui| {
                             changed |= knob_rows(
                                 ui,
                                 theme,
                                 ch,
                                 patch,
                                 &[
-                                    &[P::Cutoff, P::Resonance, P::Drive],
-                                    &[P::FilterEnv, P::KeyTrack],
+                                    &[P::SubLevel, P::NoiseLevel],
+                                    &[P::UnisonVoices, P::UnisonDetune, P::UnisonSpread],
                                 ],
                             );
                         });
-                        filter_curve(ui, theme, patch, view.sample_rate);
-                    });
-                });
+                        section(ui, theme, right, "FILTER", |ui| {
+                            ui.horizontal_top(|ui| {
+                                ui.vertical(|ui| {
+                                    changed |= knob_rows(
+                                        ui,
+                                        theme,
+                                        ch,
+                                        patch,
+                                        &[
+                                            &[P::Cutoff, P::Resonance, P::Drive],
+                                            &[P::FilterEnv, P::KeyTrack],
+                                        ],
+                                    );
+                                });
+                                filter_curve(ui, theme, patch, view.sample_rate);
+                            });
+                        });
+                    }
+                }
                 section(ui, theme, right, "ENVELOPES", |ui| {
                     for (label, row) in [
                         (
@@ -193,6 +216,265 @@ pub fn synth_panel(
         actions.push(SynthPanelAction::Changed);
     }
     actions
+}
+
+fn osc_section(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    right: f32,
+    ch: Option<ChannelId>,
+    patch: &mut SynthPatch,
+    osc: usize,
+    changed: &mut bool,
+) {
+    let ps = osc_params(osc);
+    let title = if osc == 0 { "OSC 1" } else { "OSC 2" };
+    section(ui, theme, right, title, |ui| {
+        *changed |= knob_rows(ui, theme, ch, patch, &[&ps[..3], &ps[3..]]);
+    });
+}
+
+/// Wave, octave, semitones, fine, level and pulse width of oscillator `osc`.
+fn osc_params(osc: usize) -> [P; 6] {
+    if osc == 0 {
+        [
+            P::Osc1Wave,
+            P::Osc1Octave,
+            P::Osc1Semi,
+            P::Osc1Fine,
+            P::Osc1Level,
+            P::Osc1Pw,
+        ]
+    } else {
+        [
+            P::Osc2Wave,
+            P::Osc2Octave,
+            P::Osc2Semi,
+            P::Osc2Fine,
+            P::Osc2Level,
+            P::Osc2Pw,
+        ]
+    }
+}
+
+/// A wavetable oscillator: table (or user table), position, warp, pitch and level.
+#[allow(clippy::too_many_arguments)]
+fn wt_section(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    right: f32,
+    ch: Option<ChannelId>,
+    patch: &mut SynthPatch,
+    osc: usize,
+    changed: &mut bool,
+    actions: &mut Vec<SynthPanelAction>,
+) {
+    let [table, pos, warp, amount] = P::wt(osc);
+    let ps = osc_params(osc);
+    let title = if osc == 0 {
+        "WAVETABLE 1"
+    } else {
+        "WAVETABLE 2"
+    };
+    section(ui, theme, right, title, |ui| {
+        ui.horizontal(|ui| {
+            match patch.tables[osc]
+                .as_ref()
+                .map(gt_core::SampleSource::display_name)
+            {
+                Some(name) => {
+                    ui.label(RichText::new(name).small().color(theme.text))
+                        .on_hover_text("User table (replaces the factory table)");
+                    if ui
+                        .small_button("✕")
+                        .on_hover_text("Back to the factory table")
+                        .clicked()
+                    {
+                        patch.tables[osc] = None;
+                        *changed = true;
+                    }
+                }
+                None => {
+                    let cur = patch.get(table) as usize;
+                    egui::ComboBox::from_id_salt(("wt_table", osc))
+                        .width(110.0)
+                        .selected_text(
+                            RichText::new(WT_TABLES[cur.min(WT_TABLES.len() - 1)]).small(),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (i, n) in WT_TABLES.iter().enumerate() {
+                                if ui.selectable_label(cur == i, *n).clicked() {
+                                    patch.set(table, i as f32);
+                                    *changed = true;
+                                }
+                            }
+                        });
+                }
+            }
+            if ui
+                .small_button("Load…")
+                .on_hover_text("Use a single-cycle WAV (or frames of 2048 samples) as the table")
+                .clicked()
+            {
+                actions.push(SynthPanelAction::LoadTable(osc));
+            }
+        });
+        *changed |= knob_rows(
+            ui,
+            theme,
+            ch,
+            patch,
+            &[&[pos, warp, amount], &[ps[1], ps[2], ps[3], ps[4]]],
+        );
+    });
+}
+
+/// The FM engine: algorithm and feedback, the free matrix, and the six operators.
+fn fm_sections(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    right: f32,
+    ch: Option<ChannelId>,
+    patch: &mut SynthPatch,
+    changed: &mut bool,
+) {
+    let algorithm = patch.get(P::FmAlgorithm) as u8;
+    let free = algorithm >= gt_dsp::synth::fm::FREE;
+    section(ui, theme, right, "ALGORITHM", |ui| {
+        *changed |= knob_rows(ui, theme, ch, patch, &[&[P::FmAlgorithm, P::FmFeedback]]);
+        if free {
+            ui.label(
+                RichText::new("Row: modulated operator · column: modulator")
+                    .small()
+                    .color(theme.text_dim),
+            );
+            egui::Grid::new("fm_matrix")
+                .spacing(vec2(2.0, 1.0))
+                .show(ui, |ui| {
+                    ui.label("");
+                    for j in 0..FM_OPS {
+                        ui.label(
+                            RichText::new(format!("{}", j + 1))
+                                .small()
+                                .color(theme.text_dim),
+                        );
+                    }
+                    ui.label(RichText::new("Out").small().color(theme.text_dim));
+                    ui.end_row();
+                    for i in 0..FM_OPS {
+                        ui.label(
+                            RichText::new(format!("{}", i + 1))
+                                .small()
+                                .color(theme.text_dim),
+                        );
+                        for j in 0..FM_OPS {
+                            *changed |= pct_drag(ui, theme, ch, patch, P::fm_mod(i, j));
+                        }
+                        *changed |= pct_drag(ui, theme, ch, patch, P::fm_out(i));
+                        ui.end_row();
+                    }
+                });
+        } else {
+            let mut routes = Vec::new();
+            for op in 0..FM_OPS {
+                for m in gt_dsp::synth::fm::modulators(algorithm, op) {
+                    routes.push(format!("{}→{}", m + 1, op + 1));
+                }
+            }
+            let carriers: Vec<String> = (0..FM_OPS)
+                .filter(|&o| gt_dsp::synth::fm::is_carrier(algorithm, o))
+                .map(|o| (o + 1).to_string())
+                .collect();
+            ui.label(
+                RichText::new(format!(
+                    "Out: {}\n{}\n6 feeds back into itself",
+                    carriers.join(", "),
+                    if routes.is_empty() {
+                        "no modulation".to_owned()
+                    } else {
+                        routes.join("  ")
+                    }
+                ))
+                .small()
+                .color(theme.text_dim),
+            );
+        }
+    });
+    section(ui, theme, right, "OPERATORS", |ui| {
+        for op in 0..FM_OPS {
+            ui.horizontal(|ui| {
+                let carrier = if free {
+                    patch.get(P::fm_out(op)) > 0.0
+                } else {
+                    gt_dsp::synth::fm::is_carrier(algorithm, op)
+                };
+                let colour = if carrier {
+                    theme.accent
+                } else {
+                    theme.text_dim
+                };
+                ui.add_sized(
+                    vec2(30.0, 46.0),
+                    egui::Label::new(
+                        RichText::new(format!("OP {}", op + 1))
+                            .small()
+                            .color(colour),
+                    ),
+                )
+                .on_hover_text(if carrier {
+                    "Carrier: heard"
+                } else {
+                    "Modulator"
+                });
+                let row: Vec<P> = [
+                    OpField::Ratio,
+                    OpField::Fixed,
+                    OpField::Freq,
+                    OpField::Fine,
+                    OpField::Level,
+                    OpField::Attack,
+                    OpField::Decay,
+                    OpField::Sustain,
+                    OpField::Release,
+                    OpField::KeyScale,
+                    OpField::RateScale,
+                    OpField::Velocity,
+                ]
+                .into_iter()
+                .map(|f| P::op(op, f))
+                .collect();
+                *changed |= knob_rows(ui, theme, ch, patch, &[&row]);
+            });
+        }
+    });
+}
+
+/// A percentage drag box for a 0..1 parameter, with the automation menu.
+fn pct_drag(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    ch: Option<ChannelId>,
+    patch: &mut SynthPatch,
+    p: P,
+) -> bool {
+    let mut pct = patch.get(p) * 100.0;
+    let r = ui
+        .add(
+            egui::DragValue::new(&mut pct)
+                .range(0.0..=100.0)
+                .speed(0.5)
+                .fixed_decimals(0),
+        )
+        .on_hover_text(p.info().name);
+    if let Some(channel) = ch {
+        crate::param_ui::param_menu(theme, &r, ParamId::Synth { channel, param: p });
+    }
+    if r.changed() {
+        patch.set(p, pct / 100.0);
+        true
+    } else {
+        false
+    }
 }
 
 fn row_label(ui: &mut Ui, theme: &GloomTheme, text: &str) {
@@ -272,6 +554,7 @@ fn mod_matrix(
     patch: &mut SynthPatch,
 ) -> bool {
     let mut changed = false;
+    let engine = patch.engine();
     egui::Grid::new("synth_mods")
         .num_columns(4)
         .spacing(vec2(4.0, 1.0))
@@ -294,7 +577,7 @@ fn mod_matrix(
                     .width(84.0)
                     .selected_text(RichText::new(m.dest.label()).small())
                     .show_ui(ui, |ui| {
-                        for &d in ModDest::ALL {
+                        for &d in ModDest::ALL.iter().filter(|&&d| dest_used(d, engine)) {
                             changed |= ui.selectable_value(&mut m.dest, d, d.label()).changed();
                         }
                     });
@@ -319,6 +602,25 @@ fn mod_matrix(
             }
         });
     changed
+}
+
+/// True when engine `engine` has the matrix destination `d`.
+fn dest_used(d: ModDest, engine: u8) -> bool {
+    use ModDest as D;
+    match d {
+        D::Osc1Pw | D::Osc2Pw => engine == 0,
+        D::FmIndex | D::FmFeedback => engine == 1,
+        D::Wt1Pos | D::Wt2Pos | D::Wt1Warp | D::Wt2Warp => engine == 2,
+        D::Osc1Pitch
+        | D::Osc2Pitch
+        | D::Osc1Level
+        | D::Osc2Level
+        | D::NoiseLevel
+        | D::Cutoff
+        | D::Resonance
+        | D::UnisonDetune => engine != 1,
+        _ => true,
+    }
 }
 
 /// Filter magnitude response on log frequency (20 Hz to 20 kHz) and dB (-48 to +24) axes.

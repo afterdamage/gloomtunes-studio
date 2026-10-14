@@ -333,6 +333,11 @@ impl Channel {
                     .into_iter()
                     .flat_map(crate::pads::DrumKit::sources),
             )
+            .chain(
+                self.synth()
+                    .into_iter()
+                    .flat_map(|p| p.tables.iter().flatten()),
+            )
     }
 
     /// Every sample the channel plays, mutably.
@@ -340,7 +345,8 @@ impl Channel {
         match &mut self.instrument {
             Instrument::Sampler(s) => Box::new(s.sources_mut()),
             Instrument::Drums(k) => Box::new(k.sources_mut()),
-            Instrument::Synth(_) | Instrument::Plugin(_) => Box::new(std::iter::empty()),
+            Instrument::Synth(p) => Box::new(p.tables.iter_mut().flatten()),
+            Instrument::Plugin(_) => Box::new(std::iter::empty()),
         }
     }
 }

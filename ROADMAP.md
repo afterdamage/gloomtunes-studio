@@ -636,6 +636,18 @@ sound identical; the golden export test stays.
 - Limits: time-stretch mode only for a single sample (not zones); pads are one-shot; the slicer
   guesses the loop length from its tempo (editable).
 
+### Prompt 24: FM and wavetable synths
+- Gloom Synth's envelopes, LFOs, mod matrix and voice manager shared by three engines; the
+  rack adds FM and Wavetable channels (D129).
+- FM: six operators, eight algorithms plus a free routing matrix, feedback, ratio or fixed
+  frequency, per-operator envelopes, key scaling, oversampling where needed (D131).
+- Wavetable: two oscillators with position modulation, mip-mapped band-limited tables, eight
+  generated factory tables, single-cycle WAV import, sync/bend/PWM warps, the Gloom filter
+  (D130).
+- 22 original presets per engine; tests for Bessel spectra, high-note aliasing, preset
+  round-trips; CPU benchmarks at 16 voices (`cargo bench -p gt-dsp --bench synth`).
+- Limits: user wavetables are saved in projects but not in preset files; FM has no filter.
+
 ---
 
 ## v1.0 scope

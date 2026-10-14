@@ -28,6 +28,7 @@ mod plugin;
 mod processor;
 pub mod song;
 pub mod stretch;
+pub mod tables;
 pub mod transport;
 pub mod zones;
 

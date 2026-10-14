@@ -94,6 +94,14 @@ pub enum EngineCommand {
         /// The new map, or none. The old one comes back as garbage.
         zones: Option<Arc<crate::zones::ZoneMap>>,
     },
+    /// Replace the wavetables a synth channel's wavetable oscillators read (Prompt 24).
+    SetChannelTables {
+        /// Channel slot.
+        slot: u16,
+        /// The new tables, or none (the oscillators play sines). The old ones come back as
+        /// garbage.
+        tables: Option<Arc<gt_dsp::synth::wavetable::SynthTables>>,
+    },
     /// Start a note on a channel now (auditioning from the UI).
     NoteOn {
         /// Channel slot.
@@ -194,6 +202,7 @@ impl EngineCommand {
                 | Self::SetChannelParams { .. }
                 | Self::SetChannelSample { .. }
                 | Self::SetChannelZones { .. }
+                | Self::SetChannelTables { .. }
                 | Self::PreviewSample(_)
                 | Self::SetMixer(_)
                 | Self::SetEffect { .. }
@@ -289,6 +298,8 @@ pub enum Garbage {
     Sample(Arc<SampleData>),
     /// A key map no longer used by a channel.
     Zones(Arc<crate::zones::ZoneMap>),
+    /// Wavetables no longer used by a synth.
+    Tables(Arc<gt_dsp::synth::wavetable::SynthTables>),
     /// A mixer-settings box, already copied into the mixer.
     Mixer(Box<MixerParams>),
     /// An effect taken out of a slot.

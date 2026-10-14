@@ -488,6 +488,9 @@ enum InstrumentDto {
         preset_name: String,
         params: BTreeMap<String, f32>,
         mods: Vec<SynthModDto>,
+        /// User wavetables of the two wavetable oscillators (Prompt 24).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tables: Vec<Option<SampleDto>>,
     },
     /// A third-party plugin (Step 11).
     Plugin { plugin: PluginDto },
@@ -1210,6 +1213,15 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                             amount: m.amount,
                         })
                         .collect(),
+                    tables: if patch.tables.iter().all(Option::is_none) {
+                        Vec::new()
+                    } else {
+                        patch
+                            .tables
+                            .iter()
+                            .map(|t| t.as_ref().map(|t| sample_dto(t, dir, embedded)))
+                            .collect()
+                    },
                 },
             },
         })
@@ -1637,11 +1649,15 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                 preset_name,
                 params,
                 mods,
+                tables,
             } => {
                 let mut patch = SynthPatch {
                     name: preset_name,
                     ..SynthPatch::default()
                 };
+                for (t, d) in patch.tables.iter_mut().zip(tables) {
+                    *t = d.and_then(|d| sample(d, &mut warnings));
+                }
                 for (key, v) in &params {
                     match SynthParam::from_key(key) {
                         Some(q) => patch.set(q, *v),
@@ -2620,6 +2636,28 @@ mod tests {
         let v = to_value(&p, None, &HashMap::new());
         let back = from_value(v, None).unwrap().project;
         assert_eq!(back.channels[i].instrument, want);
+    }
+
+    #[test]
+    fn fm_and_wavetable_patches_round_trip() {
+        use gt_core::synth::{OpField, SynthParam};
+        let mut p = Project::empty();
+        for mut patch in SynthPatch::factory() {
+            if patch.engine() == 2 {
+                patch.tables[1] = Some(SampleSource::File("/tmp/x/cycle.wav".into()));
+            }
+            p.add_synth_channel(&patch.name.clone(), patch);
+        }
+        let fm = SynthPatch::default()
+            .with(SynthParam::Engine, 1.0)
+            .with(SynthParam::op(4, OpField::Ratio), 3.5)
+            .with(SynthParam::fm_mod(2, 5), 0.4);
+        p.add_synth_channel("fm", fm);
+        let want: Vec<_> = p.channels.iter().map(|c| c.instrument.clone()).collect();
+        let v = to_value(&p, None, &HashMap::new());
+        let back = from_value(v, None).unwrap().project;
+        let got: Vec<_> = back.channels.iter().map(|c| c.instrument.clone()).collect();
+        assert_eq!(got, want);
     }
 
     #[test]

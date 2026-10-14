@@ -105,7 +105,7 @@ impl Upsampler2x {
 }
 
 /// Halves the rate of one channel.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Downsampler2x {
     coefs: [f32; COEFS],
     stages: [Stage; COEFS],

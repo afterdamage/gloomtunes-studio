@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use gt_core::playlist::Curve;
 use gt_core::synth::{
-    ModDest as DocDest, ModSlot as DocModSlot, ModSource as DocSource, SynthParam as P,
+    ModDest as DocDest, ModSlot as DocModSlot, ModSource as DocSource, OpField, SynthParam as P,
 };
 use gt_core::{
     Adsr, AutoPoint, Channel, ClipKind, ControlKind, Fade, FadeCurve, Instrument, LoopMode, Note,
@@ -15,8 +15,11 @@ use gt_core::{
 };
 
 use crate::control::ParamDest;
+use gt_dsp::synth::fm::{FmSettings, OpSettings};
+use gt_dsp::synth::wavetable::Warp;
 use gt_dsp::synth::{
-    EnvSettings, LfoSettings, ModDest, ModSlot, ModSource, OscSettings, SynthSettings, MOD_SLOTS,
+    Engine, EnvSettings, LfoSettings, ModDest, ModSlot, ModSource, OscSettings, SynthSettings,
+    WtOscSettings, MOD_SLOTS,
 };
 use gt_dsp::{Glide, LfoWave, NoteExpr, Wave};
 
@@ -1160,6 +1163,12 @@ fn synth_settings_of(
                 DocDest::Lfo1Rate => ModDest::Lfo1Rate,
                 DocDest::Lfo2Rate => ModDest::Lfo2Rate,
                 DocDest::UnisonDetune => ModDest::UnisonDetune,
+                DocDest::FmIndex => ModDest::FmIndex,
+                DocDest::FmFeedback => ModDest::FmFeedback,
+                DocDest::Wt1Pos => ModDest::Wt1Pos,
+                DocDest::Wt2Pos => ModDest::Wt2Pos,
+                DocDest::Wt1Warp => ModDest::Wt1Warp,
+                DocDest::Wt2Warp => ModDest::Wt2Warp,
             },
             amount: d.amount.clamp(-1.0, 1.0),
         };
@@ -1209,6 +1218,50 @@ fn synth_settings_of(
         velocity_sensitivity: v(P::VelocitySens),
         volume: v(P::Volume),
         mods,
+        engine: match v(P::Engine) as u8 {
+            1 => Engine::Fm,
+            2 => Engine::Wavetable,
+            _ => Engine::Subtractive,
+        },
+        fm: FmSettings {
+            ops: std::array::from_fn(|o| {
+                let f = |field| v(P::op(o, field));
+                OpSettings {
+                    ratio: f(OpField::Ratio),
+                    fixed: f(OpField::Fixed) >= 0.5,
+                    fixed_hz: f(OpField::Freq),
+                    fine_cents: f(OpField::Fine),
+                    level: f(OpField::Level),
+                    env: EnvSettings {
+                        attack_ms: f(OpField::Attack),
+                        decay_ms: f(OpField::Decay),
+                        sustain: f(OpField::Sustain),
+                        release_ms: f(OpField::Release),
+                    },
+                    key_scale_db: f(OpField::KeyScale),
+                    rate_scale: f(OpField::RateScale),
+                    velocity: f(OpField::Velocity),
+                }
+            }),
+            algorithm: v(P::FmAlgorithm) as u8,
+            feedback: v(P::FmFeedback),
+            matrix: std::array::from_fn(|i| std::array::from_fn(|j| v(P::fm_mod(i, j)))),
+            out: std::array::from_fn(|i| v(P::fm_out(i))),
+        },
+        wt: std::array::from_fn(|o| {
+            let [table, pos, warp, amount] = P::wt(o);
+            WtOscSettings {
+                table: v(table) as u8,
+                position: v(pos),
+                warp: match v(warp) as u8 {
+                    1 => Warp::Sync,
+                    2 => Warp::Bend,
+                    3 => Warp::Pwm,
+                    _ => Warp::Off,
+                },
+                warp_amount: v(amount),
+            }
+        }),
     }
 }
 
