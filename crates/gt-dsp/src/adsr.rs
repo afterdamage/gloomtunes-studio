@@ -126,6 +126,12 @@ impl Adsr {
         self.release();
     }
 
+    /// Enters the release stage with the release time of `params` (a choke's short fade).
+    pub fn release_with(&mut self, params: AdsrParams) {
+        self.p.release_k = params.release_k;
+        self.release();
+    }
+
     /// Stops immediately.
     pub fn reset(&mut self) {
         self.stage = Stage::Idle;

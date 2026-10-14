@@ -32,11 +32,13 @@ use gt_core::modulation::SYNC_RATES;
 use gt_core::synth::{ModDest, ModSlot, ModSource, SynthParam, SynthPatch, MOD_SLOTS};
 use gt_core::{
     Adsr, AudioEdit, AudioInput, AudioTake, AutoPoint, Automation, BuiltInSample, Channel,
-    ChannelId, Clip, ClipId, ClipKind, ClipStretch, Curve, EffectSlot, Fade, FadeCurve, Frozen,
-    Gap, Instrument, LfoRate, LfoShape, LoopMode, Marker, MidiControl, ModSourceKind, Modulator,
-    ModulatorId, Note, ParamId, Pattern, PatternId, PluginFormat, PluginInstanceId, PluginKind,
-    PluginParamInfo, PluginRef, Project, SampleSource, SamplerSettings, SigChange, StretchMode,
-    TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, Track, TrackId, WarpMarker, FX_SLOTS, SENDS,
+    ChannelId, Clip, ClipId, ClipKind, ClipStretch, Curve, DrumKit, EffectSlot, Fade, FadeCurve,
+    Frozen, Gap, Instrument, Interp, KeyZone, LfoRate, LfoShape, LfoTarget, LoopMode, Marker,
+    MidiControl, ModSourceKind, Modulator, ModulatorId, Note, Pad, PadLayer, ParamId, Pattern,
+    PatternId, PluginFormat, PluginInstanceId, PluginKind, PluginParamInfo, PluginRef, Project,
+    SampleSource, SamplerFilter, SamplerFilterMode, SamplerLfo, SamplerSettings, SigChange,
+    StretchMode, TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, Track, TrackId, WarpMarker,
+    FX_SLOTS, SENDS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -284,7 +286,7 @@ pub fn sample_files(project: &Project) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = project
         .channels
         .iter()
-        .filter_map(|c| c.sample())
+        .flat_map(|c| c.samples())
         .chain(project.playlist.clips.iter().flat_map(|c| {
             match &c.kind {
                 ClipKind::Audio { source, takes, .. } => std::iter::once(source)
@@ -321,9 +323,7 @@ pub fn relink(project: &mut Project, from: &Path, to: &Path) -> usize {
         }
     };
     for c in &mut project.channels {
-        if let Some(Some(s)) = c.sampler_mut().map(|s| s.sample.as_mut()) {
-            fix(s);
-        }
+        c.samples_mut().for_each(&mut fix);
     }
     for c in &mut project.playlist.clips {
         if let ClipKind::Audio { source, takes, .. } = &mut c.kind {
@@ -480,6 +480,9 @@ enum InstrumentDto {
         decay_ms: f32,
         sustain: f32,
         release_ms: f32,
+        /// Sampler 2 settings (Prompt 23); absent in older files and when all are default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sampler2: Option<Sampler2Dto>,
     },
     Synth {
         preset_name: String,
@@ -488,6 +491,119 @@ enum InstrumentDto {
     },
     /// A third-party plugin (Step 11).
     Plugin { plugin: PluginDto },
+    /// Drum pads (Prompt 23).
+    Drums { banks: Vec<Vec<PadDto>> },
+}
+
+#[derive(Serialize, Deserialize)]
+struct PadLayerDto {
+    sample: SampleDto,
+    vel_lo: f32,
+    vel_hi: f32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PadDto {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    layers: Vec<PadLayerDto>,
+    tune: f32,
+    gain: f32,
+    pan: f32,
+    env: EnvDto,
+    #[serde(default)]
+    choke: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EnvDto {
+    attack_ms: f32,
+    decay_ms: f32,
+    sustain: f32,
+    release_ms: f32,
+}
+
+impl EnvDto {
+    fn of(a: &Adsr) -> Self {
+        Self {
+            attack_ms: a.attack_ms,
+            decay_ms: a.decay_ms,
+            sustain: a.sustain,
+            release_ms: a.release_ms,
+        }
+    }
+
+    fn adsr(&self) -> Adsr {
+        Adsr {
+            attack_ms: self.attack_ms,
+            decay_ms: self.decay_ms,
+            sustain: self.sustain,
+            release_ms: self.release_ms,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct LfoDto {
+    shape: String,
+    rate: f32,
+    target: String,
+    amount: f32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ZoneDto {
+    sample: SampleDto,
+    root: u8,
+    key_lo: u8,
+    key_hi: u8,
+    vel_lo: f32,
+    vel_hi: f32,
+    #[serde(default)]
+    tune: f32,
+    #[serde(default = "unity")]
+    gain: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    start: f32,
+    #[serde(default = "unity", skip_serializing_if = "is_one")]
+    end: f32,
+}
+
+fn is_one(v: &f32) -> bool {
+    *v == 1.0
+}
+
+fn unity() -> f32 {
+    1.0
+}
+
+/// Sampler 2 settings (Prompt 23).
+#[derive(Serialize, Deserialize)]
+struct Sampler2Dto {
+    interp: String,
+    reverse: bool,
+    filter: String,
+    cutoff: f32,
+    resonance: f32,
+    filter_env_amount: f32,
+    filter_env: EnvDto,
+    lfos: Vec<LfoDto>,
+    root_key: u8,
+    key_lo: u8,
+    key_hi: u8,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    zones: Vec<ZoneDto>,
+    round_robin: bool,
+    mono: bool,
+    legato: bool,
+    glide_ms: f32,
+    voices: u8,
+    stretch_beats: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    slice_beats: f32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -951,6 +1067,76 @@ fn sample_dto(
     }
 }
 
+/// The Sampler 2 part of a sampler, or none when it is all default (older files read the
+/// same).
+fn sampler2_dto(
+    s: &SamplerSettings,
+    dir: Option<&Path>,
+    embedded: &HashMap<PathBuf, String>,
+) -> Option<Sampler2Dto> {
+    let d = SamplerSettings::default();
+    let plain = s.interp == d.interp
+        && s.reverse == d.reverse
+        && s.filter == d.filter
+        && s.lfos == d.lfos
+        && s.root_key == d.root_key
+        && s.key_lo == d.key_lo
+        && s.key_hi == d.key_hi
+        && s.zones.is_empty()
+        && s.round_robin == d.round_robin
+        && s.mono == d.mono
+        && s.legato == d.legato
+        && s.glide_ms == d.glide_ms
+        && s.voices == d.voices
+        && s.stretch_beats == d.stretch_beats
+        && s.slice_beats == d.slice_beats;
+    (!plain).then(|| Sampler2Dto {
+        interp: s.interp.key().to_owned(),
+        reverse: s.reverse,
+        filter: s.filter.mode.name().to_owned(),
+        cutoff: s.filter.cutoff,
+        resonance: s.filter.resonance,
+        filter_env_amount: s.filter.env_amount,
+        filter_env: EnvDto::of(&s.filter.env),
+        lfos: s
+            .lfos
+            .iter()
+            .map(|l| LfoDto {
+                shape: l.shape.key().to_owned(),
+                rate: l.rate,
+                target: l.target.name().to_owned(),
+                amount: l.amount,
+            })
+            .collect(),
+        root_key: s.root_key,
+        key_lo: s.key_lo,
+        key_hi: s.key_hi,
+        zones: s
+            .zones
+            .iter()
+            .map(|z| ZoneDto {
+                sample: sample_dto(&z.sample, dir, embedded),
+                root: z.root,
+                key_lo: z.key_lo,
+                key_hi: z.key_hi,
+                vel_lo: z.vel_lo,
+                vel_hi: z.vel_hi,
+                tune: z.tune,
+                gain: z.gain,
+                start: z.start,
+                end: z.end,
+            })
+            .collect(),
+        round_robin: s.round_robin,
+        mono: s.mono,
+        legato: s.legato,
+        glide_ms: s.glide_ms,
+        voices: s.voices,
+        stretch_beats: s.stretch_beats,
+        slice_beats: s.slice_beats,
+    })
+}
+
 fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, String>) -> ProjectDto {
     let channels = p
         .channels
@@ -975,9 +1161,38 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                     decay_ms: s.adsr.decay_ms,
                     sustain: s.adsr.sustain,
                     release_ms: s.adsr.release_ms,
+                    sampler2: sampler2_dto(s, dir, embedded),
                 },
                 Instrument::Plugin(plugin) => InstrumentDto::Plugin {
                     plugin: plugin_dto(plugin),
+                },
+                Instrument::Drums(kit) => InstrumentDto::Drums {
+                    banks: kit
+                        .banks
+                        .iter()
+                        .map(|bank| {
+                            bank.iter()
+                                .map(|p| PadDto {
+                                    name: p.name.clone(),
+                                    layers: p
+                                        .layers
+                                        .iter()
+                                        .map(|l| PadLayerDto {
+                                            sample: sample_dto(&l.sample, dir, embedded),
+                                            vel_lo: l.vel_lo,
+                                            vel_hi: l.vel_hi,
+                                        })
+                                        .collect(),
+                                    tune: p.tune,
+                                    gain: p.gain,
+                                    pan: p.pan,
+                                    env: EnvDto::of(&p.adsr),
+                                    choke: p.choke,
+                                    output: p.output,
+                                })
+                                .collect()
+                        })
+                        .collect(),
                 },
                 Instrument::Synth(patch) => InstrumentDto::Synth {
                     preset_name: patch.name.clone(),
@@ -1346,23 +1561,78 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                 decay_ms,
                 sustain,
                 release_ms,
-            } => Instrument::Sampler(SamplerSettings {
-                sample: src.and_then(|s| sample(s, &mut warnings)),
-                pitch,
-                start,
-                end,
-                loop_mode: if looped {
-                    LoopMode::Loop
-                } else {
-                    LoopMode::OneShot
-                },
-                adsr: Adsr {
-                    attack_ms,
-                    decay_ms,
-                    sustain,
-                    release_ms,
-                },
-            }),
+                sampler2,
+            } => {
+                let mut s = SamplerSettings::default();
+                if let Some(x) = sampler2 {
+                    s.interp = Interp::from_key(&x.interp);
+                    s.reverse = x.reverse;
+                    s.filter = SamplerFilter {
+                        mode: SamplerFilterMode::from_name(&x.filter),
+                        cutoff: x.cutoff,
+                        resonance: x.resonance,
+                        env_amount: x.filter_env_amount,
+                        env: x.filter_env.adsr(),
+                    };
+                    for (l, d) in s.lfos.iter_mut().zip(&x.lfos) {
+                        *l = SamplerLfo {
+                            shape: LfoShape::ALL
+                                .into_iter()
+                                .find(|k| k.key() == d.shape)
+                                .unwrap_or_default(),
+                            rate: d.rate,
+                            target: LfoTarget::from_name(&d.target),
+                            amount: d.amount,
+                        };
+                    }
+                    s.root_key = x.root_key;
+                    s.key_lo = x.key_lo;
+                    s.key_hi = x.key_hi;
+                    s.zones = x
+                        .zones
+                        .into_iter()
+                        .filter_map(|z| {
+                            Some(KeyZone {
+                                sample: sample(z.sample, &mut warnings)?,
+                                root: z.root,
+                                key_lo: z.key_lo,
+                                key_hi: z.key_hi,
+                                vel_lo: z.vel_lo,
+                                vel_hi: z.vel_hi,
+                                tune: z.tune,
+                                gain: z.gain,
+                                start: z.start,
+                                end: z.end,
+                            })
+                        })
+                        .collect();
+                    s.round_robin = x.round_robin;
+                    s.mono = x.mono;
+                    s.legato = x.legato;
+                    s.glide_ms = x.glide_ms;
+                    s.voices = x.voices;
+                    s.stretch_beats = x.stretch_beats;
+                    s.slice_beats = x.slice_beats;
+                }
+                Instrument::Sampler(SamplerSettings {
+                    sample: src.and_then(|s| sample(s, &mut warnings)),
+                    pitch,
+                    start,
+                    end,
+                    loop_mode: if looped {
+                        LoopMode::Loop
+                    } else {
+                        LoopMode::OneShot
+                    },
+                    adsr: Adsr {
+                        attack_ms,
+                        decay_ms,
+                        sustain,
+                        release_ms,
+                    },
+                    ..s
+                })
+            }
             InstrumentDto::Synth {
                 preset_name,
                 params,
@@ -1391,6 +1661,36 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                 Some(pl) => Instrument::Plugin(Box::new(pl)),
                 None => continue,
             },
+            InstrumentDto::Drums { banks } => {
+                let banks = banks
+                    .into_iter()
+                    .map(|bank| {
+                        bank.into_iter()
+                            .map(|d| Pad {
+                                name: d.name,
+                                layers: d
+                                    .layers
+                                    .into_iter()
+                                    .filter_map(|l| {
+                                        Some(PadLayer {
+                                            sample: sample(l.sample, &mut warnings)?,
+                                            vel_lo: l.vel_lo,
+                                            vel_hi: l.vel_hi,
+                                        })
+                                    })
+                                    .collect(),
+                                tune: d.tune,
+                                gain: d.gain,
+                                pan: d.pan,
+                                adsr: d.env.adsr(),
+                                choke: d.choke,
+                                output: d.output,
+                            })
+                            .collect()
+                    })
+                    .collect();
+                Instrument::Drums(Box::new(DrumKit { banks }))
+            }
         };
         p.channels.push(Channel {
             id: ChannelId(c.id),
@@ -2293,6 +2593,77 @@ mod tests {
         let back = from_value(v, None).unwrap().project;
         assert_eq!(back.mixer.strips[2].slots[0], Some(slot));
         assert_eq!(back.mixer.strips[2].slots[1].as_ref().unwrap().mix, 1.0);
+    }
+
+    #[test]
+    fn drum_kits_round_trip() {
+        let mut p = Project::demo();
+        let id = p.add_drum_channel("Kit").unwrap();
+        let i = p.channel_index(id).unwrap();
+        let k = p.channels[i].drums_mut().unwrap();
+        k.banks
+            .push(vec![Pad::default(); gt_core::pads::PADS_PER_BANK]);
+        let pad = &mut k.banks[1][5];
+        pad.name = "Hat".into();
+        pad.set_layers(vec![
+            SampleSource::File("/tmp/k/hat soft.wav".into()),
+            SampleSource::File("/tmp/k/hat hard.wav".into()),
+        ]);
+        pad.tune = -2.0;
+        pad.gain = 0.5;
+        pad.pan = 0.25;
+        pad.adsr.decay_ms = 120.0;
+        pad.adsr.sustain = 0.0;
+        pad.choke = 2;
+        pad.output = Some(4);
+        let want = p.channels[i].instrument.clone();
+        let v = to_value(&p, None, &HashMap::new());
+        let back = from_value(v, None).unwrap().project;
+        assert_eq!(back.channels[i].instrument, want);
+    }
+
+    #[test]
+    fn sampler2_settings_and_zones_round_trip() {
+        let mut p = Project::demo();
+        let i = p
+            .channels
+            .iter()
+            .position(|c| c.sampler().is_some())
+            .unwrap();
+        // A plain sampler writes no Sampler 2 block.
+        let v = to_value(&p, None, &HashMap::new());
+        assert!(v["project"]["channels"][i]["instrument"]
+            .get("sampler2")
+            .is_none());
+        let s = p.channels[i].sampler_mut().unwrap();
+        s.interp = Interp::Best;
+        s.reverse = true;
+        s.filter.mode = SamplerFilterMode::BandPass;
+        s.filter.cutoff = 1234.0;
+        s.filter.env_amount = -3.0;
+        s.lfos[1] = SamplerLfo {
+            shape: LfoShape::SawUp,
+            rate: 2.5,
+            target: LfoTarget::Pan,
+            amount: 0.75,
+        };
+        s.root_key = 48;
+        s.key_lo = 36;
+        s.key_hi = 72;
+        s.mono = true;
+        s.legato = true;
+        s.glide_ms = 80.0;
+        s.voices = 4;
+        s.round_robin = true;
+        s.stretch_beats = 8.0;
+        let mut z = KeyZone::new(SampleSource::File("/tmp/x/C4 pp.wav".into()), 60);
+        z.vel_hi = 0.5;
+        z.tune = -0.25;
+        s.zones = vec![z];
+        let want = s.clone();
+        let v = to_value(&p, None, &HashMap::new());
+        let back = from_value(v, None).unwrap().project;
+        assert_eq!(back.channels[i].sampler(), Some(&want));
     }
 
     #[test]

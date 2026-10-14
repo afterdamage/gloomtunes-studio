@@ -29,6 +29,7 @@ mod processor;
 pub mod song;
 pub mod stretch;
 pub mod transport;
+pub mod zones;
 
 pub use atomic::AtomicF32;
 pub use channel::VOICES_PER_CHANNEL;

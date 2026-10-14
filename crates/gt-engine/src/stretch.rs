@@ -208,6 +208,38 @@ pub fn job(project: &Project, clip: &Clip, sample: &SampleData) -> Option<Stretc
     })
 }
 
+/// The render of a sampler in time-stretch mode (Prompt 23): its sample fitted to
+/// `stretch_beats` beats at the song's starting tempo, at its own pitch. `None` when the mode
+/// is off.
+pub fn fit_job(
+    project: &Project,
+    s: &gt_core::SamplerSettings,
+    sample: &SampleData,
+) -> Option<StretchJob> {
+    let source = s.sample.as_ref()?;
+    if s.stretch_beats <= 0.0 || sample.frames() == 0 || !s.zones.is_empty() {
+        return None;
+    }
+    let bpm = project.tempo.bpm_at(Tick(0)).max(1.0);
+    let rate = f64::from(sample.sample_rate.max(1));
+    let frames = (f64::from(s.stretch_beats) * 60.0 / bpm * rate)
+        .ceil()
+        .max(1.0) as usize;
+    let mut h = DefaultHasher::new();
+    "fit".hash(&mut h);
+    source.hash(&mut h);
+    sample.sample_rate.hash(&mut h);
+    sample.frames().hash(&mut h);
+    frames.hash(&mut h);
+    Some(StretchJob {
+        key: h.finish(),
+        source: source.clone(),
+        map: TimeMap::linear(sample.frames() as f64 / frames as f64, frames),
+        semitones: 0.0,
+        frames,
+    })
+}
+
 /// Every render the project's audio clips need, one per key, for the sources `samples` has.
 pub fn jobs(
     project: &Project,

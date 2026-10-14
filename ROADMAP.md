@@ -624,6 +624,18 @@ sound identical; the golden export test stays.
 - Limits: built-in instruments ignore CCs other than 1 and 64; tools on the edited channel and
   editable ghosts only; the generator writes triads only (no 7ths), one chord per bar.
 
+### Prompt 23: Sampler 2, drum pads, beat slicer
+- Sampler: windowed-sinc interpolation (Good, Best; Linear stays the draft default), reverse,
+  multi-mode filter with its own envelope, two LFOs, root key and key range, key zones and
+  velocity layers from a folder or dropped files, round robin, voice limit, mono/legato/glide,
+  time-stretch mode (D126, D127).
+- Drum pads: banks of 16 pads with velocity layers, tuning, envelope, choke groups and their
+  own mixer outputs, played from the rack (pad 1) and the piano roll (D127).
+- Beat slicer: slice on transients or a grid, slices on keys from C3, export a pattern that
+  replays the loop at any tempo (D128).
+- Limits: time-stretch mode only for a single sample (not zones); pads are one-shot; the slicer
+  guesses the loop length from its tempo (editable).
+
 ---
 
 ## v1.0 scope

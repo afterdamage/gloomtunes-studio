@@ -843,6 +843,105 @@ pub enum InstrumentKind {
     Plugin,
 }
 
+/// Sampler 2 settings as the engine uses them (Prompt 23).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SamplerParams {
+    /// Sinc half-width, 0 for linear.
+    pub sinc: usize,
+    /// Play backwards.
+    pub reverse: bool,
+    /// Filter response.
+    pub filter: Option<gt_dsp::fx::FilterMode>,
+    /// Cutoff in Hz.
+    pub cutoff: f32,
+    /// Resonance, 0 to 1.
+    pub resonance: f32,
+    /// Filter envelope depth, octaves.
+    pub env_amount: f32,
+    /// Filter envelope.
+    pub filter_env: Adsr,
+    /// The LFOs.
+    pub lfos: [gt_dsp::VoiceLfo; 2],
+    /// Root key of the single sample.
+    pub root_key: u8,
+    /// Key range of the single sample.
+    pub key_lo: u8,
+    /// Key range of the single sample.
+    pub key_hi: u8,
+    /// Zones answering the same note take turns.
+    pub round_robin: bool,
+    /// One voice at a time.
+    pub mono: bool,
+    /// Mono notes overlapping glide without restarting.
+    pub legato: bool,
+    /// Mono glide time, ms.
+    pub glide_ms: f32,
+    /// Voice limit.
+    pub voices: u8,
+}
+
+impl Default for SamplerParams {
+    fn default() -> Self {
+        Self::from_settings(&gt_core::SamplerSettings::default())
+    }
+}
+
+impl SamplerParams {
+    /// The engine's copy of a sampler's settings.
+    pub fn from_settings(s: &gt_core::SamplerSettings) -> Self {
+        use gt_core::{LfoShape, LfoTarget, SamplerFilterMode};
+        use gt_dsp::fx::FilterMode;
+        use gt_dsp::LfoDest;
+        let lfo = |l: &gt_core::SamplerLfo| gt_dsp::VoiceLfo {
+            wave: match l.shape {
+                LfoShape::Sine => LfoWave::Sine,
+                LfoShape::Triangle => LfoWave::Triangle,
+                // The voice LFO's saw falls; a rising one is the falling one upside down,
+                // which only the sign of the amount would tell apart.
+                LfoShape::SawUp | LfoShape::SawDown => LfoWave::Saw,
+                LfoShape::Square => LfoWave::Square,
+                LfoShape::SampleHold => LfoWave::SampleHold,
+            },
+            rate: l.rate,
+            dest: match l.target {
+                LfoTarget::Off => LfoDest::Off,
+                LfoTarget::Pitch => LfoDest::Pitch,
+                LfoTarget::Cutoff => LfoDest::Cutoff,
+                LfoTarget::Volume => LfoDest::Volume,
+                LfoTarget::Pan => LfoDest::Pan,
+            },
+            amount: if l.shape == LfoShape::SawUp {
+                -l.amount
+            } else {
+                l.amount
+            },
+        };
+        Self {
+            sinc: s.interp.half_width(),
+            reverse: s.reverse,
+            filter: match s.filter.mode {
+                SamplerFilterMode::Off => None,
+                SamplerFilterMode::LowPass => Some(FilterMode::LowPass),
+                SamplerFilterMode::HighPass => Some(FilterMode::HighPass),
+                SamplerFilterMode::BandPass => Some(FilterMode::BandPass),
+            },
+            cutoff: s.filter.cutoff,
+            resonance: s.filter.resonance,
+            env_amount: s.filter.env_amount,
+            filter_env: s.filter.env,
+            lfos: [lfo(&s.lfos[0]), lfo(&s.lfos[1])],
+            root_key: s.root_key,
+            key_lo: s.key_lo,
+            key_hi: s.key_hi,
+            round_robin: s.round_robin,
+            mono: s.mono,
+            legato: s.legato,
+            glide_ms: s.glide_ms,
+            voices: s.voices,
+        }
+    }
+}
+
 /// Per-channel settings as the engine uses them. Sent boxed, see `EngineCommand`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChannelParams {
@@ -876,6 +975,8 @@ pub struct ChannelParams {
     pub extra_routes: [Option<u8>; gt_core::MAX_EXTRA_OUTPUTS],
     /// Channel slot that plays the plugin's MIDI output (None: dropped).
     pub midi_out: Option<u16>,
+    /// Sampler 2 settings.
+    pub sampler: SamplerParams,
 }
 
 impl Default for ChannelParams {
@@ -896,6 +997,7 @@ impl Default for ChannelParams {
             bend_range: Channel::DEFAULT_BEND,
             extra_routes: [None; gt_core::MAX_EXTRA_OUTPUTS],
             midi_out: None,
+            sampler: SamplerParams::default(),
         }
     }
 }
@@ -919,6 +1021,7 @@ impl ChannelParams {
                 p.end = s.end;
                 p.looped = s.loop_mode == LoopMode::Loop;
                 p.adsr = s.adsr;
+                p.sampler = SamplerParams::from_settings(s);
             }
             Instrument::Synth(patch) => {
                 p.kind = InstrumentKind::Synth;
@@ -927,6 +1030,9 @@ impl ChannelParams {
                     mods: patch.mods,
                 };
             }
+            // Pads play through the sampler's voices with a key map of their own; the
+            // channel's sampler settings stay at their defaults (one-shot, open filter).
+            Instrument::Drums(_) => {}
             Instrument::Plugin(plugin) => {
                 p.kind = InstrumentKind::Plugin;
                 p.plugin = Some(plugin.instance);

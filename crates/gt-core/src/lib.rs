@@ -15,6 +15,7 @@ pub mod midi;
 pub mod mixer;
 pub mod modulation;
 pub mod note_tools;
+pub mod pads;
 pub mod param;
 pub mod params;
 pub mod peaks;
@@ -23,6 +24,7 @@ pub mod plugin;
 pub mod project;
 pub mod recording;
 pub mod sample;
+pub mod sampler;
 pub mod synth;
 pub mod time;
 
@@ -35,6 +37,7 @@ pub use mixer::{Mixer, MixerStrip, StripKind, FX_SLOTS, INSERTS, MASTER, SENDS, 
 pub use modulation::{
     LfoRate, LfoShape, MidiControl, ModSourceKind, Modulator, ModulatorId, MAX_MODULATORS,
 };
+pub use pads::{DrumKit, Pad, PadLayer};
 pub use param::{ParamCurve, ParamInfo, ParamUnit};
 pub use params::{ChannelParam, ParamId, StripParam, MASTER_VOLUME};
 pub use peaks::Peaks;
@@ -52,6 +55,7 @@ pub use project::{
 };
 pub use recording::{AudioInput, Gap, MonitorMode, MAX_INPUT_CHANNELS};
 pub use sample::SampleData;
+pub use sampler::{Interp, KeyZone, LfoTarget, SamplerFilter, SamplerFilterMode, SamplerLfo};
 pub use synth::{ModDest, ModSlot, ModSource, SynthParam, SynthPatch};
 pub use time::{
     BarBeatTick, SigChange, TempoMap, TempoMapError, TempoPoint, Tick, TimeSig, TimeSigMap, PPQ,

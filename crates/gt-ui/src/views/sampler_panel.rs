@@ -1,8 +1,13 @@
 //! Settings of the selected sampler channel: sample, waveform with start/end, pitch, loop mode
-//! and the ADSR envelope.
+//! and the ADSR envelope; Sampler 2 (Prompt 23): quality, reverse, keys, voices, glide,
+//! time-stretch, multi-sample zones, the filter with its envelope and two LFOs, and the beat
+//! slicer.
 
 use egui::{pos2, vec2, RichText, Sense, Stroke, Ui};
-use gt_core::{ChannelId, ChannelParam, LoopMode, ParamId, SamplerSettings};
+use gt_core::{
+    ChannelId, ChannelParam, Interp, LfoShape, LfoTarget, LoopMode, ParamId, SampleData,
+    SamplerFilterMode, SamplerSettings,
+};
 
 use crate::param_ui::{param_live, param_menu};
 use crate::widgets::labeled_knob;
@@ -24,6 +29,21 @@ pub struct SamplerPanelView<'a> {
     pub status: Option<&'a str>,
     /// The channel, so knobs get the automation and modulation menu.
     pub channel: Option<ChannelId>,
+    /// The loaded sample, for the beat slicer.
+    pub data: Option<&'a SampleData>,
+}
+
+/// What the panel changed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SamplerPanelOut {
+    /// A sound setting changed (send the channel's settings).
+    pub changed: bool,
+    /// What the channel plays changed: zones or time-stretch (send its samples again).
+    pub reload: bool,
+    /// The user asked to load a folder as a multi-sample instrument.
+    pub load_folder: bool,
+    /// Write the sliced loop's pattern into the current pattern.
+    pub export_pattern: bool,
 }
 
 /// Draws the panel. Returns true when a sound parameter changed.
@@ -33,7 +53,8 @@ pub fn sampler_panel(
     name: &mut String,
     s: &mut SamplerSettings,
     view: SamplerPanelView<'_>,
-) -> bool {
+) -> SamplerPanelOut {
+    let mut out = SamplerPanelOut::default();
     let mut changed = false;
     let dim = |s: &str| RichText::new(s).color(theme.text_dim);
     let menu = |r: egui::Response, param: ChannelParam| {
@@ -132,6 +153,396 @@ pub fn sampler_panel(
             ChannelParam::Release,
         );
     });
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        changed |= playback_row(ui, theme, s, &mut out);
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        slicer_row(ui, theme, s, view.data, &mut out);
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        changed |= filter_row(ui, theme, s, &menu);
+        ui.separator();
+        for (i, l) in s.lfos.iter_mut().enumerate() {
+            changed |= lfo_ui(ui, theme, i, l);
+            ui.separator();
+        }
+    });
+    out.changed |= changed;
+    out
+}
+
+/// Quality, reverse, keys, voices, glide, time-stretch and zones.
+fn playback_row(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    s: &mut SamplerSettings,
+    out: &mut SamplerPanelOut,
+) -> bool {
+    let mut changed = false;
+    let dim = |t: &str| RichText::new(t).color(theme.text_dim);
+    egui::ComboBox::from_id_salt("sampler_interp")
+        .width(110.0)
+        .selected_text(s.interp.name())
+        .show_ui(ui, |ui| {
+            for q in Interp::ALL {
+                changed |= ui.selectable_value(&mut s.interp, q, q.name()).changed();
+            }
+        })
+        .response
+        .on_hover_text("Interpolation: sinc keeps pitched-up samples free of aliasing");
+    changed |= ui
+        .add(egui::Button::selectable(s.reverse, "Reverse"))
+        .on_hover_text("Play the sample backwards")
+        .clicked()
+        .then(|| s.reverse = !s.reverse)
+        .is_some();
+    ui.separator();
+    if s.zones.is_empty() {
+        ui.label(dim("Root"));
+        changed |= key_drag(
+            ui,
+            &mut s.root_key,
+            "Key at which the sample plays at its own pitch",
+        );
+        ui.label(dim("Keys"));
+        changed |= key_drag(ui, &mut s.key_lo, "Lowest key the sample answers");
+        changed |= key_drag(ui, &mut s.key_hi, "Highest key the sample answers");
+        s.key_hi = s.key_hi.max(s.key_lo);
+        let mut stretch = s.stretch_beats > 0.0;
+        if ui
+            .checkbox(&mut stretch, "Stretch")
+            .on_hover_text("Time-stretch mode: fit the sample to a number of beats at the song tempo, at its own pitch")
+            .changed()
+        {
+            s.stretch_beats = if stretch { 4.0 } else { 0.0 };
+            out.reload = true;
+        }
+        if stretch
+            && ui
+                .add(
+                    egui::DragValue::new(&mut s.stretch_beats)
+                        .range(0.25..=256.0)
+                        .speed(0.05)
+                        .suffix(" beats"),
+                )
+                .changed()
+        {
+            out.reload = true;
+        }
+    } else {
+        ui.label(RichText::new(format!("{} zones", s.zones.len())).color(theme.text))
+            .on_hover_text(zone_summary(s));
+        changed |= ui
+            .checkbox(&mut s.round_robin, "Round robin")
+            .on_hover_text(
+                "Zones answering the same key and velocity take turns instead of layering",
+            )
+            .changed();
+        if ui
+            .small_button("Clear zones")
+            .on_hover_text("Back to the single sample")
+            .clicked()
+        {
+            s.zones.clear();
+            s.slice_beats = 0.0;
+            out.reload = true;
+        }
+    }
+    if ui
+        .button("Load folder…")
+        .on_hover_text("Make a multi-sample instrument from a folder: roots from note names in the file names, velocity layers from pp/mf/ff or v1, v2 (you can also drop several files here)")
+        .clicked()
+    {
+        out.load_folder = true;
+    }
+    ui.separator();
+    ui.label(dim("Voices"));
+    changed |= ui
+        .add(egui::DragValue::new(&mut s.voices).range(1..=SamplerSettings::MAX_VOICES))
+        .on_hover_text("Most notes sounding at once; the oldest is cut")
+        .changed();
+    changed |= ui.checkbox(&mut s.mono, "Mono").changed();
+    if s.mono {
+        changed |= ui
+            .checkbox(&mut s.legato, "Legato")
+            .on_hover_text("A key pressed while another is held glides without restarting")
+            .changed();
+    }
+    changed |= ui
+        .add(
+            egui::DragValue::new(&mut s.glide_ms)
+                .range(0.0..=2000.0)
+                .speed(1.0)
+                .prefix("Glide ")
+                .suffix(" ms"),
+        )
+        .on_hover_text("Mono glide time between notes")
+        .changed();
+    changed
+}
+
+/// How the beat slicer cuts (kept in egui memory).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SlicerUi {
+    grid: bool,
+    sensitivity: f32,
+    per_beat: u32,
+}
+
+impl Default for SlicerUi {
+    fn default() -> Self {
+        Self {
+            grid: false,
+            sensitivity: 0.5,
+            per_beat: 2,
+        }
+    }
+}
+
+/// The beat slicer: cut the loaded loop on its transients or a grid into zones on keys from
+/// C3, and write the pattern that replays it.
+fn slicer_row(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    s: &mut SamplerSettings,
+    data: Option<&SampleData>,
+    out: &mut SamplerPanelOut,
+) {
+    let id = ui.id().with("slicer");
+    let mut st: SlicerUi = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    ui.label(RichText::new("Slicer").color(theme.text_dim));
+    for (grid, label, tip) in [
+        (false, "Transients", "Cut where the hits start"),
+        (true, "Grid", "Cut every fraction of a beat"),
+    ] {
+        if ui
+            .add(egui::Button::selectable(st.grid == grid, label))
+            .on_hover_text(tip)
+            .clicked()
+        {
+            st.grid = grid;
+        }
+    }
+    if st.grid {
+        egui::ComboBox::from_id_salt("slice_grid")
+            .width(60.0)
+            .selected_text(format!("1/{}", st.per_beat * 4))
+            .show_ui(ui, |ui| {
+                for d in [1, 2, 4, 8] {
+                    ui.selectable_value(&mut st.per_beat, d, format!("1/{}", d * 4));
+                }
+            });
+    } else {
+        ui.add(
+            egui::Slider::new(&mut st.sensitivity, 0.0..=1.0)
+                .show_value(false)
+                .text("Sensitivity"),
+        )
+        .on_hover_text("Higher finds quieter hits");
+    }
+    let source = s.sample.clone();
+    let can = data.is_some_and(|d| d.frames() > 0) && source.is_some();
+    if ui
+        .add_enabled(can, egui::Button::new("Slice"))
+        .on_hover_text("Cut the loop into slices on keys from C3 up (replaces the zones)")
+        .clicked()
+    {
+        if let (Some(d), Some(src)) = (data, source) {
+            let mono: Vec<f32> = d
+                .left()
+                .iter()
+                .zip(d.right())
+                .map(|(l, r)| 0.5 * (l + r))
+                .collect();
+            let beats = gt_dsp::slicer::loop_beats(&mono, d.sample_rate);
+            let starts = if st.grid {
+                gt_dsp::slicer::grid_slices(mono.len(), beats, st.per_beat)
+            } else {
+                gt_dsp::slicer::transient_slices(&mono, d.sample_rate, st.sensitivity, 0.03)
+            };
+            s.zones = gt_core::sampler::slice_zones(&src, &starts, mono.len());
+            s.slice_beats = beats as f32;
+            s.round_robin = false;
+            s.stretch_beats = 0.0;
+            // A slice cuts the one before, so a faster tempo never overlaps them.
+            s.mono = true;
+            s.legato = false;
+            out.reload = true;
+            out.changed = true;
+        }
+    }
+    if s.slice_beats > 0.0 && !s.zones.is_empty() {
+        ui.label(RichText::new(format!(
+            "{} slices, {} beats",
+            s.zones.len(),
+            s.slice_beats
+        )));
+        if ui
+            .add(
+                egui::DragValue::new(&mut s.slice_beats)
+                    .range(1.0..=256.0)
+                    .speed(0.1)
+                    .suffix(" beats"),
+            )
+            .on_hover_text("Length of the loop (detected; fix it if the tempo guess is off)")
+            .changed()
+        {
+            out.changed = true;
+        }
+        if ui
+            .button("Export pattern")
+            .on_hover_text(
+                "Write the notes that replay the loop at the song tempo into the current pattern",
+            )
+            .clicked()
+        {
+            out.export_pattern = true;
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(id, st));
+}
+
+fn zone_summary(s: &SamplerSettings) -> String {
+    s.zones
+        .iter()
+        .take(24)
+        .map(|z| {
+            format!(
+                "{}: {}..{} (root {}), velocity {:.0}..{:.0} %",
+                z.sample.display_name(),
+                crate::views::key_name(z.key_lo),
+                crate::views::key_name(z.key_hi),
+                crate::views::key_name(z.root),
+                z.vel_lo * 100.0,
+                z.vel_hi * 100.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn key_drag(ui: &mut Ui, key: &mut u8, tip: &str) -> bool {
+    ui.add(
+        egui::DragValue::new(key)
+            .range(0..=127)
+            .custom_formatter(|v, _| crate::views::key_name(v as u8))
+            .speed(0.3),
+    )
+    .on_hover_text(tip)
+    .changed()
+}
+
+/// Filter mode, cutoff, resonance, envelope amount and the filter envelope.
+fn filter_row(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    s: &mut SamplerSettings,
+    menu: &dyn Fn(egui::Response, ChannelParam) -> bool,
+) -> bool {
+    let mut changed = false;
+    let f = &mut s.filter;
+    ui.vertical(|ui| {
+        ui.label(RichText::new("Filter").color(theme.text_dim));
+        egui::ComboBox::from_id_salt("sampler_filter")
+            .width(80.0)
+            .selected_text(f.mode.name())
+            .show_ui(ui, |ui| {
+                for m in SamplerFilterMode::ALL {
+                    changed |= ui.selectable_value(&mut f.mode, m, m.name()).changed();
+                }
+            });
+    });
+    if f.mode == SamplerFilterMode::Off {
+        return changed;
+    }
+    let mut oct = (f.cutoff / 20.0).log2() / 10.0;
+    let r = labeled_knob(
+        ui,
+        theme,
+        "Cutoff",
+        &mut oct,
+        0.0..=1.0,
+        (8000.0_f32 / 20.0).log2() / 10.0,
+        |t| {
+            let hz = 20.0 * (t * 10.0).exp2();
+            if hz >= 1000.0 {
+                format!("Cutoff {:.2} kHz", hz / 1000.0)
+            } else {
+                format!("Cutoff {hz:.0} Hz")
+            }
+        },
+    );
+    if r.changed() {
+        f.cutoff = (20.0 * (oct * 10.0).exp2()).clamp(20.0, 20_000.0);
+    }
+    changed |= menu(r, ChannelParam::Cutoff);
+    changed |= menu(
+        labeled_knob(ui, theme, "Res", &mut f.resonance, 0.0..=1.0, 0.2, |v| {
+            format!("Resonance {:.0} %", v * 100.0)
+        }),
+        ChannelParam::Resonance,
+    );
+    changed |= labeled_knob(ui, theme, "Env", &mut f.env_amount, -8.0..=8.0, 0.0, |v| {
+        format!("Envelope {v:+.1} octaves")
+    })
+    .changed();
+    let e = &mut f.env;
+    changed |= time_knob(ui, theme, "F.Att", &mut e.attack_ms, MAX_AD_MS, 0.0).changed();
+    changed |= time_knob(ui, theme, "F.Dec", &mut e.decay_ms, MAX_AD_MS, 300.0).changed();
+    changed |= labeled_knob(ui, theme, "F.Sus", &mut e.sustain, 0.0..=1.0, 0.0, |v| {
+        format!("Filter sustain {:.0} %", v * 100.0)
+    })
+    .changed();
+    changed |= time_knob(ui, theme, "F.Rel", &mut e.release_ms, MAX_R_MS, 200.0).changed();
+    changed
+}
+
+fn lfo_ui(ui: &mut Ui, theme: &GloomTheme, i: usize, l: &mut gt_core::SamplerLfo) -> bool {
+    let mut changed = false;
+    ui.vertical(|ui| {
+        ui.label(RichText::new(format!("LFO {}", i + 1)).color(theme.text_dim));
+        egui::ComboBox::from_id_salt(("sampler_lfo_target", i))
+            .width(70.0)
+            .selected_text(l.target.name())
+            .show_ui(ui, |ui| {
+                for t in LfoTarget::ALL {
+                    changed |= ui.selectable_value(&mut l.target, t, t.name()).changed();
+                }
+            });
+        if l.target != LfoTarget::Off {
+            egui::ComboBox::from_id_salt(("sampler_lfo_shape", i))
+                .width(70.0)
+                .selected_text(l.shape.name())
+                .show_ui(ui, |ui| {
+                    for sh in LfoShape::ALL {
+                        changed |= ui.selectable_value(&mut l.shape, sh, sh.name()).changed();
+                    }
+                });
+        }
+    });
+    if l.target != LfoTarget::Off {
+        let mut t = (l.rate / 0.05).log2() / 10.0;
+        let r = labeled_knob(
+            ui,
+            theme,
+            "Rate",
+            &mut t,
+            0.0..=1.0,
+            (4.0_f32 / 0.05).log2() / 10.0,
+            |t| format!("Rate {:.2} Hz", 0.05 * (t * 10.0).exp2()),
+        );
+        if r.changed() {
+            l.rate = (0.05 * (t * 10.0).exp2()).clamp(0.01, 50.0);
+            changed = true;
+        }
+        changed |= labeled_knob(ui, theme, "Depth", &mut l.amount, 0.0..=1.0, 0.25, |v| {
+            format!("Depth {:.0} %", v * 100.0)
+        })
+        .changed();
+    }
     changed
 }
 
