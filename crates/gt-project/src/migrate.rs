@@ -35,13 +35,13 @@ use serde_json::Value;
 use crate::file::{FileError, FORMAT};
 
 /// The schema version this build writes.
-pub const CURRENT: u32 = 6;
+pub const CURRENT: u32 = 7;
 
 /// One upgrade: rewrites a tree of version `from` into version `from + 1`.
 pub type Migration = fn(&mut Value) -> Result<(), String>;
 
 /// Upgrades by version: entry `i` turns version `i + 1` into `i + 2`.
-pub const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5, v5_to_v6];
+pub const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5, v5_to_v6, v6_to_v7];
 
 /// Version 2 added plugins; a version 1 tree is already a valid version 2 tree.
 fn v1_to_v2(_v: &mut Value) -> Result<(), String> {
@@ -69,6 +69,12 @@ fn v4_to_v5(_v: &mut Value) -> Result<(), String> {
 /// Version 6 added rack settings and layer channels, all optional; a version 5 tree is
 /// already a valid version 6 tree.
 fn v5_to_v6(_v: &mut Value) -> Result<(), String> {
+    Ok(())
+}
+
+/// Version 7 added drum synth pads, the bass engine and player channels, all new values; a
+/// version 6 tree is already a valid version 7 tree.
+fn v6_to_v7(_v: &mut Value) -> Result<(), String> {
     Ok(())
 }
 

@@ -13,6 +13,7 @@ publish = false
 workspace = true
 
 [dependencies]
+gt-core.workspace = true
 signalsmith-stretch.workspace = true
 rustfft.workspace = true
 

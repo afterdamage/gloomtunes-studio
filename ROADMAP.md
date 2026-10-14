@@ -689,6 +689,23 @@ sound identical; the golden export test stays.
 - Limits: legato and glide stay sampler-only; layer children play at the note's velocity (no
   velocity scaling); swing applies to odd 1/16 steps only.
 
+### Prompt 28: Drum synth, bass line, preset player (code; factory content follows)
+- Drum synth: kick, snare, hat, clap, tom and percussion voices from oscillators, noise, pitch
+  sweeps and filters; any pad can play one, every value editable on the pad (D137). "+ Drum
+  synth" adds an 8-pad kit. The four built-in samples are now the default voices, rendered
+  bit for bit as before.
+- Bass engine (synth engine 3): mono, resonant filter, accent from velocity above a threshold
+  (opens the filter and lifts the level, building over consecutive accents), slide from slide
+  notes or overlapping notes; 20 bass presets; "+ Bass" in the rack (D138).
+- Preset player: plays a sound pack (`.gtpack`, a zip of audio and `pack.json`) with up to 8
+  macro knobs; packs are checked fully before use and extracted to a cache; projects save the
+  pack, preset and knob positions (schema 7, D139).
+- Tests: drum voice snapshots (insta), slide without retrigger, accent by velocity and
+  building, malformed packs (traversal, missing files, ranges, more than 8 macros, bad JSON,
+  not a zip), player save and reload.
+- Limits: a project that embeds its samples does not embed packs; drum synth voices render
+  at 48 kHz and are resampled to the device rate.
+
 ---
 
 ## v1.0 scope

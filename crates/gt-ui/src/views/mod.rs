@@ -11,6 +11,7 @@ mod midi_panel;
 mod mixer;
 mod modulators;
 mod piano_roll;
+mod player_panel;
 mod playlist;
 mod plugins;
 mod sampler_panel;
@@ -42,6 +43,7 @@ pub use piano_roll::{
     group_color, key_name, piano_roll, stretch_notes, GhostChannel, Lane, LaneDraw, NoteProp,
     PianoRollAction, PianoRollState, PianoRollView, ScaleKind, Snap, Tool,
 };
+pub use player_panel::{player_panel, PlayerPanelOut, PlayerPanelView};
 pub use playlist::{
     add_automation, playlist, AudioLookup, BounceKind, PlaylistAction, PlaylistSnap, PlaylistState,
     PlaylistTool, PlaylistView,

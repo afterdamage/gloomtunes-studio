@@ -17,6 +17,7 @@ use gt_core::{
 use crate::control::ParamDest;
 use gt_dsp::synth::fm::{FmSettings, OpSettings};
 use gt_dsp::synth::wavetable::Warp;
+use gt_dsp::synth::BassSettings;
 use gt_dsp::synth::{
     Engine, EnvSettings, LfoSettings, ModDest, ModSlot, ModSource, OscSettings, SynthSettings,
     WtOscSettings, MOD_SLOTS,
@@ -1056,20 +1057,17 @@ impl ChannelParams {
             bend_range: ch.bend_range.clamp(0.0, Channel::MAX_BEND),
             choke: ch.choke,
             keys: KeyParams {
-                apply: ch.sampler().is_none() && ch.keys != gt_core::KeyLimits::default(),
+                apply: ch.sampler().is_none()
+                    && ch.player().is_none()
+                    && ch.keys != gt_core::KeyLimits::default(),
                 limits: ch.keys,
             },
             ..Self::default()
         };
         match &ch.instrument {
-            Instrument::Sampler(s) => {
-                p.pitch = s.pitch;
-                p.start = s.start;
-                p.end = s.end;
-                p.looped = s.loop_mode == LoopMode::Loop;
-                p.adsr = s.adsr;
-                p.sampler = SamplerParams::from_settings(s);
-            }
+            Instrument::Sampler(s) => p.set_sampler(s),
+            // A player is a sampler playing its preset with the macros applied.
+            Instrument::Player(pl) => p.set_sampler(&pl.sampler()),
             Instrument::Synth(patch) => {
                 p.kind = InstrumentKind::Synth;
                 p.patch = PatchValues {
@@ -1094,6 +1092,15 @@ impl ChannelParams {
             }
         }
         p
+    }
+
+    fn set_sampler(&mut self, s: &gt_core::SamplerSettings) {
+        self.pitch = s.pitch;
+        self.start = s.start;
+        self.end = s.end;
+        self.looped = s.loop_mode == LoopMode::Loop;
+        self.adsr = s.adsr;
+        self.sampler = SamplerParams::from_settings(s);
     }
 
     /// Engine parameters for channel `index` of `project`: [`Self::from_channel`] with its
@@ -1282,6 +1289,7 @@ fn synth_settings_of(
         engine: match v(P::Engine) as u8 {
             1 => Engine::Fm,
             2 => Engine::Wavetable,
+            3 => Engine::Bass,
             _ => Engine::Subtractive,
         },
         fm: FmSettings {
@@ -1323,6 +1331,11 @@ fn synth_settings_of(
                 warp_amount: v(amount),
             }
         }),
+        bass: BassSettings {
+            accent: v(P::BassAccent),
+            threshold: v(P::BassThreshold),
+            slide_ms: v(P::BassSlide),
+        },
     }
 }
 

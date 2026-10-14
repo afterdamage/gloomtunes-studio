@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod autorec;
+pub mod drum_synth;
 pub mod effects;
 pub mod midi;
 pub mod mixer;
@@ -19,6 +20,7 @@ pub mod pads;
 pub mod param;
 pub mod params;
 pub mod peaks;
+pub mod player;
 pub mod playlist;
 pub mod plugin;
 pub mod project;
@@ -30,6 +32,7 @@ pub mod synth;
 pub mod time;
 
 pub use autorec::{record_automation, record_pattern_automation, thin, THIN_TOLERANCE};
+pub use drum_synth::{DrumModel, DrumVoice};
 pub use effects::{EffectKind, EffectSlot};
 pub use midi::{
     ControlKind, ControlPoint, MidiBinding, MidiRoute, MAX_LEARN_CC, MAX_MIDI_BINDINGS,
@@ -42,6 +45,7 @@ pub use pads::{DrumKit, Pad, PadLayer};
 pub use param::{ParamCurve, ParamInfo, ParamUnit};
 pub use params::{ChannelParam, ParamId, StripParam, MASTER_VOLUME};
 pub use peaks::Peaks;
+pub use player::{Macro, MacroTarget, Player};
 pub use playlist::{
     AudioEdit, AudioTake, AutoPoint, Automation, Clip, ClipId, ClipKind, ClipStretch, Curve, Fade,
     FadeCurve, Frozen, Marker, Playlist, StretchMode, Track, TrackId, WarpMarker,

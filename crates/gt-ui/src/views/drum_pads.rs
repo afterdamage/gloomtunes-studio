@@ -1,10 +1,11 @@
 //! The drum pad instrument's panel (Prompt 23): a 4×4 grid of the shown bank's pads (click to
 //! play and select), bank tabs, and the selected pad's layers, tuning, gain, pan, envelope,
-//! choke group and output.
+//! choke group and output. Prompt 28: a pad can play a drum synth voice instead of samples,
+//! edited here with the knobs its model uses.
 
 use egui::{vec2, Color32, RichText, Sense, Stroke, Ui};
 use gt_core::pads::{CHOKE_GROUPS, MAX_BANKS, PADS_PER_BANK};
-use gt_core::{DrumKit, Pad, INSERTS};
+use gt_core::{DrumKit, DrumModel, DrumVoice, Pad, INSERTS};
 
 use crate::i18n::tr;
 use crate::widgets::labeled_knob;
@@ -79,6 +80,10 @@ pub fn drum_pads(
         ui.separator();
         pad_editor(ui, theme, &mut kit.banks[st.bank][st.pad], &mut out);
     });
+    if let Some(v) = &mut kit.banks[st.bank][st.pad].synth {
+        ui.separator();
+        out.changed |= synth_editor(ui, theme, v);
+    }
     out
 }
 
@@ -174,6 +179,40 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
             )
             .on_hover_text(tr("Pad name"))
             .changed();
+        ui.horizontal(|ui| {
+            ui.label(dim(tr("Sound")));
+            let current = pad.synth.map(|v| v.model);
+            egui::ComboBox::from_id_salt("pad_sound")
+                .width(90.0)
+                .selected_text(current.map_or(tr("Samples"), |m| tr(m.label())))
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(current.is_none(), tr("Samples"))
+                        .clicked()
+                    {
+                        pad.synth = None;
+                        out.changed = true;
+                    }
+                    for m in DrumModel::ALL {
+                        if ui
+                            .selectable_label(current == Some(m), tr(m.label()))
+                            .clicked()
+                            && current != Some(m)
+                        {
+                            pad.synth = Some(DrumVoice::defaults(m));
+                            out.changed = true;
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(tr(
+                    "Play samples, or a drum synth voice made from oscillators and noise",
+                ));
+        });
+        if pad.synth.is_some() {
+            pad_settings(ui, theme, pad, out);
+            return;
+        }
         let mut remove = None;
         for (i, l) in pad.layers.iter().enumerate() {
             ui.horizontal(|ui| {
@@ -226,6 +265,15 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
                 out.load = Some(true);
             }
         });
+        pad_settings(ui, theme, pad, out);
+    });
+    pad_knobs(ui, theme, pad, out);
+}
+
+/// Choke group and output of a pad.
+fn pad_settings(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadOut) {
+    let dim = |t: &str| RichText::new(t).color(theme.text_dim);
+    {
         ui.horizontal(|ui| {
             ui.label(dim(tr("Choke")));
             egui::ComboBox::from_id_salt("pad_choke")
@@ -271,7 +319,11 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
                     "Send this pad to its own mixer insert (at the channel's volume)",
                 ));
         });
-    });
+    }
+}
+
+/// Tune, gain, pan and the envelope of a pad.
+fn pad_knobs(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadOut) {
     out.changed |= labeled_knob(ui, theme, "Tune", &mut pad.tune, -24.0..=24.0, 0.0, |v| {
         format!("Tune {v:+.2} semitones")
     })
@@ -325,4 +377,190 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
         |v| format!("Release {v:.0} ms"),
     )
     .changed();
+}
+
+/// A knob over a logarithmic range (frequencies and times): equal turns, equal ratios.
+#[allow(clippy::too_many_arguments)]
+fn log_knob(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    label: &str,
+    v: &mut f32,
+    lo: f32,
+    hi: f32,
+    default: f32,
+    fmt: fn(f32) -> String,
+) -> bool {
+    let mut l = v.clamp(lo, hi).ln();
+    let r = labeled_knob(
+        ui,
+        theme,
+        label,
+        &mut l,
+        lo.ln()..=hi.ln(),
+        default.ln(),
+        |x| fmt(x.exp()),
+    );
+    if r.changed() {
+        *v = l.exp();
+    }
+    r.changed()
+}
+
+fn hz(v: f32) -> String {
+    if v >= 1000.0 {
+        format!("{:.2} kHz", v / 1000.0)
+    } else {
+        format!("{v:.0} Hz")
+    }
+}
+
+fn ms(v: f32) -> String {
+    format!("{:.0} ms", v * 1000.0)
+}
+
+fn pct(v: f32) -> String {
+    format!("{:.0} %", v * 100.0)
+}
+
+/// The drum synth voice's knobs: the ones its model uses. Returns true when one changed.
+fn synth_editor(ui: &mut Ui, theme: &GloomTheme, v: &mut DrumVoice) -> bool {
+    let d = DrumVoice::defaults(v.model);
+    let mut c = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new(tr(v.model.label()))
+                .strong()
+                .color(theme.accent),
+        );
+        let m = v.model;
+        let tonal = matches!(m, DrumModel::Kick | DrumModel::Tom);
+        if m != DrumModel::Clap {
+            let (lo, hi) = if m == DrumModel::Hat {
+                (100.0, 1200.0)
+            } else {
+                (20.0, 2000.0)
+            };
+            c |= log_knob(ui, theme, "Pitch", &mut v.pitch, lo, hi, d.pitch, hz);
+        }
+        if matches!(m, DrumModel::Snare | DrumModel::Perc) {
+            c |= log_knob(
+                ui,
+                theme,
+                "Pitch 2",
+                &mut v.pitch2,
+                20.0,
+                4000.0,
+                d.pitch2.max(20.0),
+                hz,
+            );
+        }
+        if tonal {
+            c |= labeled_knob(
+                ui,
+                theme,
+                "Sweep",
+                &mut v.sweep,
+                0.0..=1000.0,
+                d.sweep,
+                |x| format!("Sweep +{x:.0} Hz"),
+            )
+            .changed();
+            c |= log_knob(
+                ui,
+                theme,
+                "Sweep time",
+                &mut v.sweep_time,
+                0.002,
+                0.3,
+                d.sweep_time,
+                ms,
+            );
+        }
+        c |= log_knob(ui, theme, "Decay", &mut v.decay, 0.001, 2.0, d.decay, ms);
+        let tone = if m == DrumModel::Clap { "Tail" } else { "Tone" };
+        c |= labeled_knob(ui, theme, tone, &mut v.tone, 0.0..=1.5, d.tone, pct).changed();
+        if !tonal {
+            c |= labeled_knob(ui, theme, "Noise", &mut v.noise, 0.0..=1.5, d.noise, pct).changed();
+        }
+        if matches!(m, DrumModel::Snare | DrumModel::Clap) {
+            c |= log_knob(
+                ui,
+                theme,
+                if m == DrumModel::Clap {
+                    "Tail decay"
+                } else {
+                    "Noise decay"
+                },
+                &mut v.noise_decay,
+                0.005,
+                2.0,
+                d.noise_decay,
+                ms,
+            );
+        }
+        if !tonal {
+            c |= log_knob(
+                ui,
+                theme,
+                "Filter",
+                &mut v.noise_freq,
+                100.0,
+                16_000.0,
+                d.noise_freq.max(100.0),
+                hz,
+            );
+            c |= labeled_knob(ui, theme, "Q", &mut v.noise_q, 0.3..=8.0, d.noise_q, |x| {
+                format!("Q {x:.2}")
+            })
+            .changed();
+        }
+        if m == DrumModel::Clap {
+            c |= labeled_knob(ui, theme, "Spread", &mut v.spread, 0.0..=0.03, d.spread, ms)
+                .changed();
+            c |= labeled_knob(
+                ui,
+                theme,
+                "Tail at",
+                &mut v.tail_at,
+                0.0..=0.1,
+                d.tail_at,
+                ms,
+            )
+            .changed();
+        }
+        if matches!(m, DrumModel::Kick | DrumModel::Tom | DrumModel::Perc) {
+            c |= labeled_knob(ui, theme, "Click", &mut v.click, 0.0..=1.5, d.click, pct).changed();
+        }
+        c |= labeled_knob(ui, theme, "Drive", &mut v.drive, 0.0..=6.0, d.drive, |x| {
+            if x == 0.0 {
+                "Drive off".to_owned()
+            } else {
+                format!("Drive {x:.1}")
+            }
+        })
+        .changed();
+        c |= log_knob(ui, theme, "Length", &mut v.length, 0.05, 3.0, d.length, ms);
+        ui.vertical(|ui| {
+            ui.label(RichText::new(tr("Seed")).color(theme.text_dim).small());
+            c |= ui
+                .add(egui::DragValue::new(&mut v.seed).speed(1.0))
+                .on_hover_text(tr(
+                    "Noise seed: another seed gives another take of the same sound",
+                ))
+                .changed();
+            if ui
+                .small_button(tr("Reset"))
+                .on_hover_text(tr("Back to this model's default sound"))
+                .clicked()
+            {
+                *v = d;
+                c = true;
+            }
+        });
+    });
+    if c {
+        v.sanitize();
+    }
+    c
 }

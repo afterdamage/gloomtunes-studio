@@ -11,6 +11,7 @@ pub mod index;
 pub mod loader;
 pub mod migrate;
 pub mod ops;
+pub mod pack;
 pub mod presets;
 
 pub use history::{Edit, History, Transaction};

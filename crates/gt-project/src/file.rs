@@ -204,6 +204,31 @@ pub fn save(project: &Project, path: &Path, opts: SaveOptions) -> Result<SaveRep
     Ok(report)
 }
 
+/// Fill every player's sound from its pack (extracted under `cache`). A pack that is missing
+/// or broken leaves its player silent, with a warning.
+pub fn resolve_packs(project: &mut Project, cache: &Path, warnings: &mut Vec<String>) {
+    let mut opened: HashMap<PathBuf, Option<crate::pack::Pack>> = HashMap::new();
+    for ch in &mut project.channels {
+        let Some(pl) = ch.player_mut() else {
+            continue;
+        };
+        let pack = opened.entry(pl.pack.clone()).or_insert_with(|| {
+            crate::pack::open(&pl.pack, cache)
+                .inspect_err(|e| warnings.push(format!("pack {}: {e}", pl.pack.display())))
+                .ok()
+        });
+        if let Some(pack) = pack {
+            if !pack.refill(pl) {
+                warnings.push(format!(
+                    "pack {} has no preset \"{}\"",
+                    pl.pack.display(),
+                    pl.preset
+                ));
+            }
+        }
+    }
+}
+
 /// Reads a project. Embedded audio that is needed (not found on disk) is written to
 /// `extract_dir` (created if needed) and the project points there.
 pub fn load(path: &Path, extract_dir: &Path) -> Result<Loaded, FileError> {
@@ -217,6 +242,11 @@ pub fn load(path: &Path, extract_dir: &Path) -> Result<Loaded, FileError> {
         serde_json::from_slice(&json).map_err(|e| FileError::Format(e.to_string()))?;
     let dir = absolute(path.parent().unwrap_or(Path::new(".")));
     let mut loaded = from_value(value, Some(&dir))?;
+    resolve_packs(
+        &mut loaded.project,
+        &crate::pack::default_cache(),
+        &mut loaded.warnings,
+    );
 
     // Look for each audio file: relative path, absolute path, embedded copy.
     let mut resolved: HashMap<PathBuf, PathBuf> = HashMap::new();
@@ -286,6 +316,8 @@ pub fn sample_files(project: &Project) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = project
         .channels
         .iter()
+        // A player's audio comes from its pack.
+        .filter(|c| c.player().is_none())
         .flat_map(|c| c.samples())
         .chain(project.playlist.clips.iter().flat_map(|c| {
             match &c.kind {
@@ -547,6 +579,27 @@ enum InstrumentDto {
         #[serde(default)]
         split: bool,
     },
+    /// A preset player (Prompt 28): its pack, preset and macros; the sound comes from the pack.
+    Player {
+        /// Pack path relative to the project folder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pack: Option<String>,
+        /// Absolute pack path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pack_absolute: Option<String>,
+        preset: String,
+        #[serde(default)]
+        macros: Vec<MacroDto>,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+struct MacroDto {
+    name: String,
+    target: String,
+    min: f32,
+    max: f32,
+    value: f32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -570,6 +623,81 @@ struct PadDto {
     choke: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     output: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    synth: Option<DrumVoiceDto>,
+}
+
+/// A drum synth voice (Prompt 28): its model by name and every parameter in plain units.
+#[derive(Serialize, Deserialize)]
+struct DrumVoiceDto {
+    model: String,
+    length: f32,
+    pitch: f32,
+    pitch2: f32,
+    sweep: f32,
+    sweep_time: f32,
+    decay: f32,
+    tone: f32,
+    noise: f32,
+    noise_decay: f32,
+    noise_freq: f32,
+    noise_q: f32,
+    click: f32,
+    drive: f32,
+    spread: f32,
+    tail_at: f32,
+    seed: u32,
+}
+
+impl DrumVoiceDto {
+    fn of(v: &gt_core::DrumVoice) -> Self {
+        Self {
+            model: v.model.label().to_ascii_lowercase(),
+            length: v.length,
+            pitch: v.pitch,
+            pitch2: v.pitch2,
+            sweep: v.sweep,
+            sweep_time: v.sweep_time,
+            decay: v.decay,
+            tone: v.tone,
+            noise: v.noise,
+            noise_decay: v.noise_decay,
+            noise_freq: v.noise_freq,
+            noise_q: v.noise_q,
+            click: v.click,
+            drive: v.drive,
+            spread: v.spread,
+            tail_at: v.tail_at,
+            seed: v.seed,
+        }
+    }
+
+    /// The voice; an unknown model plays as a kick.
+    fn voice(&self) -> gt_core::DrumVoice {
+        let model = gt_core::DrumModel::ALL
+            .into_iter()
+            .find(|m| m.label().eq_ignore_ascii_case(&self.model))
+            .unwrap_or_default();
+        gt_core::DrumVoice {
+            model,
+            length: self.length,
+            pitch: self.pitch,
+            pitch2: self.pitch2,
+            sweep: self.sweep,
+            sweep_time: self.sweep_time,
+            decay: self.decay,
+            tone: self.tone,
+            noise: self.noise,
+            noise_decay: self.noise_decay,
+            noise_freq: self.noise_freq,
+            noise_q: self.noise_q,
+            click: self.click,
+            drive: self.drive,
+            spread: self.spread,
+            tail_at: self.tail_at,
+            seed: self.seed,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1256,6 +1384,7 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                                     env: EnvDto::of(&p.adsr),
                                     choke: p.choke,
                                     output: p.output,
+                                    synth: p.synth.as_ref().map(DrumVoiceDto::of),
                                 })
                                 .collect()
                         })
@@ -1270,6 +1399,22 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                     }
                     .to_owned(),
                     split: l.split,
+                },
+                Instrument::Player(pl) => InstrumentDto::Player {
+                    pack: dir.and_then(|d| relative_path(d, &pl.pack)),
+                    pack_absolute: Some(pl.pack.to_string_lossy().into_owned()),
+                    preset: pl.preset.clone(),
+                    macros: pl
+                        .macros
+                        .iter()
+                        .map(|m| MacroDto {
+                            name: m.name.clone(),
+                            target: m.target.key().to_owned(),
+                            min: m.min,
+                            max: m.max,
+                            value: m.value,
+                        })
+                        .collect(),
                 },
                 Instrument::Synth(patch) => InstrumentDto::Synth {
                     preset_name: patch.name.clone(),
@@ -1782,6 +1927,7 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                                 adsr: d.env.adsr(),
                                 choke: d.choke,
                                 output: d.output,
+                                synth: d.synth.as_ref().map(DrumVoiceDto::voice),
                             })
                             .collect()
                     })
@@ -1801,6 +1947,43 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                 },
                 split,
             }),
+            InstrumentDto::Player {
+                pack,
+                pack_absolute,
+                preset,
+                macros,
+            } => {
+                // The base settings come from the pack once it is found ([`resolve_packs`]);
+                // the saved path is the absolute one, the relative one beside the project.
+                let relative = pack.zip(dir).map(|(r, d)| d.join(r));
+                let pack = pack_absolute
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_file())
+                    .or(relative)
+                    .unwrap_or_default();
+                let macros = macros
+                    .into_iter()
+                    .filter_map(|m| {
+                        let target = gt_core::MacroTarget::from_key(&m.target);
+                        if target.is_none() {
+                            warnings.push(format!("unknown macro target \"{}\" dropped", m.target));
+                        }
+                        Some(gt_core::Macro {
+                            name: m.name,
+                            target: target?,
+                            min: m.min,
+                            max: m.max,
+                            value: m.value,
+                        })
+                    })
+                    .collect();
+                Instrument::Player(Box::new(gt_core::Player {
+                    pack,
+                    preset,
+                    base: SamplerSettings::default(),
+                    macros,
+                }))
+            }
         };
         p.channels.push(Channel {
             id: ChannelId(c.id),
@@ -2749,6 +2932,62 @@ mod tests {
         let v = to_value(&p, None, &HashMap::new());
         let back = from_value(v, None).unwrap().project;
         assert_eq!(back.channels[i].instrument, want);
+    }
+
+    #[test]
+    fn drum_synth_pads_round_trip() {
+        let mut p = Project::empty();
+        let id = p.add_drum_synth_channel("Synth kit").unwrap();
+        let i = p.channel_index(id).unwrap();
+        let pad = &mut p.channels[i].drums_mut().unwrap().banks[0][2];
+        let v = pad.synth.as_mut().unwrap();
+        v.pitch *= 1.5;
+        v.seed = 7;
+        let want = p.channels[i].instrument.clone();
+        let v = to_value(&p, None, &HashMap::new());
+        let back = from_value(v, None).unwrap().project;
+        assert_eq!(back.channels[i].instrument, want);
+    }
+
+    #[test]
+    fn players_save_their_pack_preset_and_macros_and_reload_the_sound() {
+        let dir = temp_dir("player");
+        let pack_path = dir.join("keys.gtpack");
+        crate::pack::write(
+            &pack_path,
+            &crate::pack::tests::manifest(),
+            &crate::pack::tests::files(),
+        )
+        .unwrap();
+        let pack = crate::pack::open(&pack_path, &dir.join("cache")).unwrap();
+        let mut player = pack.player("Keys").unwrap();
+        player.macros[0].value = 0.9;
+        let mut p = Project::empty();
+        let id = p.add_player_channel("Keys", player).unwrap();
+        let i = p.channel_index(id).unwrap();
+        save(&p, &dir.join("song.gloom"), SaveOptions::default()).unwrap();
+        let loaded = load(&dir.join("song.gloom"), &dir.join("x")).unwrap();
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        let back = loaded.project.channels[i].player().unwrap();
+        let want = p.channels[i].player().unwrap();
+        assert_eq!((&back.pack, &back.preset), (&want.pack, &want.preset));
+        assert_eq!(back.macros, want.macros);
+        assert_eq!(back.base.zones.len(), 2);
+        assert!(back
+            .base
+            .sources()
+            .all(|s| matches!(s, SampleSource::File(f) if f.is_file())));
+        // A missing pack loads silent, with a warning.
+        std::fs::remove_file(&pack_path).unwrap();
+        let loaded = load(&dir.join("song.gloom"), &dir.join("x")).unwrap();
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(loaded.project.channels[i]
+            .player()
+            .unwrap()
+            .base
+            .zones
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

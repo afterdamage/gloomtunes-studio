@@ -13,94 +13,130 @@ use std::f32::consts::TAU;
 pub const DRUM_PEAK: f32 = 0.891;
 const END_FADE_S: f32 = 0.005;
 
+pub use gt_core::drum_synth::{DrumModel, DrumVoice};
+
+/// Renders `v` at `sample_rate`: mono, deterministic, normalised to [`DRUM_PEAK`], transient
+/// on frame 0, ending on an exact zero. Off the audio thread (allocates).
+pub fn render(v: &DrumVoice, sample_rate: f32) -> Vec<f32> {
+    let sr = sample_rate.max(1.0);
+    let n = (v.length * sr) as usize;
+    let mut noise = Noise::new(v.seed);
+    let v = *v;
+    let out = match v.model {
+        DrumModel::Kick | DrumModel::Tom => {
+            let mut phase = 0.0_f32;
+            (0..n)
+                .map(|i| {
+                    let t = i as f32 / sr;
+                    let freq = v.pitch + v.sweep * (-t / v.sweep_time).exp();
+                    phase = (phase + freq / sr).fract();
+                    let body = (TAU * phase).sin() * (-t / v.decay).exp() * v.tone;
+                    let click = noise.next() * (-t / v.noise_decay).exp() * v.click;
+                    saturate(body + click, v.drive)
+                })
+                .collect()
+        }
+        DrumModel::Snare => {
+            let mut hp = Biquad::highpass(sr, v.noise_freq, v.noise_q);
+            (0..n)
+                .map(|i| {
+                    let t = i as f32 / sr;
+                    let head = ((TAU * v.pitch * t).sin() * 0.7 + (TAU * v.pitch2 * t).sin() * 0.3)
+                        * (-t / v.decay).exp();
+                    let wires = hp.process(noise.next()) * (-t / v.noise_decay).exp();
+                    saturate(head * v.tone + wires * v.noise, v.drive)
+                })
+                .collect()
+        }
+        DrumModel::Hat => {
+            const PARTIALS: [f32; 6] = [263.0, 400.0, 421.0, 474.0, 587.0, 845.0];
+            let scale = v.pitch / PARTIALS[0];
+            let mut hp1 = Biquad::highpass(sr, v.noise_freq, v.noise_q);
+            let mut hp2 = Biquad::highpass(sr, v.noise_freq, v.noise_q);
+            let mut phases = [0.0_f32; 6];
+            (0..n)
+                .map(|i| {
+                    let t = i as f32 / sr;
+                    let mut metal = 0.0;
+                    for (p, f) in phases.iter_mut().zip(PARTIALS) {
+                        *p = (*p + f * scale / sr).fract();
+                        metal += if *p < 0.5 { 1.0 } else { -1.0 };
+                    }
+                    let x = metal / 6.0 * v.tone + noise.next() * v.noise;
+                    hp2.process(hp1.process(x)) * (-t / v.decay).exp()
+                })
+                .collect()
+        }
+        DrumModel::Clap => {
+            let mut bp = Biquad::bandpass(sr, v.noise_freq, v.noise_q);
+            (0..n)
+                .map(|i| {
+                    let t = i as f32 / sr;
+                    let bursts: f32 = [0.0, v.spread, v.spread * 2.0]
+                        .iter()
+                        .filter(|&&b| t >= b)
+                        .map(|&b| (-(t - b) / v.decay).exp())
+                        .sum();
+                    let tail = if t >= v.tail_at {
+                        v.tone * (-(t - v.tail_at) / v.noise_decay).exp()
+                    } else {
+                        0.0
+                    };
+                    bp.process(noise.next()) * v.noise * (bursts + tail)
+                })
+                .collect()
+        }
+        DrumModel::Perc => {
+            let mut bp = Biquad::bandpass(sr, v.noise_freq, v.noise_q);
+            let (mut p1, mut p2) = (0.0_f32, 0.0_f32);
+            (0..n)
+                .map(|i| {
+                    let t = i as f32 / sr;
+                    p1 = (p1 + v.pitch / sr).fract();
+                    p2 = (p2 + v.pitch2 / sr).fract();
+                    let sq = |p: f32| if p < 0.5 { 1.0 } else { -1.0 };
+                    let body = bp.process((sq(p1) + sq(p2)) * 0.5) * (-t / v.decay).exp();
+                    let hiss = noise.next() * (-t / 0.002).exp();
+                    saturate(body * v.tone + hiss * (v.click + v.noise), v.drive)
+                })
+                .collect()
+        }
+    };
+    finish(out, sr)
+}
+
+/// `tanh` saturation of `x` driven by `drive`; at drive 0 the sound passes clean.
+#[inline]
+fn saturate(x: f32, drive: f32) -> f32 {
+    if drive > 0.0 {
+        (drive * x).tanh()
+    } else {
+        x
+    }
+}
+
 /// Kick: a sine whose pitch falls exponentially from 160 Hz to 48 Hz (the "boom"), with a short
 /// noise click on top for definition, softly saturated.
 pub fn kick(sample_rate: f32) -> Vec<f32> {
-    let sr = sample_rate.max(1.0);
-    let n = (0.55 * sr) as usize;
-    let mut noise = Noise::new(0x6b69_636b);
-    let mut phase = 0.0_f32;
-    let out = (0..n)
-        .map(|i| {
-            let t = i as f32 / sr;
-            let freq = 48.0 + 112.0 * (-t / 0.035).exp();
-            phase = (phase + freq / sr).fract();
-            let body = (TAU * phase).sin() * (-t / 0.16).exp();
-            let click = noise.next() * (-t / 0.0015).exp() * 0.35;
-            (2.2 * (body + click)).tanh()
-        })
-        .collect();
-    finish(out, sr)
+    render(&DrumVoice::KICK, sample_rate)
 }
 
 /// Snare: two damped sines (the drum head, 185 Hz and 330 Hz) plus high-passed noise (the
 /// snare wires) with a longer decay.
 pub fn snare(sample_rate: f32) -> Vec<f32> {
-    let sr = sample_rate.max(1.0);
-    let n = (0.38 * sr) as usize;
-    let mut noise = Noise::new(0x736e_6172);
-    let mut hp = Biquad::highpass(sr, 1800.0, 0.7);
-    let out = (0..n)
-        .map(|i| {
-            let t = i as f32 / sr;
-            let head = ((TAU * 185.0 * t).sin() * 0.7 + (TAU * 330.0 * t).sin() * 0.3)
-                * (-t / 0.045).exp();
-            let wires = hp.process(noise.next()) * (-t / 0.075).exp();
-            head * 0.8 + wires * 0.9
-        })
-        .collect();
-    finish(out, sr)
+    render(&DrumVoice::SNARE, sample_rate)
 }
 
 /// Closed hi-hat: six square waves at inharmonic frequencies (a metallic cluster, the classic
 /// analogue recipe) mixed with noise, band-limited by a high-pass at 7 kHz, very short decay.
 pub fn hat(sample_rate: f32) -> Vec<f32> {
-    const PARTIALS: [f32; 6] = [263.0, 400.0, 421.0, 474.0, 587.0, 845.0];
-    let sr = sample_rate.max(1.0);
-    let n = (0.16 * sr) as usize;
-    let mut noise = Noise::new(0x6861_7421);
-    let mut hp1 = Biquad::highpass(sr, 7000.0, 0.7);
-    let mut hp2 = Biquad::highpass(sr, 7000.0, 0.7);
-    let mut phases = [0.0_f32; 6];
-    let out = (0..n)
-        .map(|i| {
-            let t = i as f32 / sr;
-            let mut metal = 0.0;
-            for (p, f) in phases.iter_mut().zip(PARTIALS) {
-                *p = (*p + f / sr).fract();
-                metal += if *p < 0.5 { 1.0 } else { -1.0 };
-            }
-            let x = metal / 6.0 * 0.6 + noise.next() * 0.4;
-            hp2.process(hp1.process(x)) * (-t / 0.022).exp()
-        })
-        .collect();
-    finish(out, sr)
+    render(&DrumVoice::HAT, sample_rate)
 }
 
 /// Clap: band-passed noise (around 1.1 kHz) shaped by three quick bursts 9 ms apart, the
 /// several hands of a real clap, followed by a short diffuse tail.
 pub fn clap(sample_rate: f32) -> Vec<f32> {
-    let sr = sample_rate.max(1.0);
-    let n = (0.4 * sr) as usize;
-    let mut noise = Noise::new(0x636c_6170);
-    let mut bp = Biquad::bandpass(sr, 1100.0, 1.2);
-    let out = (0..n)
-        .map(|i| {
-            let t = i as f32 / sr;
-            let bursts: f32 = [0.0, 0.009, 0.018]
-                .iter()
-                .filter(|&&b| t >= b)
-                .map(|&b| (-(t - b) / 0.0035).exp())
-                .sum();
-            let tail = if t >= 0.027 {
-                0.8 * (-(t - 0.027) / 0.07).exp()
-            } else {
-                0.0
-            };
-            bp.process(noise.next()) * (bursts + tail)
-        })
-        .collect();
-    finish(out, sr)
+    render(&DrumVoice::CLAP, sample_rate)
 }
 
 /// Normalises to [`DRUM_PEAK`] and fades the last few milliseconds to an exact zero.
@@ -186,8 +222,114 @@ impl Biquad {
 }
 
 #[cfg(test)]
+mod legacy {
+    //! The generators before Prompt 28, kept to prove the voice model reproduces them.
+    use super::*;
+
+    /// Kick: a sine whose pitch falls exponentially from 160 Hz to 48 Hz (the "boom"), with a short
+    /// noise click on top for definition, softly saturated.
+    pub(super) fn kick(sample_rate: f32) -> Vec<f32> {
+        let sr = sample_rate.max(1.0);
+        let n = (0.55 * sr) as usize;
+        let mut noise = Noise::new(0x6b69_636b);
+        let mut phase = 0.0_f32;
+        let out = (0..n)
+            .map(|i| {
+                let t = i as f32 / sr;
+                let freq = 48.0 + 112.0 * (-t / 0.035).exp();
+                phase = (phase + freq / sr).fract();
+                let body = (TAU * phase).sin() * (-t / 0.16).exp();
+                let click = noise.next() * (-t / 0.0015).exp() * 0.35;
+                (2.2 * (body + click)).tanh()
+            })
+            .collect();
+        finish(out, sr)
+    }
+
+    /// Snare: two damped sines (the drum head, 185 Hz and 330 Hz) plus high-passed noise (the
+    /// snare wires) with a longer decay.
+    pub(super) fn snare(sample_rate: f32) -> Vec<f32> {
+        let sr = sample_rate.max(1.0);
+        let n = (0.38 * sr) as usize;
+        let mut noise = Noise::new(0x736e_6172);
+        let mut hp = Biquad::highpass(sr, 1800.0, 0.7);
+        let out = (0..n)
+            .map(|i| {
+                let t = i as f32 / sr;
+                let head = ((TAU * 185.0 * t).sin() * 0.7 + (TAU * 330.0 * t).sin() * 0.3)
+                    * (-t / 0.045).exp();
+                let wires = hp.process(noise.next()) * (-t / 0.075).exp();
+                head * 0.8 + wires * 0.9
+            })
+            .collect();
+        finish(out, sr)
+    }
+
+    /// Closed hi-hat: six square waves at inharmonic frequencies (a metallic cluster, the classic
+    /// analogue recipe) mixed with noise, band-limited by a high-pass at 7 kHz, very short decay.
+    pub(super) fn hat(sample_rate: f32) -> Vec<f32> {
+        const PARTIALS: [f32; 6] = [263.0, 400.0, 421.0, 474.0, 587.0, 845.0];
+        let sr = sample_rate.max(1.0);
+        let n = (0.16 * sr) as usize;
+        let mut noise = Noise::new(0x6861_7421);
+        let mut hp1 = Biquad::highpass(sr, 7000.0, 0.7);
+        let mut hp2 = Biquad::highpass(sr, 7000.0, 0.7);
+        let mut phases = [0.0_f32; 6];
+        let out = (0..n)
+            .map(|i| {
+                let t = i as f32 / sr;
+                let mut metal = 0.0;
+                for (p, f) in phases.iter_mut().zip(PARTIALS) {
+                    *p = (*p + f / sr).fract();
+                    metal += if *p < 0.5 { 1.0 } else { -1.0 };
+                }
+                let x = metal / 6.0 * 0.6 + noise.next() * 0.4;
+                hp2.process(hp1.process(x)) * (-t / 0.022).exp()
+            })
+            .collect();
+        finish(out, sr)
+    }
+
+    /// Clap: band-passed noise (around 1.1 kHz) shaped by three quick bursts 9 ms apart, the
+    /// several hands of a real clap, followed by a short diffuse tail.
+    pub(super) fn clap(sample_rate: f32) -> Vec<f32> {
+        let sr = sample_rate.max(1.0);
+        let n = (0.4 * sr) as usize;
+        let mut noise = Noise::new(0x636c_6170);
+        let mut bp = Biquad::bandpass(sr, 1100.0, 1.2);
+        let out = (0..n)
+            .map(|i| {
+                let t = i as f32 / sr;
+                let bursts: f32 = [0.0, 0.009, 0.018]
+                    .iter()
+                    .filter(|&&b| t >= b)
+                    .map(|&b| (-(t - b) / 0.0035).exp())
+                    .sum();
+                let tail = if t >= 0.027 {
+                    0.8 * (-(t - 0.027) / 0.07).exp()
+                } else {
+                    0.0
+                };
+                bp.process(noise.next()) * (bursts + tail)
+            })
+            .collect();
+        finish(out, sr)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_voice_model_reproduces_the_built_in_drums_exactly() {
+        for sr in [44_100.0, 48_000.0] {
+            assert!(kick(sr) == legacy::kick(sr), "kick");
+            assert!(snare(sr) == legacy::snare(sr), "snare");
+            assert!(hat(sr) == legacy::hat(sr), "hat");
+            assert!(clap(sr) == legacy::clap(sr), "clap");
+        }
+    }
 
     type Gen = fn(f32) -> Vec<f32>;
     const ALL: [(&str, Gen); 4] = [

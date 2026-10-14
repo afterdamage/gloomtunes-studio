@@ -59,7 +59,43 @@ pub enum Engine {
     Fm,
     /// Two wavetable oscillators ([`wavetable`]), sub and noise into the ladder filter.
     Wavetable,
+    /// The subtractive path played as a mono bass line (Prompt 28): one voice; a note
+    /// overlapping the held one (or a slide note) glides to it without retriggering; a note at
+    /// or above the accent velocity opens the filter and gets louder, more so on consecutive
+    /// accents.
+    Bass,
 }
+
+/// Settings of the bass-line engine.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BassSettings {
+    /// How much an accent opens the filter and lifts the level, 0 to 1.
+    pub accent: f32,
+    /// Velocity at which a note is accented, 0 to 1.
+    pub threshold: f32,
+    /// Glide time of a slide (overlapping notes), ms.
+    pub slide_ms: f32,
+}
+
+impl Default for BassSettings {
+    fn default() -> Self {
+        Self {
+            accent: 0.6,
+            threshold: 0.79,
+            slide_ms: 60.0,
+        }
+    }
+}
+
+/// Filter opening of a fresh accent at full accent amount, octaves.
+const ACCENT_OCTAVES: f32 = 2.5;
+/// Further opening per unit of accumulated charge (consecutive accents), octaves.
+const CHARGE_OCTAVES: f32 = 1.2;
+/// Level lift of a fresh accent at full amount.
+const ACCENT_GAIN: f32 = 0.8;
+/// Time constants of an accent's decay and of the charge's, s.
+const ACCENT_DECAY_S: f32 = 0.2;
+const CHARGE_DECAY_S: f32 = 0.6;
 
 /// One wavetable oscillator's settings (its pitch and level are the matching
 /// [`OscSettings`]).
@@ -152,6 +188,8 @@ pub struct SynthSettings {
     pub fm: FmSettings,
     /// Wavetable oscillators.
     pub wt: [WtOscSettings; 2],
+    /// Bass-line engine.
+    pub bass: BassSettings,
 }
 
 impl Default for SynthSettings {
@@ -213,6 +251,7 @@ impl Default for SynthSettings {
             engine: Engine::Subtractive,
             fm: FmSettings::default(),
             wt: [WtOscSettings::default(); 2],
+            bass: BassSettings::default(),
         }
     }
 }
@@ -274,6 +313,10 @@ struct Voice {
     wt_pos: [f32; 2],
     wt_warp: [f32; 2],
     wt_mip: [usize; 2],
+    /// Bass engine: this note's accent (decaying from 1) and the charge of the accents
+    /// before it.
+    acc: f32,
+    charge: f32,
 }
 
 impl Voice {
@@ -325,6 +368,8 @@ impl Voice {
             wt_pos: [0.0; 2],
             wt_warp: [0.0; 2],
             wt_mip: [0; 2],
+            acc: 0.0,
+            charge: 0.0,
         }
     }
 
@@ -492,7 +537,7 @@ impl Voice {
         self.sub_level = p.sub_level.clamp(0.0, 1.0);
         self.noise_level = (p.noise_level + md(ModDest::NoiseLevel)).clamp(0.0, 1.0);
         match p.engine {
-            Engine::Subtractive => {}
+            Engine::Subtractive | Engine::Bass => {}
             Engine::Fm => {
                 let index = md(ModDest::FmIndex);
                 let feedback = md(ModDest::FmFeedback);
@@ -514,7 +559,17 @@ impl Voice {
             }
         }
 
+        let mut accent_gain = 1.0;
+        let mut accent_oct = 0.0;
+        if p.engine == Engine::Bass && (self.acc > 0.0 || self.charge > 0.0) {
+            let a = p.bass.accent.clamp(0.0, 1.0);
+            accent_oct = a * (self.acc * ACCENT_OCTAVES + self.charge * CHARGE_OCTAVES);
+            accent_gain = 1.0 + a * ACCENT_GAIN * self.acc;
+            self.acc *= (-ctl / (ACCENT_DECAY_S * sr)).exp();
+            self.charge *= (-ctl / (CHARGE_DECAY_S * sr)).exp();
+        }
         let octaves = p.filter_env_octaves * self.menv.level()
+            + accent_oct
             + p.key_track * (self.pitch - 60.0) / 12.0
             + md(ModDest::Cutoff) * 6.0
             + self.mod_x * NOTE_X_OCTAVES;
@@ -524,7 +579,7 @@ impl Voice {
 
         let vs = p.velocity_sensitivity.clamp(0.0, 1.0);
         let vel = 1.0 - vs + vs * self.velocity * self.velocity;
-        let amp = p.volume.max(0.0) * vel * (1.0 + md(ModDest::Amp)).clamp(0.0, 2.0);
+        let amp = p.volume.max(0.0) * vel * (1.0 + md(ModDest::Amp)).clamp(0.0, 2.0) * accent_gain;
         let (pl, pr) = pan_unit((md(ModDest::Pan) + self.note_pan).clamp(-1.0, 1.0));
         let (tl, tr) = (amp * pl, amp * pr);
 
@@ -676,6 +731,8 @@ pub struct GloomSynth {
     voices: [Voice; SYNTH_VOICES],
     last_pitch: Option<f32>,
     tables: Option<Arc<SynthTables>>,
+    /// Bass engine: charge left by recent accents (decays with time, sounding or not).
+    charge: f32,
 }
 
 impl GloomSynth {
@@ -698,6 +755,7 @@ impl GloomSynth {
             voices,
             last_pitch: None,
             tables: None,
+            charge: 0.0,
         };
         fm::warm_up();
         s.set_settings(&SynthSettings::default());
@@ -747,6 +805,10 @@ impl GloomSynth {
     /// note's pitch and glides to its own over the glide time ([`PORTA_DEFAULT_S`] when the
     /// patch has none).
     pub fn note_on_expr(&mut self, key: u8, velocity: f32, age: u64, e: NoteExpr) {
+        if self.settings.engine == Engine::Bass {
+            self.bass_note_on(key, velocity, age, e);
+            return;
+        }
         let target = f32::from(key) + e.fine / 100.0;
         if let Glide::Slide { seconds } = e.glide {
             let sr = self.sr;
@@ -796,6 +858,69 @@ impl GloomSynth {
             };
             v.slide_to(target, s, self.sr);
         }
+        self.last_pitch = Some(target);
+    }
+
+    /// The bass-line engine's note: one voice. A note while the voice is held (overlapping
+    /// notes) or a slide note glides there without retriggering; any other note restarts the
+    /// voice (from its current level, so there is no click). Accents are decided by velocity.
+    fn bass_note_on(&mut self, key: u8, velocity: f32, age: u64, e: NoteExpr) {
+        let b = self.settings.bass;
+        let target = f32::from(key) + e.fine / 100.0;
+        let accent = velocity >= b.threshold;
+        let sr = self.sr;
+        // Only voice 0 plays; any other (left from another engine) is released.
+        for v in &mut self.voices[1..] {
+            if v.active {
+                v.held = false;
+                v.amp.release();
+                v.menv.release();
+            }
+        }
+        let v = &mut self.voices[0];
+        let legato = v.active && v.held;
+        let slide = matches!(e.glide, Glide::Slide { .. });
+        if legato || (slide && v.active) {
+            let seconds = match e.glide {
+                Glide::Slide { seconds } => seconds,
+                _ => b.slide_ms.max(0.0) * 0.001,
+            };
+            v.slide_to(target, seconds, sr);
+            v.key = key;
+            v.held = true;
+            v.age = age;
+            if accent {
+                v.charge = self.charge;
+                v.acc = 1.0;
+                self.charge = (self.charge + 1.0).min(2.0);
+            }
+            self.last_pitch = Some(target);
+            return;
+        }
+        let charge = if accent { self.charge } else { 0.0 };
+        if accent {
+            self.charge = (self.charge + 1.0).min(2.0);
+        }
+        let from = match self.last_pitch {
+            Some(p) if self.glide_coef < 1.0 => p,
+            _ => target,
+        };
+        v.start(
+            key,
+            velocity,
+            age,
+            from,
+            1,
+            self.amp_params,
+            self.menv_params,
+        );
+        v.note_pan = e.pan.clamp(-1.0, 1.0);
+        v.mod_x = e.x();
+        v.mod_y = e.y();
+        v.release_scale = e.release_scale();
+        v.target_pitch = target;
+        v.acc = if accent { 1.0 } else { 0.0 };
+        v.charge = charge;
         self.last_pitch = Some(target);
     }
 
@@ -907,6 +1032,7 @@ impl GloomSynth {
             v.fm.reset();
         }
         self.last_pitch = None;
+        self.charge = 0.0;
     }
 
     /// True if any voice is sounding.
@@ -922,6 +1048,12 @@ impl GloomSynth {
     /// Adds every sounding voice into `out_l` and `out_r` (same length).
     pub fn render(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
         let n = out_l.len().min(out_r.len());
+        if self.charge > 0.0 {
+            self.charge *= (-(n as f32) / (CHARGE_DECAY_S * self.sr)).exp();
+            if self.charge < 1e-4 {
+                self.charge = 0.0;
+            }
+        }
         let (out_l, out_r) = (&mut out_l[..n], &mut out_r[..n]);
         for v in &mut self.voices {
             if v.active {
@@ -1441,5 +1573,97 @@ mod tests {
         // The carrier decays to nothing well before the amp envelope would.
         render(&mut s, 48_000);
         assert!(!s.is_active());
+    }
+
+    fn bass_patch() -> SynthSettings {
+        let mut p = sine_patch();
+        p.engine = Engine::Bass;
+        p.velocity_sensitivity = 0.0;
+        p.amp_env.sustain = 1.0;
+        p.amp_env.release_ms = 20.0;
+        p
+    }
+
+    /// Brightness: RMS of the first difference over RMS (rises with the high partials).
+    fn brightness(x: &[f32]) -> f32 {
+        let d: Vec<f32> = x.windows(2).map(|w| w[1] - w[0]).collect();
+        rms(&d) / rms(x).max(1e-9)
+    }
+
+    #[test]
+    fn bass_slides_overlapping_notes_without_retriggering() {
+        let mut s = GloomSynth::new(SR);
+        let mut p = bass_patch();
+        p.bass.slide_ms = 100.0;
+        s.set_settings(&p);
+        s.note_on(48, 0.5, 1);
+        render(&mut s, 9600);
+        let level = s.voices[0].amp.level();
+        // The next note starts while the first is held: one voice glides there.
+        s.note_on(60, 0.5, 2);
+        s.note_off(48);
+        assert_eq!(s.active_voices(), 1);
+        assert_eq!(s.voices[0].amp.level(), level, "no retrigger");
+        let (l, _) = render(&mut s, 9600);
+        let start = pitch_hz(&l[..1200]);
+        let end = pitch_hz(&l[7200..]);
+        assert!(start < 200.0, "starts near C3: {start}");
+        assert!((end - 261.6).abs() < 6.0, "ends on C4: {end}");
+        // The first note's late note-off did not end it; its own does.
+        assert!(s.voices[0].held);
+        s.note_off(60);
+        assert!(!s.voices[0].held);
+
+        // Notes that do not overlap restart at their own pitch at once.
+        let mut s = GloomSynth::new(SR);
+        s.set_settings(&p);
+        s.note_on(48, 0.5, 1);
+        render(&mut s, 4800);
+        s.note_off(48);
+        s.note_on(60, 0.5, 2);
+        let (l, _) = render(&mut s, 4800);
+        assert!((pitch_hz(&l[..2400]) - 261.6).abs() < 12.0);
+    }
+
+    #[test]
+    fn bass_accents_by_velocity_and_builds_on_consecutive_accents() {
+        let mut p = bass_patch();
+        p.osc[0].wave = Wave::Saw;
+        p.cutoff_hz = 300.0;
+        p.resonance = 0.5;
+        p.filter_env_octaves = 1.0;
+        p.mod_env = EnvSettings {
+            attack_ms: 0.0,
+            decay_ms: 200.0,
+            sustain: 0.0,
+            release_ms: 50.0,
+        };
+        p.bass.accent = 1.0;
+        let play = |velocities: &[f32]| {
+            let mut s = GloomSynth::new(SR);
+            s.set_settings(&p);
+            let mut out = Vec::new();
+            for (i, &v) in velocities.iter().enumerate() {
+                s.note_on(36, v, i as u64 + 1);
+                let (l, _) = render(&mut s, 2400);
+                s.note_off(36);
+                let (l2, _) = render(&mut s, 2400);
+                out.push((rms(&l[..1200]), brightness(&l[..1200])));
+                let _ = l2;
+            }
+            out
+        };
+        // Below the accent velocity, velocity changes nothing.
+        assert_eq!(play(&[0.3]), play(&[0.7]));
+        let plain = play(&[0.5])[0];
+        let accented = play(&[1.0])[0];
+        assert!(accented.0 > plain.0 * 1.3, "louder: {accented:?} {plain:?}");
+        assert!(
+            accented.1 > plain.1 * 1.1,
+            "brighter: {accented:?} {plain:?}"
+        );
+        // A second accent right after the first opens the filter further.
+        let two = play(&[1.0, 1.0]);
+        assert!(two[1].1 > two[0].1, "{two:?}");
     }
 }

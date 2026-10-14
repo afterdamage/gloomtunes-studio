@@ -2130,6 +2130,7 @@ name = "gt-dsp"
 version = "1.0.0"
 dependencies = [
  "criterion",
+ "gt-core",
  "insta",
  "rustfft",
  "signalsmith-stretch",

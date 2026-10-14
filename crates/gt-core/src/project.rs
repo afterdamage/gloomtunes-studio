@@ -215,6 +215,43 @@ impl SamplerSettings {
             .iter_mut()
             .chain(self.zones.iter_mut().map(|z| &mut z.sample))
     }
+
+    /// Clamp every setting into range, replacing non-finite values with defaults.
+    pub fn sanitize(&mut self) {
+        let fin =
+            |x: f32, lo: f32, hi: f32, d: f32| if x.is_finite() { x.clamp(lo, hi) } else { d };
+        let s = self;
+        s.pitch = fin(s.pitch, -48.0, 48.0, 0.0);
+        s.start = fin(s.start, 0.0, 0.999, 0.0);
+        s.end = fin(s.end, s.start + 0.001, 1.0, 1.0);
+        let a = &mut s.adsr;
+        a.attack_ms = fin(a.attack_ms, 0.0, 10_000.0, 0.0);
+        a.decay_ms = fin(a.decay_ms, 0.0, 10_000.0, 0.0);
+        a.sustain = fin(a.sustain, 0.0, 1.0, 1.0);
+        a.release_ms = fin(a.release_ms, 0.0, 20_000.0, 50.0);
+        let f = &mut s.filter;
+        f.cutoff = fin(f.cutoff, 20.0, 20_000.0, 8000.0);
+        f.resonance = fin(f.resonance, 0.0, 1.0, 0.2);
+        f.env_amount = fin(f.env_amount, -8.0, 8.0, 0.0);
+        let a = &mut f.env;
+        a.attack_ms = fin(a.attack_ms, 0.0, 10_000.0, 0.0);
+        a.decay_ms = fin(a.decay_ms, 0.0, 10_000.0, 300.0);
+        a.sustain = fin(a.sustain, 0.0, 1.0, 0.0);
+        a.release_ms = fin(a.release_ms, 0.0, 20_000.0, 200.0);
+        for l in &mut s.lfos {
+            l.rate = fin(l.rate, 0.01, 50.0, 4.0);
+            l.amount = fin(l.amount, 0.0, 1.0, 0.25);
+        }
+        s.root_key = s.root_key.min(127);
+        s.key_lo = s.key_lo.min(127);
+        s.key_hi = s.key_hi.clamp(s.key_lo, 127);
+        s.zones.truncate(SamplerSettings::MAX_ZONES);
+        s.zones.iter_mut().for_each(KeyZone::sanitize);
+        s.glide_ms = fin(s.glide_ms, 0.0, 5000.0, 0.0);
+        s.voices = s.voices.clamp(1, SamplerSettings::MAX_VOICES);
+        s.stretch_beats = fin(s.stretch_beats, 0.0, 256.0, 0.0);
+        s.slice_beats = fin(s.slice_beats, 0.0, 256.0, 0.0);
+    }
 }
 
 /// One row of the channel rack.
@@ -262,6 +299,8 @@ pub enum Instrument {
     Drums(Box<crate::pads::DrumKit>),
     /// Plays other channels (Prompt 27); makes no sound of its own.
     Layer(crate::rack::LayerSettings),
+    /// Plays a sound pack's preset with macro knobs (Prompt 28).
+    Player(Box<crate::player::Player>),
 }
 
 impl Channel {
@@ -313,6 +352,22 @@ impl Channel {
         }
     }
 
+    /// The preset player, if this is a player channel.
+    pub fn player(&self) -> Option<&crate::player::Player> {
+        match &self.instrument {
+            Instrument::Player(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Mutable preset player, if this is a player channel.
+    pub fn player_mut(&mut self) -> Option<&mut crate::player::Player> {
+        match &mut self.instrument {
+            Instrument::Player(p) => Some(p),
+            _ => None,
+        }
+    }
+
     /// The instrument plugin, if this is a plugin channel.
     pub fn plugin(&self) -> Option<&PluginRef> {
         match &self.instrument {
@@ -349,6 +404,7 @@ impl Channel {
                     .into_iter()
                     .flat_map(|p| p.tables.iter().flatten()),
             )
+            .chain(self.player().into_iter().flat_map(|p| p.base.sources()))
     }
 
     /// Every sample the channel plays, mutably.
@@ -357,6 +413,7 @@ impl Channel {
             Instrument::Sampler(s) => Box::new(s.sources_mut()),
             Instrument::Drums(k) => Box::new(k.sources_mut()),
             Instrument::Synth(p) => Box::new(p.tables.iter_mut().flatten()),
+            Instrument::Player(p) => Box::new(p.base.sources_mut()),
             Instrument::Plugin(_) | Instrument::Layer(_) => Box::new(std::iter::empty()),
         }
     }
@@ -984,37 +1041,10 @@ impl Project {
                 c.insert = MASTER;
             }
             match &mut c.instrument {
-                Instrument::Sampler(s) => {
-                    s.pitch = fin(s.pitch, -48.0, 48.0, 0.0);
-                    s.start = fin(s.start, 0.0, 0.999, 0.0);
-                    s.end = fin(s.end, s.start + 0.001, 1.0, 1.0);
-                    let a = &mut s.adsr;
-                    a.attack_ms = fin(a.attack_ms, 0.0, 10_000.0, 0.0);
-                    a.decay_ms = fin(a.decay_ms, 0.0, 10_000.0, 0.0);
-                    a.sustain = fin(a.sustain, 0.0, 1.0, 1.0);
-                    a.release_ms = fin(a.release_ms, 0.0, 20_000.0, 50.0);
-                    let f = &mut s.filter;
-                    f.cutoff = fin(f.cutoff, 20.0, 20_000.0, 8000.0);
-                    f.resonance = fin(f.resonance, 0.0, 1.0, 0.2);
-                    f.env_amount = fin(f.env_amount, -8.0, 8.0, 0.0);
-                    let a = &mut f.env;
-                    a.attack_ms = fin(a.attack_ms, 0.0, 10_000.0, 0.0);
-                    a.decay_ms = fin(a.decay_ms, 0.0, 10_000.0, 300.0);
-                    a.sustain = fin(a.sustain, 0.0, 1.0, 0.0);
-                    a.release_ms = fin(a.release_ms, 0.0, 20_000.0, 200.0);
-                    for l in &mut s.lfos {
-                        l.rate = fin(l.rate, 0.01, 50.0, 4.0);
-                        l.amount = fin(l.amount, 0.0, 1.0, 0.25);
-                    }
-                    s.root_key = s.root_key.min(127);
-                    s.key_lo = s.key_lo.min(127);
-                    s.key_hi = s.key_hi.clamp(s.key_lo, 127);
-                    s.zones.truncate(SamplerSettings::MAX_ZONES);
-                    s.zones.iter_mut().for_each(KeyZone::sanitize);
-                    s.glide_ms = fin(s.glide_ms, 0.0, 5000.0, 0.0);
-                    s.voices = s.voices.clamp(1, SamplerSettings::MAX_VOICES);
-                    s.stretch_beats = fin(s.stretch_beats, 0.0, 256.0, 0.0);
-                    s.slice_beats = fin(s.slice_beats, 0.0, 256.0, 0.0);
+                Instrument::Sampler(s) => s.sanitize(),
+                Instrument::Player(p) => {
+                    p.base.sanitize();
+                    p.sanitize();
                 }
                 Instrument::Synth(p) => p.sanitize(),
                 Instrument::Plugin(p) => p.sanitize(),
@@ -1108,6 +1138,16 @@ impl Project {
         )
     }
 
+    /// Adds a preset player channel (Prompt 28) at the bottom of the rack. `None` when the
+    /// rack is full.
+    pub fn add_player_channel(
+        &mut self,
+        name: &str,
+        player: crate::player::Player,
+    ) -> Option<ChannelId> {
+        self.add_instrument(name, Instrument::Player(Box::new(player)))
+    }
+
     /// Adds a Gloom Synth channel at the bottom of the rack. `None` when the rack is full.
     pub fn add_synth_channel(&mut self, name: &str, patch: SynthPatch) -> Option<ChannelId> {
         self.add_instrument(name, Instrument::Synth(Box::new(patch)))
@@ -1116,6 +1156,15 @@ impl Project {
     /// Adds an empty drum pad channel at the bottom of the rack. `None` when the rack is full.
     pub fn add_drum_channel(&mut self, name: &str) -> Option<ChannelId> {
         self.add_instrument(name, Instrument::Drums(Box::default()))
+    }
+
+    /// Adds a drum synth channel (drum pads playing [`crate::DrumKit::synth_kit`]) at the
+    /// bottom of the rack. `None` when the rack is full.
+    pub fn add_drum_synth_channel(&mut self, name: &str) -> Option<ChannelId> {
+        self.add_instrument(
+            name,
+            Instrument::Drums(Box::new(crate::DrumKit::synth_kit())),
+        )
     }
 
     /// Adds a layer channel (no children yet) at the bottom of the rack. `None` when the rack

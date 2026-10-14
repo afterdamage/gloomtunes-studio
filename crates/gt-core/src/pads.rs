@@ -3,6 +3,7 @@
 //! [`FIRST_PAD_KEY`]` + 16·b + p`, so the channel rack's steps (on [`crate::ROOT_KEY`]) play
 //! the first pad and the piano roll reaches every pad.
 
+use crate::drum_synth::DrumVoice;
 use crate::project::{Adsr, SampleSource};
 use crate::ROOT_KEY;
 
@@ -45,6 +46,8 @@ pub struct Pad {
     pub choke: u8,
     /// Mixer insert of its own output (none: the channel's).
     pub output: Option<usize>,
+    /// A synthesized sound (Prompt 28) played instead of the layers.
+    pub synth: Option<DrumVoice>,
 }
 
 impl Default for Pad {
@@ -63,15 +66,28 @@ impl Default for Pad {
             },
             choke: 0,
             output: None,
+            synth: None,
         }
     }
 }
 
 impl Pad {
-    /// What the pad shows: its name, or its first layer's file.
+    /// A pad playing a synthesized sound.
+    pub fn synth(name: &str, voice: DrumVoice) -> Self {
+        Self {
+            name: name.to_owned(),
+            synth: Some(voice),
+            ..Self::default()
+        }
+    }
+
+    /// What the pad shows: its name, or its first layer's file (or its synth model).
     pub fn label(&self) -> String {
         if !self.name.is_empty() {
             return self.name.clone();
+        }
+        if let Some(v) = &self.synth {
+            return v.model.label().to_owned();
         }
         self.layers.first().map_or_else(String::new, |l| {
             let n = l.sample.display_name();
@@ -115,6 +131,44 @@ impl Default for DrumKit {
 }
 
 impl DrumKit {
+    /// The drum synth's default kit (Prompt 28): kick, snare, closed and open hat (choked
+    /// together), clap, low and high tom and a percussion, on the first eight pads.
+    pub fn synth_kit() -> Self {
+        let mut k = Self::default();
+        let hat = |name: &str, v| Pad {
+            choke: 1,
+            ..Pad::synth(name, v)
+        };
+        let pads = [
+            Pad::synth("Kick", DrumVoice::KICK),
+            Pad::synth("Snare", DrumVoice::SNARE),
+            hat("Closed hat", DrumVoice::HAT),
+            hat("Open hat", DrumVoice::OPEN_HAT),
+            Pad::synth("Clap", DrumVoice::CLAP),
+            Pad::synth("Low tom", DrumVoice::TOM),
+            Pad::synth(
+                "High tom",
+                DrumVoice {
+                    pitch: 150.0,
+                    sweep: 70.0,
+                    decay: 0.15,
+                    length: 0.45,
+                    ..DrumVoice::TOM
+                },
+            ),
+            Pad::synth("Perc", DrumVoice::PERC),
+        ];
+        for (slot, pad) in k.banks[0].iter_mut().zip(pads) {
+            *slot = pad;
+        }
+        k
+    }
+
+    /// True when any pad plays a synthesized sound.
+    pub fn has_synth(&self) -> bool {
+        self.banks.iter().flatten().any(|p| p.synth.is_some())
+    }
+
     /// Key of pad `pad` of bank `bank`.
     pub fn key(bank: usize, pad: usize) -> u8 {
         FIRST_PAD_KEY + (bank * PADS_PER_BANK + pad) as u8
@@ -195,6 +249,9 @@ impl DrumKit {
                 p.choke = p.choke.min(CHOKE_GROUPS);
                 if p.output.is_some_and(|o| o == 0 || o > outputs) {
                     p.output = None;
+                }
+                if let Some(v) = &mut p.synth {
+                    v.sanitize();
                 }
                 p.layers.truncate(8);
                 for l in &mut p.layers {
