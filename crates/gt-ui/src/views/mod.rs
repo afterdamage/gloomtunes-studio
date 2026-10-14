@@ -16,12 +16,15 @@ mod sampler_panel;
 mod settings;
 mod synth_panel;
 mod transport_bar;
+mod workflow;
 
 pub use analyzer::{analyzer_panel, AnalyzerState};
 pub use audio_panel::{
     audio_panel, cpu_meter, AudioAction, AudioPanelModel, CpuLoad, BUFFER_SIZES, CPU_WARN,
 };
-pub use browser::{browser, BrowserAction, BrowserEntry, BrowserModel};
+pub use browser::{
+    browser, parse_tags, BrowserAction, BrowserEntry, BrowserModel, BrowserRow, BrowserTab, RowItem,
+};
 pub use channel_rack::{channel_rack, RackAction, RackState, RackView};
 pub use drum_pads::{drum_pads, DrumPadOut, DrumPadState};
 pub use input_panel::{
@@ -52,4 +55,7 @@ pub use settings::{
     ShortcutEditorState, ThemeEdit,
 };
 pub use synth_panel::{scope_trigger, synth_panel, SynthPanelAction, SynthPanelView};
-pub use transport_bar::{transport_bar, PlayState, TransportAction, TransportModel};
+pub use transport_bar::{transport_bar, PlayState, TapTempo, TransportAction, TransportModel};
+pub use workflow::{
+    help_panel, history_panel, markdown, project_info_panel, shortcut_page, HelpState, HELP_PAGES,
+};

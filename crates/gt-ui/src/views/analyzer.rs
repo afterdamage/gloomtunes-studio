@@ -7,6 +7,7 @@ use gt_dsp::analysis::{
     correlation, note_name, note_of, PitchDetector, Scope, Spectrum, SCOPE_FRAMES,
 };
 
+use crate::i18n::tr;
 use crate::GloomTheme;
 
 const FFT: usize = 4096;
@@ -176,7 +177,11 @@ pub fn analyzer_panel(
 
         ui.vertical(|ui| {
             // Correlation: -1 (out of phase) to +1 (mono).
-            ui.label(RichText::new("Correlation").small().color(theme.text_dim));
+            ui.label(
+                RichText::new(tr("Correlation"))
+                    .small()
+                    .color(theme.text_dim),
+            );
             let (rect, _) = ui.allocate_exact_size(vec2(width * 0.5 - 8.0, 12.0), Sense::hover());
             let p = ui.painter_at(rect);
             p.rect_filled(rect, theme.radius, theme.bg_deep);
@@ -200,7 +205,7 @@ pub fn analyzer_panel(
                     .color(theme.text_dim),
             );
             // Tuner.
-            ui.label(RichText::new("Tuner").small().color(theme.text_dim));
+            ui.label(RichText::new(tr("Tuner")).small().color(theme.text_dim));
             match state.pitch {
                 Some((hz, _)) => {
                     let (note, cents) = note_of(hz);

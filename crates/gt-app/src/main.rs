@@ -9,6 +9,7 @@ mod audio_io;
 mod autorec;
 mod crash;
 mod files;
+mod layout;
 mod library;
 mod live;
 mod midi_io;

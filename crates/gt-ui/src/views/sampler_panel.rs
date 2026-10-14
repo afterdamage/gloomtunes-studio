@@ -9,6 +9,7 @@ use gt_core::{
     SamplerFilterMode, SamplerSettings,
 };
 
+use crate::i18n::tr;
 use crate::param_ui::{param_live, param_menu};
 use crate::widgets::labeled_knob;
 use crate::GloomTheme;
@@ -69,7 +70,7 @@ pub fn sampler_panel(
         ui.vertical(|ui| {
             ui.set_width(170.0);
             ui.add(egui::TextEdit::singleline(name).desired_width(160.0))
-                .on_hover_text("Channel name");
+                .on_hover_text(tr("Channel name"));
             let sample = s.sample.as_ref().map_or_else(
                 || "No sample: pick one in the browser".to_owned(),
                 |s| s.display_name(),
@@ -192,29 +193,31 @@ fn playback_row(
             }
         })
         .response
-        .on_hover_text("Interpolation: sinc keeps pitched-up samples free of aliasing");
+        .on_hover_text(tr(
+            "Interpolation: sinc keeps pitched-up samples free of aliasing",
+        ));
     changed |= ui
-        .add(egui::Button::selectable(s.reverse, "Reverse"))
-        .on_hover_text("Play the sample backwards")
+        .add(egui::Button::selectable(s.reverse, tr("Reverse")))
+        .on_hover_text(tr("Play the sample backwards"))
         .clicked()
         .then(|| s.reverse = !s.reverse)
         .is_some();
     ui.separator();
     if s.zones.is_empty() {
-        ui.label(dim("Root"));
+        ui.label(dim(tr("Root")));
         changed |= key_drag(
             ui,
             &mut s.root_key,
             "Key at which the sample plays at its own pitch",
         );
-        ui.label(dim("Keys"));
+        ui.label(dim(tr("Keys")));
         changed |= key_drag(ui, &mut s.key_lo, "Lowest key the sample answers");
         changed |= key_drag(ui, &mut s.key_hi, "Highest key the sample answers");
         s.key_hi = s.key_hi.max(s.key_lo);
         let mut stretch = s.stretch_beats > 0.0;
         if ui
-            .checkbox(&mut stretch, "Stretch")
-            .on_hover_text("Time-stretch mode: fit the sample to a number of beats at the song tempo, at its own pitch")
+            .checkbox(&mut stretch, tr("Stretch"))
+            .on_hover_text(tr("Time-stretch mode: fit the sample to a number of beats at the song tempo, at its own pitch"))
             .changed()
         {
             s.stretch_beats = if stretch { 4.0 } else { 0.0 };
@@ -226,7 +229,7 @@ fn playback_row(
                     egui::DragValue::new(&mut s.stretch_beats)
                         .range(0.25..=256.0)
                         .speed(0.05)
-                        .suffix(" beats"),
+                        .suffix(tr(" beats")),
                 )
                 .changed()
         {
@@ -236,14 +239,14 @@ fn playback_row(
         ui.label(RichText::new(format!("{} zones", s.zones.len())).color(theme.text))
             .on_hover_text(zone_summary(s));
         changed |= ui
-            .checkbox(&mut s.round_robin, "Round robin")
-            .on_hover_text(
+            .checkbox(&mut s.round_robin, tr("Round robin"))
+            .on_hover_text(tr(
                 "Zones answering the same key and velocity take turns instead of layering",
-            )
+            ))
             .changed();
         if ui
-            .small_button("Clear zones")
-            .on_hover_text("Back to the single sample")
+            .small_button(tr("Clear zones"))
+            .on_hover_text(tr("Back to the single sample"))
             .clicked()
         {
             s.zones.clear();
@@ -252,23 +255,25 @@ fn playback_row(
         }
     }
     if ui
-        .button("Load folder…")
-        .on_hover_text("Make a multi-sample instrument from a folder: roots from note names in the file names, velocity layers from pp/mf/ff or v1, v2 (you can also drop several files here)")
+        .button(tr("Load folder…"))
+        .on_hover_text(tr("Make a multi-sample instrument from a folder: roots from note names in the file names, velocity layers from pp/mf/ff or v1, v2 (you can also drop several files here)"))
         .clicked()
     {
         out.load_folder = true;
     }
     ui.separator();
-    ui.label(dim("Voices"));
+    ui.label(dim(tr("Voices")));
     changed |= ui
         .add(egui::DragValue::new(&mut s.voices).range(1..=SamplerSettings::MAX_VOICES))
-        .on_hover_text("Most notes sounding at once; the oldest is cut")
+        .on_hover_text(tr("Most notes sounding at once; the oldest is cut"))
         .changed();
-    changed |= ui.checkbox(&mut s.mono, "Mono").changed();
+    changed |= ui.checkbox(&mut s.mono, tr("Mono")).changed();
     if s.mono {
         changed |= ui
-            .checkbox(&mut s.legato, "Legato")
-            .on_hover_text("A key pressed while another is held glides without restarting")
+            .checkbox(&mut s.legato, tr("Legato"))
+            .on_hover_text(tr(
+                "A key pressed while another is held glides without restarting",
+            ))
             .changed();
     }
     changed |= ui
@@ -276,10 +281,10 @@ fn playback_row(
             egui::DragValue::new(&mut s.glide_ms)
                 .range(0.0..=2000.0)
                 .speed(1.0)
-                .prefix("Glide ")
-                .suffix(" ms"),
+                .prefix(tr("Glide "))
+                .suffix(tr(" ms")),
         )
-        .on_hover_text("Mono glide time between notes")
+        .on_hover_text(tr("Mono glide time between notes"))
         .changed();
     changed
 }
@@ -313,7 +318,7 @@ fn slicer_row(
 ) {
     let id = ui.id().with("slicer");
     let mut st: SlicerUi = ui.data(|d| d.get_temp(id)).unwrap_or_default();
-    ui.label(RichText::new("Slicer").color(theme.text_dim));
+    ui.label(RichText::new(tr("Slicer")).color(theme.text_dim));
     for (grid, label, tip) in [
         (false, "Transients", "Cut where the hits start"),
         (true, "Grid", "Cut every fraction of a beat"),
@@ -339,15 +344,17 @@ fn slicer_row(
         ui.add(
             egui::Slider::new(&mut st.sensitivity, 0.0..=1.0)
                 .show_value(false)
-                .text("Sensitivity"),
+                .text(tr("Sensitivity")),
         )
-        .on_hover_text("Higher finds quieter hits");
+        .on_hover_text(tr("Higher finds quieter hits"));
     }
     let source = s.sample.clone();
     let can = data.is_some_and(|d| d.frames() > 0) && source.is_some();
     if ui
-        .add_enabled(can, egui::Button::new("Slice"))
-        .on_hover_text("Cut the loop into slices on keys from C3 up (replaces the zones)")
+        .add_enabled(can, egui::Button::new(tr("Slice")))
+        .on_hover_text(tr(
+            "Cut the loop into slices on keys from C3 up (replaces the zones)",
+        ))
         .clicked()
     {
         if let (Some(d), Some(src)) = (data, source) {
@@ -385,18 +392,20 @@ fn slicer_row(
                 egui::DragValue::new(&mut s.slice_beats)
                     .range(1.0..=256.0)
                     .speed(0.1)
-                    .suffix(" beats"),
+                    .suffix(tr(" beats")),
             )
-            .on_hover_text("Length of the loop (detected; fix it if the tempo guess is off)")
+            .on_hover_text(tr(
+                "Length of the loop (detected; fix it if the tempo guess is off)",
+            ))
             .changed()
         {
             out.changed = true;
         }
         if ui
-            .button("Export pattern")
-            .on_hover_text(
+            .button(tr("Export pattern"))
+            .on_hover_text(tr(
                 "Write the notes that replay the loop at the song tempo into the current pattern",
-            )
+            ))
             .clicked()
         {
             out.export_pattern = true;
@@ -445,7 +454,7 @@ fn filter_row(
     let mut changed = false;
     let f = &mut s.filter;
     ui.vertical(|ui| {
-        ui.label(RichText::new("Filter").color(theme.text_dim));
+        ui.label(RichText::new(tr("Filter")).color(theme.text_dim));
         egui::ComboBox::from_id_salt("sampler_filter")
             .width(80.0)
             .selected_text(f.mode.name())

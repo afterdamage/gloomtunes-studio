@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use super::GloomApp;
 use crate::library::data_folder;
 use crate::recording;
+use gt_ui::tr;
 
 /// A render in progress.
 pub(super) struct BounceJob {
@@ -54,7 +55,7 @@ impl GloomApp {
             return;
         }
         if self.export_job.is_some() || self.bounce_job.is_some() {
-            self.toast("Wait for the current render to finish");
+            self.toast(tr("Wait for the current render to finish"));
             return;
         }
         if let Err(e) = bounce::check_routing(&self.project, track) {
@@ -74,7 +75,7 @@ impl GloomApp {
             BounceKind::Unfreeze => None,
         };
         let Some(job) = job else {
-            self.toast("Nothing to render");
+            self.toast(tr("Nothing to render"));
             return;
         };
         let name = self
@@ -169,7 +170,7 @@ impl GloomApp {
             ),
         };
         if !ok {
-            self.toast("The track was deleted while rendering");
+            self.toast(tr("The track was deleted while rendering"));
             return;
         }
         let rate = self.rate();

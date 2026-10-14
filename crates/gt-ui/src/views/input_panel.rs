@@ -5,6 +5,7 @@
 use egui::{Grid, RichText, Ui};
 use gt_core::{AudioInput, MonitorMode};
 
+use crate::i18n::tr;
 use crate::widgets::level_meter;
 use crate::GloomTheme;
 
@@ -100,7 +101,7 @@ pub fn input_menu(
         .width(width)
         .selected_text(label(*current))
         .show_ui(ui, |ui| {
-            ui.selectable_value(current, None, "No input");
+            ui.selectable_value(current, None, tr("No input"));
             if let Some(c) = before.filter(|c| !offered.contains(c)) {
                 ui.selectable_value(current, Some(c), label(Some(c)));
             }
@@ -158,12 +159,12 @@ pub enum InputAction {
 pub fn input_panel(ui: &mut Ui, theme: &GloomTheme, m: &InputPanelModel) -> Option<InputAction> {
     let mut action = None;
     let dim = |s: &str| RichText::new(s).color(theme.text_dim);
-    ui.label(RichText::new("Audio input and recording").strong());
+    ui.label(RichText::new(tr("Audio input and recording")).strong());
     Grid::new("input_panel")
         .num_columns(2)
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
-            ui.label(dim("Input device"));
+            ui.label(dim(tr("Input device")));
             let current = m.devices.get(m.selected_device).map_or("", String::as_str);
             egui::ComboBox::from_id_salt("in_device")
                 .width(280.0)
@@ -180,7 +181,7 @@ pub fn input_panel(ui: &mut Ui, theme: &GloomTheme, m: &InputPanelModel) -> Opti
             ui.end_row();
 
             if m.channels > 0 {
-                ui.label(dim("Channels"));
+                ui.label(dim(tr("Channels")));
                 ui.vertical(|ui| {
                     for pair in 0..m.channels.div_ceil(2) {
                         ui.horizontal(|ui| {
@@ -214,7 +215,7 @@ pub fn input_panel(ui: &mut Ui, theme: &GloomTheme, m: &InputPanelModel) -> Opti
                 ui.end_row();
             }
 
-            ui.label(dim("Monitoring"));
+            ui.label(dim(tr("Monitoring")));
             egui::ComboBox::from_id_salt("in_monitor")
                 .selected_text(m.monitor.name())
                 .show_ui(ui, |ui| {
@@ -228,14 +229,14 @@ pub fn input_panel(ui: &mut Ui, theme: &GloomTheme, m: &InputPanelModel) -> Opti
                     }
                 })
                 .response
-                .on_hover_text(
+                .on_hover_text(tr(
                     "How armed tracks hear their input. Auto: while stopped and while \
                      recording, not while playing a take back. Off: use your interface's \
                      direct monitoring.",
-                );
+                ));
             ui.end_row();
 
-            ui.label(dim("Latency"));
+            ui.label(dim(tr("Latency")));
             ui.horizontal(|ui| {
                 let reported = m
                     .reported_ms
@@ -248,19 +249,19 @@ pub fn input_panel(ui: &mut Ui, theme: &GloomTheme, m: &InputPanelModel) -> Opti
                             .range(-200.0..=200.0)
                             .speed(0.1)
                             .prefix("+ ")
-                            .suffix(" ms"),
+                            .suffix(tr(" ms")),
                     )
-                    .on_hover_text(
+                    .on_hover_text(tr(
                         "Added to the reported latency when placing recordings. The loopback \
                          measurement sets it.",
-                    );
+                    ));
                 if r.changed() {
                     action = Some(InputAction::SetOffset(off));
                 }
             });
             ui.end_row();
 
-            ui.label(dim("Measure"));
+            ui.label(dim(tr("Measure")));
             ui.horizontal(|ui| {
                 let mut ch = m.calibration_channel;
                 egui::ComboBox::from_id_salt("in_calib")
@@ -281,11 +282,11 @@ pub fn input_panel(ui: &mut Ui, theme: &GloomTheme, m: &InputPanelModel) -> Opti
                 };
                 if ui
                     .add_enabled(m.channels > 0, egui::Button::new(label))
-                    .on_hover_text(
+                    .on_hover_text(tr(
                         "Connect an output to this input with a cable (or hold the microphone \
                          to a speaker), then press: eight clicks are played and timed to set \
                          the offset.",
-                    )
+                    ))
                     .clicked()
                 {
                     action = Some(InputAction::Calibrate);
@@ -296,11 +297,11 @@ pub fn input_panel(ui: &mut Ui, theme: &GloomTheme, m: &InputPanelModel) -> Opti
     if m.two_devices && m.channels > 0 {
         ui.add(
             egui::Label::new(
-                RichText::new(
+                RichText::new(tr(
                     "Input and output are different devices with their own clocks: \
                      GloomTunes keeps them aligned by skipping or repeating input, which can \
                      click. Use one device (or an aggregate device) for clean recordings.",
-                )
+                ))
                 .color(theme.warn),
             )
             .wrap(),

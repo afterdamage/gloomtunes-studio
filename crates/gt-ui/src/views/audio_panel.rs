@@ -3,6 +3,7 @@
 
 use egui::{Grid, RichText, Ui};
 
+use crate::i18n::tr;
 use crate::widgets::level_meter;
 use crate::GloomTheme;
 
@@ -68,11 +69,11 @@ pub fn audio_panel(ui: &mut Ui, theme: &GloomTheme, m: &AudioPanelModel) -> Opti
         .num_columns(2)
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
-            ui.label(dim("Host"));
+            ui.label(dim(tr("Host")));
             ui.label(&m.host_name);
             ui.end_row();
 
-            ui.label(dim("Output device"));
+            ui.label(dim(tr("Output device")));
             ui.horizontal(|ui| {
                 let current = m.devices.get(m.selected_device).map_or("", String::as_str);
                 egui::ComboBox::from_id_salt("device")
@@ -87,13 +88,13 @@ pub fn audio_panel(ui: &mut Ui, theme: &GloomTheme, m: &AudioPanelModel) -> Opti
                             }
                         }
                     });
-                if ui.small_button("Rescan").clicked() {
+                if ui.small_button(tr("Rescan")).clicked() {
                     action = Some(AudioAction::Rescan);
                 }
             });
             ui.end_row();
 
-            ui.label(dim("Buffer size"));
+            ui.label(dim(tr("Buffer size")));
             egui::ComboBox::from_id_salt("buffer")
                 .selected_text(format!("{} frames", m.buffer_size))
                 .show_ui(ui, |ui| {
@@ -109,7 +110,7 @@ pub fn audio_panel(ui: &mut Ui, theme: &GloomTheme, m: &AudioPanelModel) -> Opti
                 });
             ui.end_row();
 
-            ui.label(dim("Sample rate"));
+            ui.label(dim(tr("Sample rate")));
             ui.horizontal(|ui| {
                 let label =
                     |r: Option<u32>| r.map_or("Device default".into(), |r| format!("{r} Hz"));
@@ -135,13 +136,13 @@ pub fn audio_panel(ui: &mut Ui, theme: &GloomTheme, m: &AudioPanelModel) -> Opti
             ui.end_row();
 
             if let Some(note) = &m.exclusive_note {
-                ui.label(dim("Exclusive mode"));
+                ui.label(dim(tr("Exclusive mode")));
                 ui.add_enabled(false, egui::Checkbox::new(&mut false, "Unavailable"))
                     .on_disabled_hover_text(note);
                 ui.end_row();
             }
 
-            ui.label(dim("Callback"));
+            ui.label(dim(tr("Callback")));
             let latency = match (m.callback_frames, m.sample_rate) {
                 (Some(f), Some(sr)) if sr > 0 => {
                     format!("{f} frames ({:.1} ms)", f as f32 * 1000.0 / sr as f32)
@@ -152,18 +153,18 @@ pub fn audio_panel(ui: &mut Ui, theme: &GloomTheme, m: &AudioPanelModel) -> Opti
             ui.label(format!("{latency}{channels}"));
             ui.end_row();
 
-            ui.label(dim("Level"));
+            ui.label(dim(tr("Level")));
             level_meter(ui, theme, m.level_db, egui::vec2(280.0, 10.0));
             ui.end_row();
         });
 
     ui.add_space(8.0);
     ui.horizontal(|ui| {
-        let tone = egui::Button::selectable(m.test_tone, "Test tone 440 Hz");
+        let tone = egui::Button::selectable(m.test_tone, tr("Test tone 440 Hz"));
         if ui.add_enabled(m.stream_open, tone).clicked() {
             action = Some(AudioAction::ToggleTestTone);
         }
-        if ui.button("Restart audio").clicked() {
+        if ui.button(tr("Restart audio")).clicked() {
             action = Some(AudioAction::RestartAudio);
         }
     });

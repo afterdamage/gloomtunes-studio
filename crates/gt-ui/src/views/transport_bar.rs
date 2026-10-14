@@ -4,6 +4,7 @@
 use egui::{DragValue, RichText, Ui};
 use gt_core::{Tick, TimeSig, TimeSigMap};
 
+use crate::i18n::tr;
 use crate::GloomTheme;
 
 /// Transport state as shown in the bar.
@@ -53,6 +54,49 @@ pub struct TransportModel {
     pub typing_keyboard: bool,
     /// MIDI input activity, 0 to 1 (lights a dot).
     pub midi_light: f32,
+    /// Tap tempo state (Prompt 25).
+    pub tap: TapTempo,
+}
+
+/// Tap tempo: the tempo of the last few taps.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TapTempo {
+    taps: Vec<f64>,
+}
+
+impl TapTempo {
+    /// Taps used at most.
+    const KEEP: usize = 8;
+    /// A pause this long (seconds) starts a new count.
+    const RESET_S: f64 = 2.0;
+
+    /// Records a tap at `now` seconds. Returns the tempo once there are two taps: 60 over the
+    /// mean interval, rounded to 0.01 BPM and kept within the tempo range.
+    pub fn tap(&mut self, now: f64) -> Option<f64> {
+        if self
+            .taps
+            .last()
+            .is_some_and(|&l| now - l > Self::RESET_S || now <= l)
+        {
+            self.taps.clear();
+        }
+        self.taps.push(now);
+        if self.taps.len() > Self::KEEP {
+            self.taps.remove(0);
+        }
+        let n = self.taps.len();
+        if n < 2 {
+            return None;
+        }
+        let mean = (self.taps[n - 1] - self.taps[0]) / (n - 1) as f64;
+        let bpm = (60.0 / mean * 100.0).round() / 100.0;
+        Some(bpm.clamp(gt_core::time::MIN_BPM, gt_core::time::MAX_BPM))
+    }
+
+    /// Taps counted so far.
+    pub fn count(&self) -> usize {
+        self.taps.len()
+    }
 }
 
 impl Default for TransportModel {
@@ -75,6 +119,7 @@ impl Default for TransportModel {
             count_in: 0,
             typing_keyboard: false,
             midi_light: 0.0,
+            tap: TapTempo::default(),
         }
     }
 }
@@ -120,13 +165,13 @@ pub fn transport_bar(
         let playing = m.state == PlayState::Playing;
         let icon = if playing { Icon::Pause } else { Icon::Play };
         if icon_button(ui, theme, icon, playing)
-            .on_hover_text("Play / pause (Space)")
+            .on_hover_text(tr("Play / pause (Space)"))
             .clicked()
         {
             actions.push(TransportAction::PlayPause);
         }
         if icon_button(ui, theme, Icon::Stop, false)
-            .on_hover_text("Stop: back to where play started; again: back to bar 1")
+            .on_hover_text(tr("Stop: back to where play started; again: back to bar 1"))
             .clicked()
         {
             actions.push(TransportAction::Stop);
@@ -141,7 +186,7 @@ pub fn transport_bar(
             actions.push(TransportAction::ToggleRecord);
         }
         if ui
-            .add(egui::Button::selectable(m.step_record, "Step"))
+            .add(egui::Button::selectable(m.step_record, tr("Step")))
             .on_hover_text(format!(
                 "Step record ({}+Shift+R): with the transport stopped, each note or chord you \
                  play goes in at the piano roll cursor, which moves on by the snap",
@@ -152,7 +197,7 @@ pub fn transport_bar(
             actions.push(TransportAction::ToggleStepRecord);
         }
         if ui
-            .button("Capture")
+            .button(tr("Capture"))
             .on_hover_text(format!(
                 "Capture last take ({}+Shift+T): turn what you just played into a new \
                  pattern, even with Record off",
@@ -196,11 +241,12 @@ pub fn transport_bar(
                 .size(theme.font_size + 6.0)
                 .color(colour),
         )
-        .on_hover_text("Bar : beat : tick (960 ticks per quarter note)");
+        .on_hover_text(tr("Bar : beat : tick (960 ticks per quarter note)"));
 
         ui.separator();
-        ui.label(dim("BPM"))
-            .on_hover_text("Tempo at the playhead; add changes in the playlist ruler");
+        ui.label(dim(tr("BPM"))).on_hover_text(tr(
+            "Tempo at the playhead; add changes in the playlist ruler",
+        ));
         let mut bpm = m.bpm;
         let r = ui.add(
             DragValue::new(&mut bpm)
@@ -211,6 +257,19 @@ pub fn transport_bar(
         if r.changed() && bpm != m.bpm {
             m.bpm = bpm;
             actions.push(TransportAction::SetBpm(bpm));
+        }
+        if ui
+            .small_button(tr("Tap"))
+            .on_hover_text(tr(
+                "Tap tempo: click on the beat; the tempo follows the last 8 taps",
+            ))
+            .clicked()
+        {
+            let now = ui.input(|i| i.time);
+            if let Some(bpm) = m.tap.tap(now) {
+                m.bpm = bpm;
+                actions.push(TransportAction::SetBpm(bpm));
+            }
         }
 
         let mut num = i32::from(m.time_sig.num);
@@ -233,8 +292,8 @@ pub fn transport_bar(
 
         ui.separator();
         if ui
-            .add(egui::Button::selectable(m.loop_enabled, "Loop"))
-            .on_hover_text("Loop the region below")
+            .add(egui::Button::selectable(m.loop_enabled, tr("Loop")))
+            .on_hover_text(tr("Loop the region below"))
             .clicked()
         {
             m.loop_enabled = !m.loop_enabled;
@@ -245,22 +304,22 @@ pub fn transport_bar(
         let first = sigs.bar_of(m.loop_start.0);
         let mut start_bar = first + 1;
         let mut bars = (sigs.bar_of(m.loop_end.0 - 1) - first + 1).max(1);
-        ui.label(dim("bar"));
+        ui.label(dim(tr("bar")));
         let a = ui.add(DragValue::new(&mut start_bar).range(1..=9999).speed(0.05));
-        ui.label(dim("for"));
+        ui.label(dim(tr("for")));
         let b = ui.add(DragValue::new(&mut bars).range(1..=999).speed(0.05));
-        ui.label(dim("bars"));
+        ui.label(dim(tr("bars")));
         if a.changed() || b.changed() {
             m.loop_start = Tick(sigs.bar_start(start_bar - 1));
             m.loop_end = Tick(sigs.bar_start(start_bar - 1 + bars));
             actions.push(TransportAction::LoopChanged);
         }
         if ui
-            .add(egui::Button::selectable(m.punch, "Punch"))
-            .on_hover_text(
+            .add(egui::Button::selectable(m.punch, tr("Punch")))
+            .on_hover_text(tr(
                 "Audio recording starts at the loop's start and stops at its end; with Loop on, \
                  each pass is a new take",
-            )
+            ))
             .clicked()
         {
             m.punch = !m.punch;
@@ -268,15 +327,15 @@ pub fn transport_bar(
 
         ui.separator();
         if ui
-            .add(egui::Button::selectable(m.metronome, "Click"))
-            .on_hover_text("Metronome")
+            .add(egui::Button::selectable(m.metronome, tr("Click")))
+            .on_hover_text(tr("Metronome"))
             .clicked()
         {
             m.metronome = !m.metronome;
             actions.push(TransportAction::SetMetronome(m.metronome));
         }
         if ui
-            .add(egui::Button::selectable(m.typing_keyboard, "Keys"))
+            .add(egui::Button::selectable(m.typing_keyboard, tr("Keys")))
             .on_hover_text(format!(
                 "Typing keyboard: play the selected channel with Z S X D C … and Q 2 W 3 E …, \
                  - and = change octave ({}+T)",
@@ -343,4 +402,32 @@ fn icon_button(ui: &mut Ui, theme: &GloomTheme, icon: Icon, active: bool) -> egu
         }
     }
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tap_tempo_averages_and_restarts_after_a_pause() {
+        let mut t = TapTempo::default();
+        assert_eq!(t.tap(10.0), None);
+        assert_eq!(t.tap(10.5), Some(120.0));
+        assert_eq!(t.tap(11.0), Some(120.0));
+        // Uneven taps average out.
+        assert_eq!(t.tap(11.6), Some(112.5));
+        // A long pause starts again.
+        assert_eq!(t.tap(20.0), None);
+        assert_eq!(t.count(), 1);
+        // Only the last 8 taps count.
+        let mut t = TapTempo::default();
+        for i in 0..20 {
+            t.tap(f64::from(i) * if i < 10 { 0.6 } else { 0.4 });
+        }
+        assert_eq!(t.count(), 8);
+        // Absurdly fast taps stay in range.
+        let mut t = TapTempo::default();
+        t.tap(1.0);
+        assert_eq!(t.tap(1.001), Some(gt_core::time::MAX_BPM));
+    }
 }

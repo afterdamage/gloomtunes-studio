@@ -17,6 +17,7 @@ use gt_ui::{Command, GloomTheme};
 use super::{GloomApp, MainView, Then};
 use crate::crash;
 use crate::settings::{MidiPrefs, Settings, ThemePrefs};
+use gt_ui::tr;
 
 /// How long the CPU meter's peak tick and its red dropout warning stay up.
 const PEAK_HOLD: Duration = Duration::from_secs(2);
@@ -165,10 +166,10 @@ impl GloomApp {
             Command::PlayPause => self.on_transport(TransportAction::PlayPause),
             Command::Undo => self.undo(false),
             Command::Redo => self.undo(true),
-            Command::ShowPlaylist => self.main_view = MainView::Playlist,
-            Command::ShowRack => self.main_view = MainView::Rack,
-            Command::ShowPianoRoll => self.main_view = MainView::PianoRoll,
-            Command::ShowMixer => self.main_view = MainView::Mixer,
+            Command::ShowPlaylist => self.show_view(MainView::Playlist),
+            Command::ShowRack => self.show_view(MainView::Rack),
+            Command::ShowPianoRoll => self.show_view(MainView::PianoRoll),
+            Command::ShowMixer => self.show_view(MainView::Mixer),
             Command::ToggleSongMode => {
                 self.transport.song_mode = !self.transport.song_mode;
                 self.push_song();
@@ -183,11 +184,18 @@ impl GloomApp {
             }
             Command::Settings => self.show_settings = !self.show_settings,
             Command::Plugins => self.show_plugins = !self.show_plugins,
-            Command::New
-            | Command::Open
-            | Command::Save
-            | Command::SaveAs
-            | Command::ExportAudio => {}
+            Command::TapTempo => {
+                let now = self.perf.started.elapsed().as_secs_f64();
+                if let Some(bpm) = self.transport.tap.tap(now) {
+                    self.on_transport(TransportAction::SetBpm(bpm));
+                }
+            }
+            Command::UndoHistory => self.show_history = !self.show_history,
+            Command::ProjectInfo => self.show_info = !self.show_info,
+            Command::Help => self.show_help = !self.show_help,
+            Command::ShowBrowser => self.layout.browser = !self.layout.browser,
+            // View commands are read by their views.
+            _ => {}
         }
     }
 
@@ -232,7 +240,7 @@ impl GloomApp {
     pub(super) fn settings_window(&mut self, ctx: &egui::Context, theme: &GloomTheme) {
         let mut open = true;
         let mut page = self.settings_page;
-        egui::Window::new("Settings")
+        egui::Window::new(tr("Settings"))
             .open(&mut open)
             .default_pos(ctx.content_rect().center() - egui::vec2(260.0, 240.0))
             .resizable(false)
@@ -263,6 +271,8 @@ impl GloomApp {
                         }
                     }
                     SettingsPage::Theme => {
+                        self.ui_size_settings(ui, theme);
+                        ui.separator();
                         if theme_editor(ui, &mut self.theme) == ThemeEdit::Changed {
                             self.theme.apply(ctx);
                             self.settings_dirty = true;
@@ -324,7 +334,7 @@ impl GloomApp {
             scanning: self.plugins.scanning().is_some(),
         };
         let mut theme = self.theme.clone();
-        let actions = egui::Window::new("Welcome to GloomTunes Studio")
+        let actions = egui::Window::new(tr("Welcome to GloomTunes Studio"))
             .collapsible(false)
             .resizable(false)
             .default_width(480.0)
@@ -370,7 +380,7 @@ impl GloomApp {
         let mut delete = false;
         let mut open_issue = false;
         let mut open_folder = false;
-        egui::Window::new("GloomTunes closed unexpectedly")
+        egui::Window::new(tr("GloomTunes closed unexpectedly"))
             .collapsible(false)
             .default_pos(ctx.content_rect().center() - egui::vec2(280.0, 160.0))
             .default_width(560.0)
@@ -401,16 +411,16 @@ impl GloomApp {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     open_issue = ui
-                        .button(egui::RichText::new("Report on GitHub…").color(theme.accent))
+                        .button(egui::RichText::new(tr("Report on GitHub…")).color(theme.accent))
                         .clicked();
-                    open_folder = ui.button("Open folder").clicked();
-                    delete = ui.button("Delete report").clicked();
-                    close = ui.button("Later").clicked();
+                    open_folder = ui.button(tr("Open folder")).clicked();
+                    delete = ui.button(tr("Delete report")).clicked();
+                    close = ui.button(tr("Later")).clicked();
                 });
             });
         if open_issue {
             match crash::open_external(&crash::issue_url(text)) {
-                Ok(()) => self.toast("Opened GitHub in your browser; submit the issue there"),
+                Ok(()) => self.toast(tr("Opened GitHub in your browser; submit the issue there")),
                 Err(e) => self.toast(format!("Cannot open the browser: {e}")),
             }
         }
@@ -454,6 +464,84 @@ impl GloomApp {
         };
         s.set_keymap(&self.keymap);
         s.theme = ThemePrefs::from_theme(&self.theme);
+        s.ui.layout = self.layout.to_prefs();
+        self.collect_browser_prefs();
+    }
+
+    /// UI size and language (Prompt 25).
+    fn ui_size_settings(&mut self, ui: &mut egui::Ui, theme: &GloomTheme) {
+        let (lo, hi) = crate::settings::UI_SCALE_RANGE;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(gt_ui::tr("UI size")).color(theme.text_dim));
+            let mut pct = (self.settings.ui.scale() * 100.0).round();
+            let r = ui.add(
+                egui::Slider::new(&mut pct, lo * 100.0..=hi * 100.0)
+                    .step_by(5.0)
+                    .suffix(" %"),
+            );
+            // Applied on release: rescaling while dragging moves the slider under the mouse.
+            if r.drag_stopped() || r.changed() && !r.dragged() {
+                self.settings.ui.scale = pct / 100.0;
+                self.settings_dirty = true;
+            }
+            if ui.small_button("100 %").clicked() {
+                self.settings.ui.scale = 1.0;
+                self.settings_dirty = true;
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(gt_ui::tr("Language")).color(theme.text_dim));
+            egui::ComboBox::from_id_salt("language")
+                .selected_text(
+                    gt_ui::i18n::LANGUAGES
+                        .iter()
+                        .find(|(c, _)| *c == self.settings.ui.language)
+                        .map_or("English", |(_, n)| n),
+                )
+                .show_ui(ui, |ui| {
+                    for (code, name) in gt_ui::i18n::LANGUAGES {
+                        if ui
+                            .selectable_label(self.settings.ui.language == code, name)
+                            .clicked()
+                        {
+                            self.settings.ui.language = code.to_owned();
+                            gt_ui::i18n::set_language(code);
+                            self.settings_dirty = true;
+                        }
+                    }
+                });
+        });
+    }
+
+    /// Applies the UI scale and installs the keymap the views read, when they changed.
+    pub(super) fn apply_ui_prefs(&mut self, ctx: &egui::Context) {
+        let scale = self.settings.ui.scale();
+        if scale != self.ui_scale {
+            if self.ui_scale == 0.0 {
+                gt_ui::i18n::set_language(&self.settings.ui.language);
+            }
+            self.ui_scale = scale;
+            ctx.set_zoom_factor(scale);
+        } else if (ctx.zoom_factor() - scale).abs() > 1e-3 {
+            // Ctrl+Plus / Ctrl+Minus zoomed: keep it in range and remember it.
+            let (lo, hi) = crate::settings::UI_SCALE_RANGE;
+            let z = ctx.zoom_factor().clamp(lo, hi);
+            self.settings.ui.scale = z;
+            self.ui_scale = z;
+            self.settings_dirty = true;
+            if z != ctx.zoom_factor() {
+                ctx.set_zoom_factor(z);
+            }
+        }
+        if self
+            .installed_keys
+            .as_deref()
+            .is_none_or(|k| *k != self.keymap)
+        {
+            let k = std::sync::Arc::new(self.keymap.clone());
+            gt_ui::keymap::install(ctx, std::sync::Arc::clone(&k));
+            self.installed_keys = Some(k);
+        }
     }
 
     /// Saves the settings now (at exit).

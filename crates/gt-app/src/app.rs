@@ -11,7 +11,7 @@ use gt_core::effects::IMPULSE_RESPONSES;
 use gt_core::{
     ClipKind, EffectKind, EffectSlot, Instrument, ModSourceKind, Modulator, ParamId,
     PluginInstanceId, PluginKind, Project, SampleData, SampleSource, SigChange, TempoPoint, Tick,
-    TimeSigMap, FX_SLOTS, MAX_CHANNELS, ROOT_KEY, STEP_TICKS, STRIPS,
+    TimeSigMap, FX_SLOTS, MAX_CHANNELS, ROOT_KEY, STRIPS,
 };
 use gt_dsp::analysis::Scope;
 use gt_engine::{
@@ -22,12 +22,11 @@ use gt_plugin_host::{PluginHost, PluginStatus};
 use gt_project::{ops, presets, History};
 use gt_ui::param_ui::{self, ParamMarks, ParamRequest};
 use gt_ui::views::{
-    add_automation, browser, channel_rack, mixer_view, modulators_panel, piano_roll, playlist,
-    plugin_controls, sampler_panel, synth_panel, transport_bar, AudioAction, BrowserAction,
-    BrowserModel, GhostChannel, MidiPanelModel, MixerState, MixerView, ModulatorsState,
-    PianoRollAction, PianoRollState, PianoRollView, PlayState, PlaylistAction, PlaylistState,
-    PlaylistView, PluginBrowserState, PluginPanelView, PluginState, RackAction, RackState,
-    RackView, SamplerPanelView, StripMeter, SynthPanelAction, SynthPanelView, TransportAction,
+    add_automation, browser, modulators_panel, piano_roll, plugin_controls, sampler_panel,
+    synth_panel, transport_bar, AudioAction, BrowserModel, GhostChannel, MidiPanelModel,
+    MixerState, ModulatorsState, PianoRollAction, PianoRollState, PianoRollView, PlayState,
+    PlaylistAction, PlaylistState, PluginBrowserState, PluginPanelView, PluginState, RackAction,
+    RackState, SamplerPanelView, StripMeter, SynthPanelAction, SynthPanelView, TransportAction,
     TransportModel,
 };
 use gt_ui::views::{FirstRunState, SettingsPage, ShortcutEditorState};
@@ -43,29 +42,25 @@ struct TablesKey {
 
 mod automate;
 mod bounce;
+mod browse;
 mod midi;
 mod plugins;
 mod prefs;
 mod record;
 mod stretch;
+mod views;
 
 use crate::audio_io::AudioIo;
 use crate::files::{self, Dialog, DialogAction, ExportForm, Then};
-use crate::library::{data_folder, default_folder, list_folder, synth_preset_folder, Library};
+use crate::library::{data_folder, default_folder, synth_preset_folder, Library};
 
 /// Sample rate used for loading while no device is open.
 const FALLBACK_RATE: u32 = 48_000;
 /// Activity lights fall by this much per second.
 const ACTIVITY_FALL_PER_S: f32 = 4.0;
 
-/// What the central area shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MainView {
-    Playlist,
-    Rack,
-    PianoRoll,
-    Mixer,
-}
+use crate::layout::{Layout, MainView};
+use gt_ui::tr;
 
 /// What the engine last received for one effect slot, so only differences are sent.
 #[derive(Debug, Clone, PartialEq)]
@@ -106,7 +101,23 @@ pub struct GloomApp {
     slots_in_use: usize,
     activity: [f32; MAX_CHANNELS],
 
-    main_view: MainView,
+    /// Docked and floating views, the browser panel (Prompt 25).
+    layout: Layout,
+    /// A floating view to bring to the front this frame.
+    focus_view: Option<MainView>,
+    browse: browse::BrowseState,
+    /// Tempo of the sound being previewed, when it follows the project tempo.
+    preview_bpm: Option<f32>,
+    /// A project to open once unsaved changes are dealt with.
+    pending_open: Option<PathBuf>,
+    show_history: bool,
+    show_info: bool,
+    show_help: bool,
+    help: gt_ui::views::HelpState,
+    /// The keymap the views read, re-installed when it changes.
+    installed_keys: Option<Arc<Keymap>>,
+    /// Applied UI scale.
+    ui_scale: f32,
     roll: PianoRollState,
     /// Shown bank and pad of the drum pad panel.
     drum_state: gt_ui::views::DrumPadState,
@@ -306,7 +317,17 @@ impl GloomApp {
             preview_pending: None,
             slots_in_use: 0,
             activity: [0.0; MAX_CHANNELS],
-            main_view: MainView::Playlist,
+            layout: Layout::from_prefs(&settings.ui.layout),
+            focus_view: None,
+            browse: browse::BrowseState::default(),
+            preview_bpm: None,
+            pending_open: None,
+            show_history: false,
+            show_info: false,
+            show_help: false,
+            help: gt_ui::views::HelpState::default(),
+            installed_keys: None,
+            ui_scale: 0.0,
             roll: PianoRollState::default(),
             drum_state: gt_ui::views::DrumPadState::default(),
             history,
@@ -389,7 +410,7 @@ impl GloomApp {
         }
         app.plugins.start_scan();
         app.refresh_presets();
-        app.open_folder(default_folder());
+        app.init_browser();
         app.request_channel_samples();
         app.check_recovery();
         if let Some(path) = open {
@@ -402,18 +423,6 @@ impl GloomApp {
         self.audio
             .engine()
             .map_or(FALLBACK_RATE, |e| e.config().sample_rate)
-    }
-
-    fn open_folder(&mut self, dir: std::path::PathBuf) {
-        match list_folder(&dir) {
-            Ok(entries) => {
-                self.browser.entries = entries;
-                self.browser.error = None;
-                self.browser.path_text = dir.display().to_string();
-                self.browser.folder = dir;
-            }
-            Err(e) => self.browser.error = Some(e),
-        }
     }
 
     /// Starts loading every sample the project uses (channels and audio clips).
@@ -760,41 +769,13 @@ impl GloomApp {
         match self.library.get(src) {
             Some(l) => {
                 let data = std::sync::Arc::clone(&l.data);
-                self.send(EngineCommand::PreviewSample(Some(data)));
+                self.preview_data(src, data);
             }
             None => {
                 self.preview_pending = Some(src.clone());
                 let rate = self.rate();
                 self.library.request(src, rate);
             }
-        }
-    }
-
-    fn on_browser(&mut self, action: BrowserAction) {
-        match action {
-            BrowserAction::Preview(src) => self.preview(&src),
-            BrowserAction::Assign(src) => {
-                let i = self.rack.selected;
-                let Some(ch) = self.project.channels.get_mut(i) else {
-                    return;
-                };
-                let fresh = ch.sample().is_none() && ch.name.starts_with("Sampler ");
-                let Some(sampler) = ch.sampler_mut() else {
-                    return; // a synth channel has no sample
-                };
-                sampler.sample = Some(src.clone());
-                // Name a fresh "Sampler N" channel after its first sample.
-                if fresh {
-                    if let SampleSource::File(p) = &src {
-                        if let Some(stem) = p.file_stem() {
-                            ch.name = stem.to_string_lossy().into_owned();
-                        }
-                    }
-                }
-                self.push_sample(i);
-                self.pending_edit = Some("Load sample");
-            }
-            BrowserAction::Open(dir) => self.open_folder(dir),
         }
     }
 
@@ -809,6 +790,7 @@ impl GloomApp {
                 (name, p)
             })
             .collect();
+        self.refresh_browser();
     }
 
     fn on_synth_panel(&mut self, action: SynthPanelAction) {
@@ -881,7 +863,7 @@ impl GloomApp {
                 self.push_channels();
                 self.pending_edit = Some("Add or remove channel");
             }
-            RackAction::OpenPianoRoll(_) => self.main_view = MainView::PianoRoll,
+            RackAction::OpenPianoRoll(_) => self.show_view(MainView::PianoRoll),
             RackAction::AddPlugin => {
                 self.show_plugins = true;
                 self.plugin_browser.kind = Some(PluginKind::Instrument);
@@ -1027,13 +1009,18 @@ impl GloomApp {
             self.history.undo(&mut self.project)
         };
         if done.is_some() {
-            self.edits += 1;
-            self.roll.selected.clear();
-            let n = self.project.channels.len();
-            self.rack.selected = self.rack.selected.min(n.saturating_sub(1));
-            self.push_channels();
-            self.push_timing();
+            self.after_undo();
         }
+    }
+
+    /// Brings the engine and the views in line after undo, redo or a history jump.
+    fn after_undo(&mut self) {
+        self.edits += 1;
+        self.roll.selected.clear();
+        let n = self.project.channels.len();
+        self.rack.selected = self.rack.selected.min(n.saturating_sub(1));
+        self.push_channels();
+        self.push_timing();
     }
 
     /// Sends a command to the engine if audio is running. Settings live in `self.transport`,
@@ -1240,7 +1227,7 @@ impl GloomApp {
                 let sigs = &self.project.signatures;
                 let start = sigs.bar_start(sigs.bar_of(self.transport.position.0));
                 add_automation(&mut self.project, &mut self.playlist, target, start);
-                self.main_view = MainView::Playlist;
+                self.show_view(MainView::Playlist);
                 // The clip only plays in song mode.
                 self.transport.song_mode = true;
                 self.push_song();
@@ -1262,7 +1249,7 @@ impl GloomApp {
                 }
                 // Draw it in the piano roll's bottom lane; it plays wherever the pattern does.
                 self.roll.lane = gt_ui::views::Lane::Automation(target);
-                self.main_view = MainView::PianoRoll;
+                self.show_view(MainView::PianoRoll);
                 self.push_song();
             }
             ParamRequest::AddLfo(target) | ParamRequest::AddFollower(target) => {
@@ -1410,7 +1397,7 @@ impl GloomApp {
         playhead: Option<i64>,
     ) -> Vec<PianoRollAction> {
         let Some(ch) = self.project.channels.get(self.rack.selected) else {
-            ui.label(egui::RichText::new("Add a channel to write notes").color(theme.text_dim));
+            ui.label(egui::RichText::new(tr("Add a channel to write notes")).color(theme.text_dim));
             return Vec::new();
         };
         let (id, name) = (ch.id, ch.name.clone());
@@ -1547,7 +1534,7 @@ impl GloomApp {
             }
             PlaylistAction::EditPattern(id) => {
                 self.project.select_pattern(id);
-                self.main_view = MainView::PianoRoll;
+                self.show_view(MainView::PianoRoll);
                 self.push_song();
             }
             PlaylistAction::Bounce { kind, track, clips } => self.on_bounce(kind, track, clips),
@@ -1797,7 +1784,19 @@ impl GloomApp {
     fn then(&mut self, then: Then) {
         match then {
             Then::Stay => {}
-            Then::New => self.replace_project(gt_core::Project::empty(), None),
+            Then::New => {
+                let templates = files::list_templates(&files::templates_folder());
+                if templates.is_empty() {
+                    self.replace_project(gt_core::Project::empty(), None);
+                } else {
+                    self.dialog = Some(Dialog::NewProject { templates });
+                }
+            }
+            Then::OpenPending => {
+                if let Some(path) = self.pending_open.take() {
+                    self.open_path(&path);
+                }
+            }
             Then::Open => {
                 let dir = self
                     .doc_path
@@ -1895,6 +1894,26 @@ impl GloomApp {
             DialogAction::Export { path } => self.start_export(path),
             DialogAction::ImportMidi { path, timing } => self.import_midi(&path, timing),
             DialogAction::ExportMidi { path, song } => self.export_midi(&path, song),
+            DialogAction::NewFrom(None) => {
+                self.dialog = None;
+                self.replace_project(gt_core::Project::empty(), None);
+            }
+            DialogAction::NewFrom(Some(path)) => {
+                self.dialog = None;
+                self.open_path(&path);
+                // A template starts a new, unnamed project.
+                if self.doc_path.as_deref() == Some(path.as_path()) {
+                    self.doc_path = None;
+                }
+            }
+            DialogAction::DeleteTemplate(path) => {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    self.toast(format!("Cannot delete {}: {e}", path.display()));
+                }
+                let templates = files::list_templates(&files::templates_folder());
+                self.dialog = (!templates.is_empty()).then_some(Dialog::NewProject { templates });
+            }
+            DialogAction::SaveTemplate(name) => self.save_template(&name),
             DialogAction::CancelExport => {
                 if let Some(Dialog::Export(form)) = &self.dialog {
                     if let Some(p) = &form.running {
@@ -2020,7 +2039,7 @@ impl GloomApp {
                 // Recovered work is not saved anywhere yet.
                 self.edits = 1;
                 self.dialog = None;
-                self.toast("Recovered the autosaved project; save it to keep it");
+                self.toast(tr("Recovered the autosaved project; save it to keep it"));
                 if !missing.is_empty() {
                     self.dialog = Some(Dialog::Relink {
                         missing,
@@ -2086,7 +2105,7 @@ impl GloomApp {
     /// File menu and shortcuts.
     fn file_menu(&mut self, ui: &mut egui::Ui) {
         let mut pick = None;
-        ui.menu_button("File", |ui| {
+        ui.menu_button(tr("File"), |ui| {
             for (label, then, keys) in [
                 ("New", Some(Then::New), self.keys(Command::New)),
                 ("Open…", Some(Then::Open), self.keys(Command::Open)),
@@ -2100,13 +2119,13 @@ impl GloomApp {
             }
             ui.separator();
             if ui
-                .add(egui::Button::new("Save").shortcut_text(self.keys(Command::Save)))
+                .add(egui::Button::new(tr("Save")).shortcut_text(self.keys(Command::Save)))
                 .clicked()
             {
                 pick = Some(FileCmd::Save);
             }
             if ui
-                .add(egui::Button::new("Save as…").shortcut_text(self.keys(Command::SaveAs)))
+                .add(egui::Button::new(tr("Save as…")).shortcut_text(self.keys(Command::SaveAs)))
                 .clicked()
             {
                 pick = Some(FileCmd::SaveAs);
@@ -2114,23 +2133,26 @@ impl GloomApp {
             ui.separator();
             if ui
                 .add(
-                    egui::Button::new("Export audio…")
+                    egui::Button::new(tr("Export audio…"))
                         .shortcut_text(self.keys(Command::ExportAudio)),
                 )
                 .clicked()
             {
                 pick = Some(FileCmd::Export);
             }
+            if ui.button(tr("Save as template…")).clicked() {
+                pick = Some(FileCmd::SaveTemplate);
+            }
             ui.separator();
-            if ui.button("Import MIDI file…").clicked() {
+            if ui.button(tr("Import MIDI file…")).clicked() {
                 pick = Some(FileCmd::ImportMidi);
             }
-            if ui.button("Export MIDI file…").clicked() {
+            if ui.button(tr("Export MIDI file…")).clicked() {
                 pick = Some(FileCmd::ExportMidi);
             }
             ui.separator();
             if ui
-                .add(egui::Button::new("Settings…").shortcut_text(self.keys(Command::Settings)))
+                .add(egui::Button::new(tr("Settings…")).shortcut_text(self.keys(Command::Settings)))
                 .clicked()
             {
                 self.show_settings = true;
@@ -2139,11 +2161,89 @@ impl GloomApp {
         if let Some(cmd) = pick {
             self.file_cmd(cmd);
         }
+        self.view_menu(ui);
+    }
+
+    /// View menu: panels and the workflow windows.
+    fn view_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button(gt_ui::tr("View"), |ui| {
+            let mut browser = self.layout.browser;
+            if ui
+                .checkbox(&mut browser, gt_ui::tr("Browser"))
+                .on_hover_text(self.keys(Command::ShowBrowser))
+                .changed()
+            {
+                self.layout.browser = browser;
+            }
+            for v in MainView::ALL {
+                let floating = self.layout.is_floating(v);
+                let label = format!("{} {}", v.label(), gt_ui::tr("in its own window"));
+                let mut f = floating;
+                if ui.checkbox(&mut f, label).changed() {
+                    if f {
+                        self.layout.float(v, None);
+                    } else {
+                        self.layout.dock(v);
+                    }
+                }
+            }
+            ui.separator();
+            for (cmd, label) in [
+                (Command::UndoHistory, gt_ui::tr("Undo history")),
+                (Command::ProjectInfo, gt_ui::tr("Project info")),
+                (Command::Help, gt_ui::tr("Help")),
+            ] {
+                if ui
+                    .add(egui::Button::new(label).shortcut_text(self.keys(cmd)))
+                    .clicked()
+                {
+                    self.run_command(cmd);
+                    ui.close();
+                }
+            }
+        });
+    }
+
+    /// Saves a copy of the project, with its samples, as a template.
+    fn save_template(&mut self, name: &str) {
+        let name = files::template_name(name);
+        let path =
+            files::templates_folder().join(format!("{name}.{}", gt_project::file::EXTENSION));
+        if let Some(label) = self.pending_edit.take() {
+            if self.history.commit(&self.project, label) {
+                self.edits += 1;
+            }
+        }
+        self.plugins.store_states(&mut self.project);
+        let result = std::fs::create_dir_all(files::templates_folder())
+            .map_err(|e| e.to_string())
+            .and_then(|()| {
+                gt_project::file::save(
+                    &self.project,
+                    &path,
+                    gt_project::file::SaveOptions {
+                        embed_samples: true,
+                    },
+                )
+                .map_err(|e| e.to_string())
+            });
+        match result {
+            Ok(_) => {
+                self.dialog = None;
+                self.toast(format!("Saved template \"{name}\""));
+            }
+            Err(e) => {
+                self.dialog = Some(Dialog::SaveTemplate {
+                    name,
+                    error: Some(format!("Could not save: {e}")),
+                });
+            }
+        }
     }
 
     fn file_cmd(&mut self, cmd: FileCmd) {
         if self.export_job.is_some() || self.bounce_job.is_some() {
-            self.toast("Wait for the render to finish");
+            self.toast(tr("Wait for the render to finish"));
             return;
         }
         match cmd {
@@ -2153,6 +2253,12 @@ impl GloomApp {
             FileCmd::Export => self.show_export(),
             FileCmd::ImportMidi => self.show_import_midi(),
             FileCmd::ExportMidi => self.show_export_midi(),
+            FileCmd::SaveTemplate => {
+                self.dialog = Some(Dialog::SaveTemplate {
+                    name: self.doc_name(),
+                    error: None,
+                });
+            }
         }
     }
 
@@ -2239,6 +2345,7 @@ enum FileCmd {
     Export,
     ImportMidi,
     ExportMidi,
+    SaveTemplate,
 }
 
 impl eframe::App for GloomApp {
@@ -2258,6 +2365,9 @@ impl eframe::App for GloomApp {
         }
         let ready = self.library.poll();
         self.on_samples_ready(ready);
+        self.poll_index();
+        self.poll_preview();
+        self.apply_ui_prefs(&ctx);
 
         let dt = ctx.input(|i| i.stable_dt).min(0.1);
         // Read the engine's view of the transport and the channel activity.
@@ -2315,22 +2425,24 @@ impl eframe::App for GloomApp {
                         transport_bar(ui, &theme, &mut self.transport, &self.project.signatures);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .add(egui::Button::selectable(self.show_settings, "Settings"))
-                            .on_hover_text(
+                            .add(egui::Button::selectable(self.show_settings, tr("Settings")))
+                            .on_hover_text(tr(
                                 "Audio device, MIDI, shortcuts, theme, performance and privacy",
-                            )
+                            ))
                             .clicked()
                         {
                             self.show_settings = !self.show_settings;
                         }
-                        let redo = ui.add_enabled(redo_tip.is_some(), egui::Button::new("Redo"));
+                        let redo =
+                            ui.add_enabled(redo_tip.is_some(), egui::Button::new(tr("Redo")));
                         if redo
                             .on_hover_text(redo_tip.as_deref().unwrap_or("Nothing to redo"))
                             .clicked()
                         {
                             undo_clicked = Some(true);
                         }
-                        let undo = ui.add_enabled(undo_tip.is_some(), egui::Button::new("Undo"));
+                        let undo =
+                            ui.add_enabled(undo_tip.is_some(), egui::Button::new(tr("Undo")));
                         if undo
                             .on_hover_text(undo_tip.as_deref().unwrap_or("Nothing to undo"))
                             .clicked()
@@ -2371,17 +2483,19 @@ impl eframe::App for GloomApp {
             .get(self.rack.selected)
             .filter(|c| c.sampler().is_some())
             .map(|c| c.name.clone());
-        let browser_actions = egui::Panel::left("browser")
-            .resizable(true)
-            .default_size(230.0)
-            .min_size(160.0)
-            .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(8))
-            .show(ui, |ui| {
-                browser(ui, &theme, &mut self.browser, target.as_deref())
-            })
-            .inner;
-        for a in browser_actions {
-            self.on_browser(a);
+        if self.layout.browser {
+            let browser_actions = egui::Panel::left("browser")
+                .resizable(true)
+                .default_size(250.0)
+                .min_size(180.0)
+                .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(8))
+                .show(ui, |ui| {
+                    browser(ui, &theme, &mut self.browser, target.as_deref())
+                })
+                .inner;
+            for a in browser_actions {
+                self.on_browser(a);
+            }
         }
 
         // The oscilloscope follows the selected synth channel.
@@ -2392,7 +2506,8 @@ impl eframe::App for GloomApp {
             }
         }
         let sample_rate = self.rate() as f32;
-        let show_instrument = matches!(self.main_view, MainView::Rack | MainView::PianoRoll);
+        let show_instrument =
+            self.layout.visible(MainView::Rack) || self.layout.visible(MainView::PianoRoll);
         let mut plugin_actions = Vec::new();
         let mut plugin_changed = false;
         // The selected channel's plugin panel (read before the channel is borrowed to edit).
@@ -2416,25 +2531,27 @@ impl eframe::App for GloomApp {
                 .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(8))
                 .show(ui, |ui| {
                     let Some(ch) = self.project.channels.get_mut(self.rack.selected) else {
-                        ui.label(egui::RichText::new("No channel selected").color(theme.text_dim));
+                        ui.label(
+                            egui::RichText::new(tr("No channel selected")).color(theme.text_dim),
+                        );
                         return (false, Vec::new());
                     };
                     let channel = Some(ch.id);
                     let bend = ui
                         .horizontal(|ui| {
-                            ui.label(egui::RichText::new("Pitch bend").color(theme.text_dim));
+                            ui.label(egui::RichText::new(tr("Pitch bend")).color(theme.text_dim));
                             ui.add(
                                 egui::DragValue::new(&mut ch.bend_range)
                                     .range(0.0..=gt_core::Channel::MAX_BEND)
                                     .speed(0.1)
                                     .fixed_decimals(0)
                                     .prefix("±")
-                                    .suffix(" st"),
+                                    .suffix(tr(" st")),
                             )
-                            .on_hover_text(
+                            .on_hover_text(tr(
                                 "How far the pitch wheel bends this instrument, in semitones \
                                  (plugins set their own range)",
-                            )
+                            ))
                             .changed()
                         })
                         .inner;
@@ -2479,7 +2596,7 @@ impl eframe::App for GloomApp {
                                 ui.add(
                                     egui::TextEdit::singleline(&mut ch.name).desired_width(140.0),
                                 )
-                                .on_hover_text("Channel name");
+                                .on_hover_text(tr("Channel name"));
                             });
                             let view = &channel_plugin_view;
                             let owner = gt_core::PluginOwner::Channel(ch.id);
@@ -2535,133 +2652,21 @@ impl eframe::App for GloomApp {
         } else {
             self.step_cursor()
         };
-        if self.main_view == MainView::Mixer {
+        if self.layout.visible(MainView::Mixer) {
             self.read_meters(dt);
         }
-        let mut mixer_changed = false;
-        let mut playlist_actions = Vec::new();
-        let (rack_actions, roll_actions) = egui::CentralPanel::default()
+        let cx = views::ViewCtx {
+            pattern_pos,
+            inputs: self.offered_inputs(),
+            sample_rate,
+        };
+        let mut out = views::ViewOut::default();
+        egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(ui.style()).inner_margin(10))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for (v, label, tip) in [
-                        (MainView::Playlist, "Playlist", "Arrangement of clips (F5)"),
-                        (MainView::Rack, "Channel rack", "Step sequencer (F6)"),
-                        (
-                            MainView::PianoRoll,
-                            "Piano roll",
-                            "Notes of the selected channel (F7)",
-                        ),
-                        (MainView::Mixer, "Mixer", "Inserts, sends and effects (F9)"),
-                    ] {
-                        if ui
-                            .add(egui::Button::selectable(self.main_view == v, label))
-                            .on_hover_text(tip)
-                            .clicked()
-                        {
-                            self.main_view = v;
-                        }
-                    }
-                    ui.separator();
-                    let n = self.project.modulators.len();
-                    let label = if n > 0 {
-                        format!("Modulators ({n})")
-                    } else {
-                        "Modulators".to_owned()
-                    };
-                    if ui
-                        .add(egui::Button::selectable(self.show_modulators, label))
-                        .on_hover_text(
-                            "LFOs and envelope followers. Right-click any knob or fader to add one",
-                        )
-                        .clicked()
-                    {
-                        self.show_modulators = !self.show_modulators;
-                    }
-                });
-                ui.separator();
-                let inputs = self.offered_inputs();
-                match self.main_view {
-                    MainView::Playlist => {
-                        let r = self.loop_region();
-                        playlist_actions = playlist(
-                            ui,
-                            &theme,
-                            &mut self.project,
-                            &mut self.playlist,
-                            PlaylistView {
-                                playhead: Some(self.transport.position.0),
-                                loop_region: (r.start.0, r.end.0, r.enabled),
-                                audio: &self.library,
-                                inputs: &inputs,
-                                recording: self.record.live_take(),
-                            },
-                        );
-                        (Vec::new(), Vec::new())
-                    }
-                    MainView::Rack => {
-                        let a = channel_rack(
-                            ui,
-                            &theme,
-                            &mut self.project,
-                            &mut self.rack,
-                            RackView {
-                                playhead_step: pattern_pos.map(|t| (t / STEP_TICKS) as u16),
-                                activity: &self.activity,
-                            },
-                        );
-                        (a, Vec::new())
-                    }
-                    MainView::PianoRoll => (Vec::new(), self.show_roll(ui, &theme, pattern_pos)),
-                    MainView::Mixer => {
-                        let latency = self
-                            .audio
-                            .engine()
-                            .map_or(0, |e| e.telemetry().latency_frames.load(Ordering::Relaxed));
-                        let open_plugin = self.mixer_state.slot.and_then(|k| {
-                            let strip = &self.project.mixer.strips
-                                [self.mixer_state.selected.min(STRIPS - 1)];
-                            let p = strip.slots.get(k)?.as_ref()?.plugin.as_ref()?;
-                            Some(plugin_view(&self.plugins, &self.project, p.instance))
-                        });
-                        let scope = self.mixer_state.slot.and_then(|k| {
-                            self.scopes[self.mixer_state.selected.min(STRIPS - 1)][k].as_deref()
-                        });
-                        let view = MixerView {
-                            scope,
-                            meters: &self.strip_view,
-                            fx_meters: &self.fx_meters,
-                            sample_rate,
-                            latency_ms: latency as f32 * 1000.0 / sample_rate,
-                            plugin: open_plugin.as_ref(),
-                            inputs: &inputs,
-                        };
-                        if mixer_view(
-                            ui,
-                            &theme,
-                            &mut self.project.mixer,
-                            &mut self.mixer_state,
-                            view,
-                        ) {
-                            mixer_changed = true;
-                        }
-                        (Vec::new(), Vec::new())
-                    }
-                }
-            })
-            .inner;
-        for a in rack_actions {
-            self.on_rack(a);
-        }
-        for a in roll_actions {
-            self.on_roll(a);
-        }
-        for a in playlist_actions {
-            self.on_playlist(a);
-        }
-        if mixer_changed {
-            self.pending_edit = Some("Mixer");
-        }
+            .show(ui, |ui| self.docked_views(ui, &theme, &cx, &mut out));
+        self.floating_views(&ctx, &theme, &cx, &mut out);
+        self.on_views(out);
+        self.workflow_windows(&ctx, &theme);
         if let Some((strip, k)) = self.mixer_state.file_request.take() {
             let d = rfd::FileDialog::new().add_filter("Audio", &gt_project::AUDIO_EXTENSIONS);
             if let Some(path) = d.pick_file() {
@@ -2689,7 +2694,7 @@ impl eframe::App for GloomApp {
         if self.show_modulators {
             let mut open = true;
             let mut changed = false;
-            egui::Window::new("Modulators")
+            egui::Window::new(tr("Modulators"))
                 .open(&mut open)
                 .default_width(560.0)
                 .min_width(560.0)
@@ -2710,7 +2715,7 @@ impl eframe::App for GloomApp {
         self.sync_mixer();
         self.sync_tables();
         self.sync_modulation();
-        if self.main_view != MainView::PianoRoll {
+        if !self.layout.visible(MainView::PianoRoll) {
             // Hidden mid-gesture (F6, tab click): the roll never sees the release.
             self.cancel_roll_gesture();
         }
@@ -2720,13 +2725,14 @@ impl eframe::App for GloomApp {
 
         // Repaint at display rate while anything moves; idle otherwise.
         let lights = self.activity.iter().any(|&a| a > 0.0)
-            || self.main_view == MainView::Mixer
+            || self.layout.visible(MainView::Mixer)
                 && self
                     .strip_meters
                     .iter()
                     .flatten()
                     .any(MeterBallistics::is_moving);
-        if playing || self.test_tone || self.meter.is_moving() || lights || self.library.is_busy() {
+        let busy = self.library.is_busy() || self.indexing() || self.waiting_preview();
+        if playing || self.test_tone || self.meter.is_moving() || lights || busy {
             ctx.request_repaint_after(Duration::from_millis(16));
         } else if self.audio.engine().is_some() {
             // Keep stream housekeeping (reopen, errors) ticking slowly.

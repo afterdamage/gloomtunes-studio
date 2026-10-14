@@ -3,6 +3,7 @@
 
 use egui::{Grid, RichText, Ui};
 
+use crate::i18n::tr;
 use crate::GloomTheme;
 
 /// One MIDI input port.
@@ -201,13 +202,13 @@ pub enum MidiAction {
 pub fn midi_panel(ui: &mut Ui, theme: &GloomTheme, m: &mut MidiPanelModel) -> Vec<MidiAction> {
     let mut actions = Vec::new();
     let dim = |s: &str| RichText::new(s).color(theme.text_dim);
-    ui.label(RichText::new("MIDI inputs").strong());
+    ui.label(RichText::new(tr("MIDI inputs")).strong());
     if let Some(e) = &m.error {
         ui.label(RichText::new(e.as_str()).color(theme.warn));
     } else if m.ports.is_empty() {
-        ui.label(dim(
+        ui.label(dim(tr(
             "No MIDI inputs found. Plug one in: it is picked up within a second.",
-        ));
+        )));
     }
     for p in &mut m.ports {
         ui.horizontal(|ui| {
@@ -215,46 +216,46 @@ pub fn midi_panel(ui: &mut Ui, theme: &GloomTheme, m: &mut MidiPanelModel) -> Ve
                 actions.push(MidiAction::SetPortEnabled(p.name.clone(), p.enabled));
             }
             if p.enabled && !p.connected {
-                ui.label(RichText::new("cannot open").color(theme.warn));
+                ui.label(RichText::new(tr("cannot open")).color(theme.warn));
             }
         });
     }
-    ui.label(dim(
+    ui.label(dim(tr(
         "Notes play the selected channel unless routed below. Right-click a knob or fader \
          for MIDI learn.",
-    ));
+    )));
     if routes(ui, m) {
         actions.push(MidiAction::RoutesChanged);
     }
     ui.add_space(6.0);
-    ui.label(RichText::new("Recording").strong());
+    ui.label(RichText::new(tr("Recording")).strong());
     Grid::new("midi_panel")
         .num_columns(2)
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
-            ui.label(dim("Mode"));
+            ui.label(dim(tr("Mode")));
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut m.mode, RecordMode::Overdub, "Overdub")
-                    .on_hover_text("Recorded notes join the ones already there");
-                ui.selectable_value(&mut m.mode, RecordMode::Replace, "Replace")
-                    .on_hover_text(
+                ui.selectable_value(&mut m.mode, RecordMode::Overdub, tr("Overdub"))
+                    .on_hover_text(tr("Recorded notes join the ones already there"));
+                ui.selectable_value(&mut m.mode, RecordMode::Replace, tr("Replace"))
+                    .on_hover_text(tr(
                         "Where the playhead passes, the recording channel's notes and controller \
                      data are cleared",
-                    );
+                    ));
             });
             ui.end_row();
-            ui.label(dim("Loop passes"));
+            ui.label(dim(tr("Loop passes")));
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut m.passes, LoopPasses::Merge, "Merge")
-                    .on_hover_text("Each pass around the pattern adds to it");
-                ui.selectable_value(&mut m.passes, LoopPasses::Stack, "Stack")
-                    .on_hover_text(
+                ui.selectable_value(&mut m.passes, LoopPasses::Merge, tr("Merge"))
+                    .on_hover_text(tr("Each pass around the pattern adds to it"));
+                ui.selectable_value(&mut m.passes, LoopPasses::Stack, tr("Stack"))
+                    .on_hover_text(tr(
                         "Each pass around the pattern is kept as its own copy (\"take 1\", \
                      \"take 2\" …); the last pass stays in the pattern",
-                    );
+                    ));
             });
             ui.end_row();
-            ui.label(dim("Automation"));
+            ui.label(dim(tr("Automation")));
             ui.horizontal(|ui| {
                 for mode in AutoMode::ALL {
                     ui.selectable_value(&mut m.automation, mode, mode.name())
@@ -262,36 +263,36 @@ pub fn midi_panel(ui: &mut Ui, theme: &GloomTheme, m: &mut MidiPanelModel) -> Ve
                 }
             });
             ui.end_row();
-            ui.label(dim("Count-in"));
+            ui.label(dim(tr("Count-in")));
             ui.horizontal(|ui| {
                 for (bars, label) in [(0, "Off"), (1, "1 bar"), (2, "2 bars")] {
                     ui.selectable_value(&mut m.count_in_bars, bars, label);
                 }
             });
             ui.end_row();
-            ui.label(dim("Metronome"));
-            ui.checkbox(&mut m.record_click, "Click while recording");
+            ui.label(dim(tr("Metronome")));
+            ui.checkbox(&mut m.record_click, tr("Click while recording"));
             ui.end_row();
-            ui.label(dim("Latency"));
+            ui.label(dim(tr("Latency")));
             ui.horizontal(|ui| {
                 ui.label(format!("output buffer {:.1} ms +", m.buffer_ms));
                 ui.add(
                     egui::DragValue::new(&mut m.extra_ms)
                         .range(-100.0..=500.0)
                         .speed(0.5)
-                        .suffix(" ms"),
+                        .suffix(tr(" ms")),
                 );
             })
             .response
-            .on_hover_text(
+            .on_hover_text(tr(
                 "Recorded notes move earlier by this much, because you hear (and play along \
                  with) the music this late. Add your interface's extra latency if notes land \
                  late",
-            );
+            ));
             ui.end_row();
-            ui.label(dim("Typing keyboard"));
+            ui.label(dim(tr("Typing keyboard")));
             ui.horizontal(|ui| {
-                ui.label("bottom row starts at C");
+                ui.label(tr("bottom row starts at C"));
                 ui.add(
                     egui::DragValue::new(&mut m.octave)
                         .range(-1..=7)
@@ -335,7 +336,7 @@ fn routes(ui: &mut Ui, m: &mut MidiPanelModel) -> bool {
                             .changed();
                     }
                 });
-            ui.label("plays");
+            ui.label(tr("plays"));
             egui::ComboBox::from_id_salt(("route_target", i))
                 .width(120.0)
                 .selected_text(m.channels.get(r.target).map_or("?", String::as_str))
@@ -344,7 +345,7 @@ fn routes(ui: &mut Ui, m: &mut MidiPanelModel) -> bool {
                         changed |= ui.selectable_value(&mut r.target, t, n).changed();
                     }
                 });
-            if ui.small_button("Remove").clicked() {
+            if ui.small_button(tr("Remove")).clicked() {
                 remove = Some(i);
             }
         });
@@ -355,8 +356,8 @@ fn routes(ui: &mut Ui, m: &mut MidiPanelModel) -> bool {
     }
     let can_add = !names.is_empty() && !m.channels.is_empty();
     if ui
-        .add_enabled(can_add, egui::Button::new("Add route"))
-        .on_hover_text("Send a controller (or one of its MIDI channels) to a fixed channel, so two controllers can play two instruments")
+        .add_enabled(can_add, egui::Button::new(tr("Add route")))
+        .on_hover_text(tr("Send a controller (or one of its MIDI channels) to a fixed channel, so two controllers can play two instruments"))
         .clicked()
     {
         m.routes.push(MidiRouteRow {

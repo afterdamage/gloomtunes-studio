@@ -19,6 +19,8 @@ pub(super) struct StretchCache {
     pending: HashSet<u64>,
     /// Keys of sampler time-stretch renders asked for (kept when clips are re-requested).
     fits: HashSet<u64>,
+    /// Key of the browser's tempo-synced preview render (Prompt 25), kept while it is current.
+    preview: Option<u64>,
     jobs: mpsc::Sender<(StretchJob, Arc<SampleData>)>,
     done: mpsc::Receiver<Done>,
 }
@@ -41,6 +43,7 @@ impl StretchCache {
             ready: HashMap::new(),
             pending: HashSet::new(),
             fits: HashSet::new(),
+            preview: None,
             jobs,
             done,
         }
@@ -79,7 +82,7 @@ impl StretchCache {
             }
         }
         self.ready
-            .retain(|k, _| used.contains(k) || self.fits.contains(k));
+            .retain(|k, _| used.contains(k) || self.fits.contains(k) || self.preview == Some(*k));
     }
 
     /// The time-stretch render of sampler `s` (Prompt 23): ready, or queued now and `None`
@@ -93,6 +96,27 @@ impl StretchCache {
         let sample = samples(s.sample.as_ref()?)?;
         let job = stretch::fit_job(project, s, &sample)?;
         self.fits.insert(job.key);
+        if let Some(r) = self.ready.get(&job.key) {
+            return Some(Arc::clone(r));
+        }
+        if self.pending.insert(job.key) {
+            let _ = self.jobs.send((job, sample));
+        }
+        None
+    }
+
+    /// The browser preview's render: ready, or queued now and `None` until it is. Only the
+    /// latest preview's render is kept.
+    pub(super) fn preview(
+        &mut self,
+        job: StretchJob,
+        sample: Arc<SampleData>,
+    ) -> Option<Arc<SampleData>> {
+        if let Some(old) = self.preview.replace(job.key) {
+            if old != job.key {
+                self.ready.remove(&old);
+            }
+        }
         if let Some(r) = self.ready.get(&job.key) {
             return Some(Arc::clone(r));
         }

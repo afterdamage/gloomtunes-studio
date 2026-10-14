@@ -32,6 +32,7 @@ use gt_core::{
     TimeSig, TimeSigMap, TrackId, FX_SLOTS, MASTER, PPQ, STRIPS,
 };
 
+use crate::i18n::tr;
 use crate::GloomTheme;
 
 const HEADER_W: f32 = 168.0;
@@ -505,7 +506,7 @@ fn toolbar(
             }
         }
         ui.separator();
-        ui.label(dim("Snap"));
+        ui.label(dim(tr("Snap")));
         egui::ComboBox::from_id_salt("pl_snap")
             .width(52.0)
             .selected_text(st.snap.label())
@@ -515,7 +516,7 @@ fn toolbar(
                 }
             });
         ui.separator();
-        ui.label(dim("Pattern"));
+        ui.label(dim(tr("Pattern")));
         let current = project.current_pattern().name.clone();
         egui::ComboBox::from_id_salt("pl_pattern")
             .width(110.0)
@@ -532,9 +533,9 @@ fn toolbar(
                 }
             })
             .response
-            .on_hover_text("The pattern the Draw tool places");
+            .on_hover_text(tr("The pattern the Draw tool places"));
         ui.separator();
-        if ui.button("+ Track").clicked() {
+        if ui.button(tr("+ Track")).clicked() {
             project.playlist.add_track();
             actions.push(PlaylistAction::Changed);
         }
@@ -542,7 +543,7 @@ fn toolbar(
             view.playhead.unwrap_or(st.scroll_tick as i64).max(0),
             &project.signatures,
         );
-        ui.menu_button("+ Automation", |ui| {
+        ui.menu_button(tr("+ Automation"), |ui| {
             if let Some(target) = automation_menu(ui, project) {
                 add_automation(project, st, target, start);
                 actions.push(PlaylistAction::Changed);
@@ -550,7 +551,7 @@ fn toolbar(
             }
         })
         .response
-        .on_hover_text("Add an automation clip at the playhead");
+        .on_hover_text(tr("Add an automation clip at the playhead"));
         ui.separator();
         let clips = project.playlist.clips.len();
         ui.label(dim(&format!(
@@ -573,7 +574,7 @@ fn automation_menu(ui: &mut Ui, project: &Project) -> Option<ParamId> {
             }
         }
     };
-    ui.menu_button("Channels", |ui| {
+    ui.menu_button(tr("Channels"), |ui| {
         for ch in &project.channels {
             ui.menu_button(&ch.name, |ui| {
                 let all = ParamId::of_channel(ch);
@@ -582,7 +583,7 @@ fn automation_menu(ui: &mut Ui, project: &Project) -> Option<ParamId> {
                     .partition(|id| !matches!(id, ParamId::Channel { .. }));
                 list(ui, rest);
                 if !synth.is_empty() {
-                    ui.menu_button("Gloom Synth", |ui| {
+                    ui.menu_button(tr("Gloom Synth"), |ui| {
                         egui::ScrollArea::vertical()
                             .max_height(420.0)
                             .show(ui, |ui| list(ui, synth));
@@ -591,7 +592,7 @@ fn automation_menu(ui: &mut Ui, project: &Project) -> Option<ParamId> {
             });
         }
     });
-    ui.menu_button("Mixer", |ui| {
+    ui.menu_button(tr("Mixer"), |ui| {
         let mixer = &project.mixer;
         for i in 0..STRIPS {
             let s = &mixer.strips[i];
@@ -1395,20 +1396,19 @@ fn drop_audio(
 }
 
 fn key_commands(ui: &Ui, st: &mut PlaylistState, project: &mut Project) -> bool {
-    use egui::{Key, Modifiers};
-    let pressed = |k: Key, m: Modifiers| ui.input_mut(|i| i.consume_key(m, k));
+    use crate::keymap::{Command, Scope};
+    let keys = crate::keymap::take_view(ui, Scope::Playlist);
+    let pressed = |c: Command| keys.contains(&c);
     let mut changed = false;
-    if !st.selected.is_empty()
-        && (pressed(Key::Delete, Modifiers::NONE) || pressed(Key::Backspace, Modifiers::NONE))
-    {
+    if !st.selected.is_empty() && pressed(Command::ListDelete) {
         project.playlist.remove_clips(&st.selected);
         st.selected.clear();
         changed = true;
     }
-    if pressed(Key::A, Modifiers::COMMAND) {
+    if pressed(Command::ListSelectAll) {
         st.selected = project.playlist.clips.iter().map(|c| c.id).collect();
     }
-    if pressed(Key::D, Modifiers::COMMAND) && !st.selected.is_empty() {
+    if pressed(Command::ListDuplicate) && !st.selected.is_empty() {
         let grid = match st.snap {
             PlaylistSnap::Off => 0,
             s => {
@@ -1425,7 +1425,7 @@ fn key_commands(ui: &Ui, st: &mut PlaylistState, project: &mut Project) -> bool 
         st.selected = project.playlist.duplicate_clips(&st.selected, grid);
         changed = true;
     }
-    if pressed(Key::M, Modifiers::NONE) && !st.selected.is_empty() {
+    if pressed(Command::ListMute) && !st.selected.is_empty() {
         let mute = project
             .playlist
             .clips
@@ -1439,13 +1439,13 @@ fn key_commands(ui: &Ui, st: &mut PlaylistState, project: &mut Project) -> bool 
         }
         changed = true;
     }
-    if pressed(Key::P, Modifiers::NONE) {
+    if pressed(Command::ListDrawTool) {
         st.tool = PlaylistTool::Draw;
     }
-    if pressed(Key::E, Modifiers::NONE) {
+    if pressed(Command::ListSelectTool) {
         st.tool = PlaylistTool::Select;
     }
-    if pressed(Key::C, Modifiers::NONE) {
+    if pressed(Command::ListSliceTool) {
         st.tool = PlaylistTool::Slice;
     }
     changed
@@ -1629,11 +1629,11 @@ fn ruler_input(
         let sigs = &project.signatures;
         match menu_flag {
             Some(Flag::Marker(i)) => {
-                if ui.button("Rename marker").clicked() {
+                if ui.button(tr("Rename marker")).clicked() {
                     st.popup = Some((Popup::Marker(i), pos2(geo.x(menu_tick), ruler.bottom()), 0));
                     ui.close();
                 }
-                if ui.button("Delete marker").clicked() {
+                if ui.button(tr("Delete marker")).clicked() {
                     if i < project.playlist.markers.len() {
                         project.playlist.markers.remove(i);
                         actions.push(PlaylistAction::Changed);
@@ -1643,11 +1643,11 @@ fn ruler_input(
                 return;
             }
             Some(Flag::Tempo(i)) => {
-                if ui.button("Edit tempo").clicked() {
+                if ui.button(tr("Edit tempo")).clicked() {
                     st.popup = Some((Popup::Tempo(i), pos2(geo.x(menu_tick), ruler.bottom()), 0));
                     ui.close();
                 }
-                if i > 0 && ui.button("Delete tempo change").clicked() {
+                if i > 0 && ui.button(tr("Delete tempo change")).clicked() {
                     let mut pts: Vec<TempoPoint> = project.tempo.points().collect();
                     pts.remove(i);
                     project.tempo = TempoMap::from_points_lossy(&pts);
@@ -1657,11 +1657,11 @@ fn ruler_input(
                 return;
             }
             Some(Flag::Sig(i)) => {
-                if ui.button("Edit time signature").clicked() {
+                if ui.button(tr("Edit time signature")).clicked() {
                     st.popup = Some((Popup::Sig(i), pos2(geo.x(menu_tick), ruler.bottom()), 0));
                     ui.close();
                 }
-                if i > 0 && ui.button("Delete time signature change").clicked() {
+                if i > 0 && ui.button(tr("Delete time signature change")).clicked() {
                     let mut ch: Vec<SigChange> = project.signatures.changes().collect();
                     ch.remove(i);
                     project.signatures = TimeSigMap::new(&ch);
@@ -1673,7 +1673,7 @@ fn ruler_input(
             None => {}
         }
         let bar = sigs.bar_of(menu_tick);
-        if ui.button("Add marker here").clicked() {
+        if ui.button(tr("Add marker here")).clicked() {
             let n = project.playlist.markers.len() + 1;
             let i = project
                 .playlist
@@ -1682,7 +1682,7 @@ fn ruler_input(
             actions.push(PlaylistAction::Changed);
             ui.close();
         }
-        if ui.button("Add tempo change here").clicked() {
+        if ui.button(tr("Add tempo change here")).clicked() {
             let mut pts: Vec<TempoPoint> = project.tempo.points().collect();
             let bpm = project.tempo.bpm_at(Tick(menu_tick));
             pts.push(TempoPoint {
@@ -1757,7 +1757,7 @@ fn show_popup(
                             close = true;
                             return;
                         };
-                        ui.label(RichText::new("Marker").color(theme.text_dim));
+                        ui.label(RichText::new(tr("Marker")).color(theme.text_dim));
                         let r =
                             ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(120.0));
                         if age == 0 {
@@ -1773,7 +1773,7 @@ fn show_popup(
                             close = true;
                             return;
                         };
-                        ui.label(RichText::new("BPM").color(theme.text_dim));
+                        ui.label(RichText::new(tr("BPM")).color(theme.text_dim));
                         let mut bpm = p.bpm;
                         if ui
                             .add(
@@ -1800,7 +1800,7 @@ fn show_popup(
                             close = true;
                             return;
                         };
-                        ui.label(RichText::new("Curve").color(theme.text_dim));
+                        ui.label(RichText::new(tr("Curve")).color(theme.text_dim));
                         for (k, name) in Curve::NAMES.iter().enumerate() {
                             if ui.selectable_label(pt.curve.index() == k, *name).clicked()
                                 && pt.curve.index() != k
@@ -1817,7 +1817,7 @@ fn show_popup(
                                         .speed(0.01)
                                         .fixed_decimals(2),
                                 )
-                                .on_hover_text("Tension: positive rises fast, negative slowly")
+                                .on_hover_text(tr("Tension: positive rises fast, negative slowly"))
                                 .changed()
                             {
                                 changed = true;
@@ -1861,7 +1861,7 @@ fn show_popup(
                         ui.vertical(|ui| {
                             ui.label(RichText::new(current.clone()).color(theme.text_dim));
                             ui.horizontal(|ui| {
-                                ui.label("Gain");
+                                ui.label(tr("Gain"));
                                 let mut db = gain_db(*gain);
                                 if ui
                                     .add(
@@ -1869,7 +1869,7 @@ fn show_popup(
                                             .range(GAIN_MIN_DB..=GAIN_MAX_DB)
                                             .speed(0.1)
                                             .fixed_decimals(1)
-                                            .suffix(" dB"),
+                                            .suffix(tr(" dB")),
                                     )
                                     .changed()
                                 {
@@ -1878,8 +1878,10 @@ fn show_popup(
                                 }
                             });
                             changed |= ui
-                                .checkbox(&mut edit.reverse, "Reverse")
-                                .on_hover_text("Play the clip backwards (the file is untouched)")
+                                .checkbox(&mut edit.reverse, tr("Reverse"))
+                                .on_hover_text(tr(
+                                    "Play the clip backwards (the file is untouched)",
+                                ))
                                 .changed();
                             for (label, fade) in [
                                 ("Fade in", &mut edit.fade_in),
@@ -1915,7 +1917,7 @@ fn show_popup(
                             }
                             if !others.is_empty() {
                                 ui.separator();
-                                ui.label(RichText::new("Takes").color(theme.text_dim));
+                                ui.label(RichText::new(tr("Takes")).color(theme.text_dim));
                                 let _ = ui.selectable_label(true, current);
                                 for (i, name) in others.iter().enumerate() {
                                     if ui.selectable_label(false, name).clicked() {
@@ -1923,8 +1925,8 @@ fn show_popup(
                                     }
                                 }
                                 clear = ui
-                                    .button("Keep only this take")
-                                    .on_hover_text("Remove the other takes from the clip")
+                                    .button(tr("Keep only this take"))
+                                    .on_hover_text(tr("Remove the other takes from the clip"))
                                     .clicked();
                             }
                         });
@@ -1967,7 +1969,7 @@ fn show_popup(
                         }
                     }
                 });
-                if ui.button("Done").clicked() {
+                if ui.button(tr("Done")).clicked() {
                     close = true;
                 }
             });
@@ -2496,7 +2498,7 @@ struct Analysis<'a> {
 /// length, for guessing its tempo.
 fn stretch_controls(ui: &mut Ui, s: &mut ClipStretch, seconds: Option<f64>, found: Analysis<'_>) {
     ui.horizontal(|ui| {
-        ui.label("Speed");
+        ui.label(tr("Speed"));
         egui::ComboBox::from_id_salt("pl_stretch_mode")
             .width(100.0)
             .selected_text(s.mode.name())
@@ -2506,15 +2508,15 @@ fn stretch_controls(ui: &mut Ui, s: &mut ClipStretch, seconds: Option<f64>, foun
                 }
             })
             .response
-            .on_hover_text(
+            .on_hover_text(tr(
                 "Resample: pitch follows speed. Tempo follow: keeps pitch and follows the \
                  project tempo. Stretch: length and pitch set separately.",
-            );
+            ));
     });
     match s.mode {
         StretchMode::Off | StretchMode::Manual => {
             ui.horizontal(|ui| {
-                ui.label("Length");
+                ui.label(tr("Length"));
                 ui.add(
                     egui::DragValue::new(&mut s.ratio)
                         .range(ClipStretch::RATIO.0..=ClipStretch::RATIO.1)
@@ -2522,23 +2524,23 @@ fn stretch_controls(ui: &mut Ui, s: &mut ClipStretch, seconds: Option<f64>, foun
                         .fixed_decimals(3)
                         .prefix("×"),
                 )
-                .on_hover_text("2 plays twice as long");
+                .on_hover_text(tr("2 plays twice as long"));
             });
         }
         StretchMode::TempoFollow => {
             ui.horizontal(|ui| {
-                ui.label("Original");
+                ui.label(tr("Original"));
                 ui.add(
                     egui::DragValue::new(&mut s.bpm)
                         .range(0.0..=ClipStretch::BPM.1)
                         .speed(0.05)
                         .fixed_decimals(2)
-                        .suffix(" BPM"),
+                        .suffix(tr(" BPM")),
                 )
-                .on_hover_text("The tempo the audio was played at (0: unknown)");
+                .on_hover_text(tr("The tempo the audio was played at (0: unknown)"));
                 if let Some(g) = seconds.and_then(ClipStretch::guess_bpm) {
                     if ui
-                        .small_button("From length")
+                        .small_button(tr("From length"))
                         .on_hover_text(format!(
                             "{g:.2} BPM: the clip holds a whole number of beats"
                         ))
@@ -2549,7 +2551,7 @@ fn stretch_controls(ui: &mut Ui, s: &mut ClipStretch, seconds: Option<f64>, foun
                 }
                 if let Some(t) = found.tempo {
                     if ui
-                        .small_button("Detect")
+                        .small_button(tr("Detect"))
                         .on_hover_text(format!("{t:.2} BPM, from the transients"))
                         .clicked()
                     {
@@ -2570,11 +2572,11 @@ fn stretch_controls(ui: &mut Ui, s: &mut ClipStretch, seconds: Option<f64>, foun
                     ui.label(format!("Warp markers: {}", s.warps.len()));
                     if !found.onsets.is_empty()
                         && ui
-                            .small_button("At transients")
-                            .on_hover_text(
+                            .small_button(tr("At transients"))
+                            .on_hover_text(tr(
                                 "A marker on every transient, where it plays now; drag the \
                                  triangles at the bottom of the clip onto the grid",
-                            )
+                            ))
                             .clicked()
                     {
                         let st = s.clone();
@@ -2587,7 +2589,7 @@ fn stretch_controls(ui: &mut Ui, s: &mut ClipStretch, seconds: Option<f64>, foun
                             })
                             .collect();
                     }
-                    if !s.warps.is_empty() && ui.small_button("Clear").clicked() {
+                    if !s.warps.is_empty() && ui.small_button(tr("Clear")).clicked() {
                         s.warps.clear();
                     }
                 });
@@ -2596,20 +2598,20 @@ fn stretch_controls(ui: &mut Ui, s: &mut ClipStretch, seconds: Option<f64>, foun
     }
     if s.mode == StretchMode::Manual {
         ui.horizontal(|ui| {
-            ui.label("Pitch");
+            ui.label(tr("Pitch"));
             let mut semi = s.semitones.trunc();
             let mut cents = ((s.semitones - semi) * 100.0).round();
             let a = ui.add(
                 egui::DragValue::new(&mut semi)
                     .range(-ClipStretch::SEMITONES..=ClipStretch::SEMITONES)
                     .speed(0.05)
-                    .suffix(" st"),
+                    .suffix(tr(" st")),
             );
             let b = ui.add(
                 egui::DragValue::new(&mut cents)
                     .range(-99.0..=99.0)
                     .speed(0.2)
-                    .suffix(" ct"),
+                    .suffix(tr(" ct")),
             );
             if a.changed() || b.changed() {
                 s.semitones =
@@ -2815,7 +2817,9 @@ fn track_headers(
                             }
                         }),
                 )
-                .on_hover_text("Mixer strip this track's audio clips play into (M = master)");
+                .on_hover_text(tr(
+                    "Mixer strip this track's audio clips play into (M = master)",
+                ));
             if resp.changed() {
                 t.insert = ins.clamp(0, gt_core::INSERTS as i64) as usize;
                 changed = true;
@@ -2860,7 +2864,7 @@ fn track_headers(
                 }
             });
             ui.horizontal(|ui| {
-                ui.label("Colour");
+                ui.label(tr("Colour"));
                 egui::color_picker::color_edit_button_srgb(ui, &mut col);
             });
             ui.separator();
@@ -2871,7 +2875,9 @@ fn track_headers(
             };
             if ui
                 .add_enabled(!frozen, egui::Button::new(render))
-                .on_hover_text("Render to a new audio clip on a new track; mutes what it replaces")
+                .on_hover_text(tr(
+                    "Render to a new audio clip on a new track; mutes what it replaces",
+                ))
                 .clicked()
             {
                 bounce = Some(BounceKind::Render);
@@ -2880,9 +2886,9 @@ fn track_headers(
             if ui
                 .add_enabled(
                     !frozen && !selected.is_empty(),
-                    egui::Button::new("Consolidate selected clips"),
+                    egui::Button::new(tr("Consolidate selected clips")),
                 )
-                .on_hover_text("Merge the selected clips into one rendered audio clip")
+                .on_hover_text(tr("Merge the selected clips into one rendered audio clip"))
                 .clicked()
             {
                 bounce = Some(BounceKind::Consolidate);
@@ -2895,18 +2901,20 @@ fn track_headers(
             };
             if ui
                 .button(label)
-                .on_hover_text("Play a render of the track (through its insert) to save CPU")
+                .on_hover_text(tr(
+                    "Play a render of the track (through its insert) to save CPU",
+                ))
                 .clicked()
             {
                 bounce = Some(kind);
                 ui.close();
             }
             ui.separator();
-            if ui.button("Insert track above").clicked() {
+            if ui.button(tr("Insert track above")).clicked() {
                 insert_at = Some(row);
                 ui.close();
             }
-            if n > 1 && ui.button("Delete track and its clips").clicked() {
+            if n > 1 && ui.button(tr("Delete track and its clips")).clicked() {
                 remove = Some(id);
                 ui.close();
             }

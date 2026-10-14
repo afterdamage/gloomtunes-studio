@@ -413,6 +413,28 @@ struct ProjectDto {
     /// MIDI inputs playing fixed channels (Prompt 16).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     midi_routes: Vec<MidiRouteDto>,
+    /// Title, artist, genre and notes (Prompt 25).
+    #[serde(skip_serializing_if = "InfoDto::is_empty")]
+    info: InfoDto,
+}
+
+#[derive(Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+struct InfoDto {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    title: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    artist: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    genre: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    notes: String,
+}
+
+impl InfoDto {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1455,6 +1477,12 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                 target: r.target.0,
             })
             .collect(),
+        info: InfoDto {
+            title: p.info.title.clone(),
+            artist: p.info.artist.clone(),
+            genre: p.info.genre.clone(),
+            notes: p.info.notes.clone(),
+        },
     }
 }
 
@@ -2014,6 +2042,12 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
             });
         }
     }
+    p.info = gt_core::ProjectInfo {
+        title: d.info.title,
+        artist: d.info.artist,
+        genre: d.info.genre,
+        notes: d.info.notes,
+    };
     p.set_id_counter(d.next_id);
     p.sanitize();
     Ok(Parsed {
@@ -2636,6 +2670,22 @@ mod tests {
         let v = to_value(&p, None, &HashMap::new());
         let back = from_value(v, None).unwrap().project;
         assert_eq!(back.channels[i].instrument, want);
+    }
+
+    #[test]
+    fn project_info_round_trips_and_stays_out_when_empty() {
+        let mut p = Project::empty();
+        let v = to_value(&p, None, &HashMap::new());
+        assert!(v["project"].get("info").is_none());
+        p.info = gt_core::ProjectInfo {
+            title: "Night Drive".into(),
+            artist: "Vasko".into(),
+            genre: "Darkwave".into(),
+            notes: "Bridge needs a new lead.\nMaster at -14 LUFS.".into(),
+        };
+        let v = to_value(&p, None, &HashMap::new());
+        let back = from_value(v, None).unwrap().project;
+        assert_eq!(back.info, p.info);
     }
 
     #[test]

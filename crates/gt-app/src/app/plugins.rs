@@ -11,6 +11,7 @@ use gt_ui::views::{
 use gt_ui::GloomTheme;
 
 use super::{GloomApp, MainView};
+use gt_ui::tr;
 
 impl GloomApp {
     /// Once per frame, after the views: keeps the running plugins in step with the document
@@ -36,7 +37,7 @@ impl GloomApp {
 
     /// Where the browser adds an effect: the slot chosen with "Plugin…", else the open slot
     /// of the mixer's selected strip, else its first empty slot.
-    fn effect_target(&self) -> Option<(usize, usize)> {
+    pub(super) fn effect_target(&self) -> Option<(usize, usize)> {
         if self.plugin_slot.is_some() {
             return self.plugin_slot;
         }
@@ -159,7 +160,7 @@ impl GloomApp {
             effect_target: target_name.as_deref(),
         };
         let mut open = true;
-        let actions = egui::Window::new("Plugins")
+        let actions = egui::Window::new(tr("Plugins"))
             .open(&mut open)
             .default_width(560.0)
             .default_pos(ctx.content_rect().center() - egui::vec2(280.0, 160.0))
@@ -204,7 +205,7 @@ impl GloomApp {
     }
 
     /// Loads `info` and adds it: an instrument as a new channel, an effect to `target`.
-    fn add_plugin(&mut self, info: &PluginInfo, target: Option<(usize, usize)>) {
+    pub(super) fn add_plugin(&mut self, info: &PluginInfo, target: Option<(usize, usize)>) {
         let kind = info.kind();
         if kind == PluginKind::Effect && target.is_none() {
             return;
@@ -223,12 +224,13 @@ impl GloomApp {
                     .add_plugin_channel(&info.name, plugin)
                     .is_none()
                 {
-                    self.toast("The channel rack is full");
+                    self.toast(tr("The channel rack is full"));
                     return;
                 }
                 self.rack.selected = self.project.channels.len() - 1;
-                if self.main_view == MainView::Mixer {
-                    self.main_view = MainView::Rack;
+                if !self.layout.visible(MainView::Rack) && !self.layout.visible(MainView::PianoRoll)
+                {
+                    self.show_view(MainView::Rack);
                 }
                 self.push_channels();
                 self.pending_edit = Some("Add plugin");
@@ -237,7 +239,7 @@ impl GloomApp {
                 self.project.mixer.strips[strip].slots[slot] = Some(EffectSlot::plugin(plugin));
                 self.mixer_state.selected = strip;
                 self.mixer_state.slot = Some(slot);
-                self.main_view = MainView::Mixer;
+                self.show_view(MainView::Mixer);
                 self.pending_edit = Some("Add plugin effect");
             }
             (PluginKind::Effect, None) => return,

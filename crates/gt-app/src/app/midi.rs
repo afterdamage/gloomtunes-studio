@@ -11,6 +11,7 @@ use gt_ui::views::{LoopPasses, MidiAction, MidiPortRow, MidiRouteRow, PlayState,
 use super::{GloomApp, MainView};
 use crate::files::Dialog;
 use crate::live::ms_to_ticks;
+use gt_ui::tr;
 
 /// The MIDI light falls by this much per second.
 const MIDI_LIGHT_FALL_PER_S: f32 = 5.0;
@@ -102,7 +103,7 @@ impl GloomApp {
         if let Some(param) = self.learning {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
                 self.learning = None;
-                self.toast("MIDI learn cancelled");
+                self.toast(tr("MIDI learn cancelled"));
             } else {
                 self.toast(format!(
                     "MIDI learn: move a controller to bind {} (Esc cancels)",
@@ -174,7 +175,7 @@ impl GloomApp {
             self.recorder.armed = true;
             self.step.on = false;
         } else if !audio {
-            self.toast("Add a channel or arm a track to record into");
+            self.toast(tr("Add a channel or arm a track to record into"));
             return;
         }
         if self.midi_model.record_click {
@@ -421,10 +422,10 @@ impl GloomApp {
         let step = self.step_ticks();
         self.step.move_to(at.div_euclid(step) * step);
         self.step_seen = self.transport.position;
-        self.toast(
+        self.toast(tr(
             "Step record: with the transport stopped, play a note or chord to enter it at the \
              cursor",
-        );
+        ));
     }
 
     /// The step length: the piano roll's snap (a 1/16 step with snap off).
@@ -479,7 +480,9 @@ impl GloomApp {
                 .filter(|&s| usize::from(s) < channels)
         });
         if got.notes.is_empty() {
-            self.toast("Nothing played lately to capture (play something first)");
+            self.toast(tr(
+                "Nothing played lately to capture (play something first)",
+            ));
             return;
         }
         let id = self.project.new_pattern();
@@ -500,7 +503,7 @@ impl GloomApp {
             self.rack.selected = usize::from(slot);
         }
         self.push_song();
-        self.main_view = MainView::PianoRoll;
+        self.show_view(MainView::PianoRoll);
         self.pending_edit = Some("Capture last take");
         self.toast(format!(
             "Captured {} note{} into pattern \"{name}\"",
@@ -530,7 +533,9 @@ impl GloomApp {
     pub(super) fn start_learning(&mut self, param: ParamId) {
         self.learning = Some(param);
         if self.midi.ports().iter().all(|p| !p.connected) {
-            self.toast("No MIDI input is connected (see Audio and MIDI settings)");
+            self.toast(tr(
+                "No MIDI input is connected (see Audio and MIDI settings)",
+            ));
         }
     }
 
@@ -636,7 +641,7 @@ impl GloomApp {
         if timing {
             self.push_timing();
         }
-        self.main_view = MainView::PianoRoll;
+        self.show_view(MainView::PianoRoll);
         self.pending_edit = Some("Import MIDI file");
         let mut msg = format!(
             "Imported {} part{} into pattern \"{name}\"",

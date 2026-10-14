@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use egui::{RichText, Ui};
 use gt_export::{BitDepth, ExportSettings, Progress, Range, SAMPLE_RATES};
+use gt_ui::tr;
 use gt_ui::GloomTheme;
 
 /// What to do once the current document is saved (or its changes discarded).
@@ -23,6 +24,8 @@ pub enum Then {
     Open,
     /// Quit the program.
     Quit,
+    /// Open the project the browser asked for (`GloomApp::pending_open`).
+    OpenPending,
 }
 
 /// The export dialog's settings.
@@ -123,6 +126,15 @@ pub enum Dialog {
         song: bool,
         error: Option<String>,
     },
+    /// Start a project from a template (Prompt 25).
+    NewProject {
+        templates: Vec<(String, PathBuf)>,
+    },
+    /// Keep the project as a template.
+    SaveTemplate {
+        name: String,
+        error: Option<String>,
+    },
 }
 
 /// What the user chose in a dialog.
@@ -159,13 +171,17 @@ pub enum DialogAction {
         path: PathBuf,
         song: bool,
     },
+    /// Start from this template, or an empty project.
+    NewFrom(Option<PathBuf>),
+    SaveTemplate(String),
+    DeleteTemplate(PathBuf),
     Close,
 }
 
 fn path_row(ui: &mut Ui, path: &mut String, browse: impl FnOnce(&str) -> Option<PathBuf>) {
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(path).desired_width(360.0));
-        if ui.button("Browse…").clicked() {
+        if ui.button(tr("Browse…")).clicked() {
             if let Some(p) = browse(path) {
                 *path = p.display().to_string();
             }
@@ -218,6 +234,8 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
         Dialog::Unsaved { .. } => "Unsaved changes",
         Dialog::ImportMidi { .. } => "Import MIDI file",
         Dialog::ExportMidi { .. } => "Export MIDI file",
+        Dialog::NewProject { .. } => "New project",
+        Dialog::SaveTemplate { .. } => "Save as template",
     };
     let dim = |t: &str| RichText::new(t).color(theme.text_dim);
     egui::Window::new(title)
@@ -227,17 +245,17 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
         .open(&mut open)
         .show(ctx, |ui| match dialog {
             Dialog::Open { path, error } => {
-                ui.label(dim("Project file"));
+                ui.label(dim(tr("Project file")));
                 path_row(ui, path, |p| project_picker(p).pick_file());
                 if let Some(e) = error {
                     ui.label(RichText::new(e.as_str()).color(theme.warn));
                 }
                 ui.horizontal(|ui| {
                     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if ui.button("Open").clicked() || enter {
+                    if ui.button(tr("Open")).clicked() || enter {
                         action = Some(DialogAction::Open(PathBuf::from(path.trim())));
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         action = Some(DialogAction::Close);
                     }
                 });
@@ -248,25 +266,25 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
                 error,
                 then,
             } => {
-                ui.label(dim("Save to"));
+                ui.label(dim(tr("Save to")));
                 path_row(ui, path, |p| project_picker(p).save_file());
-                ui.checkbox(embed, "Embed samples").on_hover_text(
-                    "Copy every audio file into the project so it opens on another \
-                         computer. Makes the file larger.",
+                ui.checkbox(embed, tr("Embed samples")).on_hover_text(
+                    tr("Copy every audio file into the project so it opens on another \
+                         computer. Makes the file larger."),
                 );
                 if let Some(e) = error {
                     ui.label(RichText::new(e.as_str()).color(theme.warn));
                 }
                 ui.horizontal(|ui| {
                     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if ui.button("Save").clicked() || enter {
+                    if ui.button(tr("Save")).clicked() || enter {
                         action = Some(DialogAction::SaveAs {
                             path: with_project_extension(PathBuf::from(path.trim())),
                             embed: *embed,
                             then: *then,
                         });
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         action = Some(DialogAction::Close);
                     }
                 });
@@ -285,7 +303,7 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
                 ));
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(folder).desired_width(300.0));
-                    if ui.button("Browse…").clicked() {
+                    if ui.button(tr("Browse…")).clicked() {
                         let mut d = rfd::FileDialog::new();
                         if let Some(dir) = start_dir(folder) {
                             d = d.set_directory(dir);
@@ -294,7 +312,7 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
                             *folder = p.display().to_string();
                         }
                     }
-                    if ui.button("Search").clicked() {
+                    if ui.button(tr("Search")).clicked() {
                         action = Some(DialogAction::RelinkSearch(PathBuf::from(folder.trim())));
                     }
                 });
@@ -306,7 +324,7 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
                     .show(ui, |ui| {
                         for m in missing.iter() {
                             ui.horizontal(|ui| {
-                                if ui.small_button("Locate…").clicked() {
+                                if ui.small_button(tr("Locate…")).clicked() {
                                     let name =
                                         m.file_name().map(|n| n.to_string_lossy().into_owned());
                                     let mut d = rfd::FileDialog::new()
@@ -325,7 +343,7 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
                             });
                         }
                     });
-                if ui.button("Continue without them").clicked() {
+                if ui.button(tr("Continue without them")).clicked() {
                     action = Some(DialogAction::Close);
                 }
             }
@@ -344,20 +362,20 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
                     );
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Recover").clicked() {
+                    if ui.button(tr("Recover")).clicked() {
                         action = Some(DialogAction::Recover(false));
                     }
                     if !plugins.is_empty()
                         && ui
-                            .button("Recover without plugins")
+                            .button(tr("Recover without plugins"))
                             .on_hover_text(
-                                "Open it with its plugins switched off; retry each one from its panel",
+                                tr("Open it with its plugins switched off; retry each one from its panel"),
                             )
                             .clicked()
                     {
                         action = Some(DialogAction::Recover(true));
                     }
-                    if ui.button("Discard").clicked() {
+                    if ui.button(tr("Discard")).clicked() {
                         action = Some(DialogAction::DiscardRecovery);
                     }
                 });
@@ -367,40 +385,40 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
                 timing,
                 error,
             } => {
-                ui.label(dim("MIDI file"));
+                ui.label(dim(tr("MIDI file")));
                 path_row(ui, path, |p| midi_picker(p).pick_file());
-                ui.checkbox(timing, "Use the file's tempo and time signature");
+                ui.checkbox(timing, tr("Use the file's tempo and time signature"));
                 ui.label(dim(
-                    "Each part becomes a new Gloom Synth channel; the notes go into a new pattern.",
+                    tr("Each part becomes a new Gloom Synth channel; the notes go into a new pattern."),
                 ));
                 if let Some(e) = error {
                     ui.label(RichText::new(e.as_str()).color(theme.warn));
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Import").clicked() {
+                    if ui.button(tr("Import")).clicked() {
                         action = Some(DialogAction::ImportMidi {
                             path: PathBuf::from(path.trim()),
                             timing: *timing,
                         });
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         action = Some(DialogAction::Close);
                     }
                 });
             }
             Dialog::ExportMidi { path, song, error } => {
-                ui.label(dim("Save to"));
+                ui.label(dim(tr("Save to")));
                 path_row(ui, path, |p| midi_picker(p).save_file());
                 ui.horizontal(|ui| {
-                    ui.selectable_value(song, true, "Whole song");
-                    ui.selectable_value(song, false, "Current pattern");
+                    ui.selectable_value(song, true, tr("Whole song"));
+                    ui.selectable_value(song, false, tr("Current pattern"));
                 });
-                ui.label(dim("Format 1: a tempo track, then one track per channel."));
+                ui.label(dim(tr("Format 1: a tempo track, then one track per channel.")));
                 if let Some(e) = error {
                     ui.label(RichText::new(e.as_str()).color(theme.warn));
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Export").clicked() {
+                    if ui.button(tr("Export")).clicked() {
                         let mut p = PathBuf::from(path.trim());
                         if p.extension().is_none() {
                             p.set_extension("mid");
@@ -410,7 +428,66 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
                             song: *song,
                         });
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
+                        action = Some(DialogAction::Close);
+                    }
+                });
+            }
+            Dialog::NewProject { templates } => {
+                ui.label(dim(tr("Start from")));
+                if ui
+                    .add(egui::Button::new(tr("Empty project")).min_size(egui::vec2(260.0, 0.0)))
+                    .clicked()
+                {
+                    action = Some(DialogAction::NewFrom(None));
+                }
+                for (name, path) in templates.iter() {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(egui::Button::new(name.as_str()).min_size(egui::vec2(230.0, 0.0)))
+                            .on_hover_text(path.display().to_string())
+                            .clicked()
+                        {
+                            action = Some(DialogAction::NewFrom(Some(path.clone())));
+                        }
+                        if ui
+                            .small_button("×")
+                            .on_hover_text(tr("Delete this template"))
+                            .clicked()
+                        {
+                            action = Some(DialogAction::DeleteTemplate(path.clone()));
+                        }
+                    });
+                }
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(tr("File > Save as template… adds the open project here."))
+                        .small()
+                        .color(theme.text_dim),
+                );
+                if ui.button(tr("Cancel")).clicked() {
+                    action = Some(DialogAction::Close);
+                }
+            }
+            Dialog::SaveTemplate { name, error } => {
+                ui.label(dim(tr("Template name")));
+                let r = ui.add(egui::TextEdit::singleline(name).desired_width(260.0));
+                r.request_focus();
+                ui.label(
+                    RichText::new(tr("Samples are copied into the template, so it opens anywhere."))
+                        .small()
+                        .color(theme.text_dim),
+                );
+                if let Some(e) = error {
+                    ui.label(RichText::new(e.as_str()).color(theme.warn));
+                }
+                ui.horizontal(|ui| {
+                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let ok = !template_name(name).is_empty();
+                    if ui.add_enabled(ok, egui::Button::new(tr("Save"))).clicked() || enter && ok {
+                        action = Some(DialogAction::SaveTemplate(name.clone()));
+                    }
+                    if ui.button(tr("Cancel")).clicked() {
                         action = Some(DialogAction::Close);
                     }
                 });
@@ -418,19 +495,19 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
             Dialog::Unsaved { name, then } => {
                 ui.label(format!("Save the changes to \"{name}\"?"));
                 ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
+                    if ui.button(tr("Save")).clicked() {
                         action = Some(DialogAction::Unsaved {
                             save: true,
                             then: *then,
                         });
                     }
-                    if ui.button("Don't save").clicked() {
+                    if ui.button(tr("Don't save")).clicked() {
                         action = Some(DialogAction::Unsaved {
                             save: false,
                             then: *then,
                         });
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         action = Some(DialogAction::Close);
                     }
                 });
@@ -450,7 +527,7 @@ fn export_form(ui: &mut Ui, theme: &GloomTheme, f: &mut ExportForm) -> Option<Di
     let mut action = None;
     let running = f.running.clone();
     ui.add_enabled_ui(running.is_none(), |ui| {
-        ui.label(RichText::new("File").color(theme.text_dim));
+        ui.label(RichText::new(tr("File")).color(theme.text_dim));
         path_row(ui, &mut f.path, |p| {
             let mut d = rfd::FileDialog::new().add_filter("WAV", &["wav"]);
             if let Some(dir) = start_dir(p) {
@@ -462,13 +539,13 @@ fn export_form(ui: &mut Ui, theme: &GloomTheme, f: &mut ExportForm) -> Option<Di
             .num_columns(2)
             .spacing(egui::vec2(10.0, 6.0))
             .show(ui, |ui| {
-                ui.label("Range");
+                ui.label(tr("Range"));
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut f.loop_only, false, "Whole song");
-                    ui.selectable_value(&mut f.loop_only, true, "Loop region");
+                    ui.selectable_value(&mut f.loop_only, false, tr("Whole song"));
+                    ui.selectable_value(&mut f.loop_only, true, tr("Loop region"));
                 });
                 ui.end_row();
-                ui.label("Sample rate");
+                ui.label(tr("Sample rate"));
                 egui::ComboBox::from_id_salt("export_rate")
                     .selected_text(format!("{} Hz", f.rate))
                     .show_ui(ui, |ui| {
@@ -477,7 +554,7 @@ fn export_form(ui: &mut Ui, theme: &GloomTheme, f: &mut ExportForm) -> Option<Di
                         }
                     });
                 ui.end_row();
-                ui.label("Format");
+                ui.label(tr("Format"));
                 ui.horizontal(|ui| {
                     for d in BitDepth::ALL {
                         ui.selectable_value(&mut f.depth, d, d.label());
@@ -489,36 +566,40 @@ fn export_form(ui: &mut Ui, theme: &GloomTheme, f: &mut ExportForm) -> Option<Di
                     f.depth != BitDepth::Float32,
                     egui::Checkbox::new(&mut f.dither, "Dither (TPDF)"),
                 )
-                .on_hover_text(
+                .on_hover_text(tr(
                     "Adds a little noise before rounding to 16 or 24 bits, so quiet passages \
                      fade into noise instead of distortion",
-                );
+                ));
                 ui.end_row();
                 ui.label("");
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut f.normalize, "Normalize to");
+                    ui.checkbox(&mut f.normalize, tr("Normalize to"));
                     ui.add_enabled(
                         f.normalize,
                         egui::DragValue::new(&mut f.normalize_db)
                             .range(-24.0..=0.0)
                             .speed(0.1)
-                            .suffix(" dBFS"),
+                            .suffix(tr(" dBFS")),
                     );
                 });
                 ui.end_row();
                 ui.label("");
-                ui.checkbox(&mut f.tail, "Render tails")
-                    .on_hover_text("Keep going after the end until reverb and delays fade out");
+                ui.checkbox(&mut f.tail, tr("Render tails"))
+                    .on_hover_text(tr(
+                        "Keep going after the end until reverb and delays fade out",
+                    ));
                 ui.end_row();
                 ui.label("");
-                ui.checkbox(&mut f.stems, "One file per track (stems)")
-                    .on_hover_text("Each playlist track with patterns or audio, through the mixer");
+                ui.checkbox(&mut f.stems, tr("One file per track (stems)"))
+                    .on_hover_text(tr(
+                        "Each playlist track with patterns or audio, through the mixer",
+                    ));
                 ui.end_row();
             });
     });
     if let Some(p) = &running {
         ui.add(egui::ProgressBar::new(p.fraction()).show_percentage());
-        if ui.button("Cancel").clicked() {
+        if ui.button(tr("Cancel")).clicked() {
             action = Some(DialogAction::CancelExport);
         }
     } else {
@@ -526,15 +607,77 @@ fn export_form(ui: &mut Ui, theme: &GloomTheme, f: &mut ExportForm) -> Option<Di
             ui.label(RichText::new(m.as_str()).color(theme.text_dim));
         }
         ui.horizontal(|ui| {
-            if ui.button("Export").clicked() {
+            if ui.button(tr("Export")).clicked() {
                 action = Some(DialogAction::Export {
                     path: PathBuf::from(f.path.trim()),
                 });
             }
-            if ui.button("Close").clicked() {
+            if ui.button(tr("Close")).clicked() {
                 action = Some(DialogAction::Close);
             }
         });
     }
     action
+}
+
+/// Where project templates are kept.
+pub fn templates_folder() -> PathBuf {
+    crate::library::data_folder().join("templates")
+}
+
+/// A template name made safe as a file name: path separators and other characters files
+/// cannot have become spaces, and the ends are trimmed.
+pub fn template_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_control() || "/\\:*?\"<>|".contains(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .trim_matches('.')
+        .trim()
+        .to_owned()
+}
+
+/// The templates in `dir`, by name.
+pub fn list_templates(dir: &std::path::Path) -> Vec<(String, PathBuf)> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut v: Vec<(String, PathBuf)> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case(gt_project::file::EXTENSION))
+        })
+        .filter_map(|p| Some((p.file_stem()?.to_string_lossy().into_owned(), p)))
+        .collect();
+    v.sort_by_key(|(n, _)| n.to_lowercase());
+    v
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+
+    #[test]
+    fn template_names_are_safe_and_listed_by_name() {
+        assert_eq!(template_name("  Trap / 140: dark?  "), "Trap   140  dark");
+        assert_eq!(template_name(".."), "");
+        let dir = std::env::temp_dir().join(format!("gt-templates-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["b.gloom", "A.gloom", "notes.txt"] {
+            std::fs::write(dir.join(f), b"").unwrap();
+        }
+        let names: Vec<String> = list_templates(&dir).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["A", "b"]);
+        assert!(list_templates(&dir.join("none")).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

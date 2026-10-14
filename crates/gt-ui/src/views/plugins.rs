@@ -8,6 +8,7 @@ use std::sync::Arc;
 use egui::{vec2, RichText, Ui};
 use gt_core::{ChannelId, ParamId, PluginInstanceId, PluginKind, PluginOwner, PluginRef};
 
+use crate::i18n::tr;
 use crate::param_ui::{param_live, param_menu};
 use crate::GloomTheme;
 
@@ -92,8 +93,8 @@ pub fn plugin_controls(
             view.state,
             PluginState::Failed | PluginState::Unavailable(_)
         ) && ui
-            .small_button("Retry")
-            .on_hover_text("Run the plugin again")
+            .small_button(tr("Retry"))
+            .on_hover_text(tr("Run the plugin again"))
             .clicked()
         {
             actions.push(PluginAction::Retry(id));
@@ -109,7 +110,7 @@ pub fn plugin_controls(
             };
             if ui
                 .add(egui::Button::selectable(view.editor_open, label))
-                .on_hover_text("The plugin's own window")
+                .on_hover_text(tr("The plugin's own window"))
                 .clicked()
             {
                 actions.push(if view.editor_open {
@@ -156,7 +157,9 @@ fn plugin_routing(
                 .selected_text(strip(out.route))
                 .width(110.0)
                 .show_ui(ui, |ui| {
-                    routed |= ui.selectable_value(&mut out.route, None, "Off").changed();
+                    routed |= ui
+                        .selectable_value(&mut out.route, None, tr("Off"))
+                        .changed();
                     for (i, name) in view.strips.iter().enumerate() {
                         routed |= ui
                             .selectable_value(&mut out.route, Some(i as u8), name)
@@ -164,10 +167,10 @@ fn plugin_routing(
                     }
                 })
                 .response
-                .on_hover_text("The mixer insert this output plays into");
+                .on_hover_text(tr("The mixer insert this output plays into"));
         }
         if plugin.sends_midi {
-            ui.label(RichText::new("MIDI out").small().color(theme.text_dim));
+            ui.label(RichText::new(tr("MIDI out")).small().color(theme.text_dim));
             let name = plugin
                 .midi_out
                 .and_then(|c| view.midi_targets.iter().find(|t| t.0 == c))
@@ -177,7 +180,7 @@ fn plugin_routing(
                 .width(110.0)
                 .show_ui(ui, |ui| {
                     routed |= ui
-                        .selectable_value(&mut plugin.midi_out, None, "Off")
+                        .selectable_value(&mut plugin.midi_out, None, tr("Off"))
                         .changed();
                     for (c, name) in &view.midi_targets {
                         routed |= ui
@@ -186,7 +189,7 @@ fn plugin_routing(
                     }
                 })
                 .response
-                .on_hover_text("The channel that plays the notes this plugin sends");
+                .on_hover_text(tr("The channel that plays the notes this plugin sends"));
         }
     });
     if routed {
@@ -202,10 +205,10 @@ fn presets_menu(
     view: &PluginPanelView,
     actions: &mut Vec<PluginAction>,
 ) {
-    ui.menu_button("Presets", |ui| {
+    ui.menu_button(tr("Presets"), |ui| {
         let Some(list) = &view.presets else {
             actions.push(PluginAction::ListPresets(id));
-            ui.label(RichText::new("Reading…").small().color(theme.text_dim));
+            ui.label(RichText::new(tr("Reading…")).small().color(theme.text_dim));
             return;
         };
         egui::ScrollArea::vertical()
@@ -225,7 +228,7 @@ fn presets_menu(
                         }
                     }
                     if !any {
-                        ui.label(RichText::new("None").small().color(theme.text_dim));
+                        ui.label(RichText::new(tr("None")).small().color(theme.text_dim));
                     }
                     ui.separator();
                 }
@@ -235,12 +238,12 @@ fn presets_menu(
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut name)
-                    .hint_text("Preset name")
+                    .hint_text(tr("Preset name"))
                     .desired_width(140.0),
             );
             if ui
-                .add_enabled(!name.trim().is_empty(), egui::Button::new("Save"))
-                .on_hover_text("Save the current sound as a preset of yours")
+                .add_enabled(!name.trim().is_empty(), egui::Button::new(tr("Save")))
+                .on_hover_text(tr("Save the current sound as a preset of yours"))
                 .clicked()
             {
                 actions.push(PluginAction::SavePreset(id, name.trim().to_owned()));
@@ -249,7 +252,7 @@ fn presets_menu(
             }
         });
         ui.data_mut(|d| d.insert_temp(name_id, name));
-        if ui.small_button("Refresh").clicked() {
+        if ui.small_button(tr("Refresh")).clicked() {
             actions.push(PluginAction::ListPresets(id));
         }
     });
@@ -268,7 +271,7 @@ fn plugin_params(
     let visible = params.iter().filter(|p| !p.hidden).count();
     if visible == 0 {
         ui.label(
-            RichText::new("This plugin has no parameters to show here.")
+            RichText::new(tr("This plugin has no parameters to show here."))
                 .small()
                 .color(theme.text_dim),
         );
@@ -278,7 +281,7 @@ fn plugin_params(
     let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
     if visible > 12 {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Find").small().color(theme.text_dim));
+            ui.label(RichText::new(tr("Find")).small().color(theme.text_dim));
             ui.add(egui::TextEdit::singleline(&mut filter).desired_width(160.0));
         });
         ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
@@ -338,9 +341,9 @@ fn plugin_params(
                                 info.default * 100.0
                             ))
                         } else {
-                            r.on_disabled_hover_text(
+                            r.on_disabled_hover_text(tr(
                                 "The plugin does not let the host change this; use its editor",
-                            )
+                            ))
                         };
                         if info.automatable {
                             let id = ParamId::plugin_param(owner, plugin, info.id);
@@ -444,7 +447,7 @@ pub fn plugin_browser(
     ui.horizontal(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut state.search)
-                .hint_text("Search")
+                .hint_text(tr("Search"))
                 .desired_width(170.0),
         );
         for (kind, label) in [
@@ -475,8 +478,8 @@ pub fn plugin_browser(
                 }
                 None => {
                     if ui
-                        .button("Rescan")
-                        .on_hover_text("Look for new and changed plugin files")
+                        .button(tr("Rescan"))
+                        .on_hover_text(tr("Look for new and changed plugin files"))
                         .clicked()
                     {
                         actions.push(PluginBrowserAction::Rescan);
@@ -541,7 +544,7 @@ pub fn plugin_browser(
                         ui.label(RichText::new(kind).small().color(theme.text_dim));
                         let can = p.kind == PluginKind::Instrument || view.effect_target.is_some();
                         if ui
-                            .add_enabled(can, egui::Button::new("Add"))
+                            .add_enabled(can, egui::Button::new(tr("Add")))
                             .on_hover_text(&tip)
                             .on_disabled_hover_text(&tip)
                             .clicked()
@@ -553,7 +556,7 @@ pub fn plugin_browser(
                 });
         });
 
-    egui::CollapsingHeader::new(RichText::new("Folders").small())
+    egui::CollapsingHeader::new(RichText::new(tr("Folders")).small())
         .id_salt("gt_plugin_folders")
         .show(ui, |ui| {
             for f in view.standard_folders {
@@ -562,7 +565,7 @@ pub fn plugin_browser(
             for (i, f) in view.folders.iter().enumerate() {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(f).small());
-                    if ui.small_button("Remove").clicked() {
+                    if ui.small_button(tr("Remove")).clicked() {
                         actions.push(PluginBrowserAction::RemoveFolder(i));
                     }
                 });
@@ -570,13 +573,13 @@ pub fn plugin_browser(
             ui.horizontal(|ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut state.new_folder)
-                        .hint_text("Another folder with .clap files")
+                        .hint_text(tr("Another folder with .clap files"))
                         .desired_width(240.0),
                 );
                 if ui
                     .add_enabled(
                         !state.new_folder.trim().is_empty(),
-                        egui::Button::new("Add"),
+                        egui::Button::new(tr("Add")),
                     )
                     .clicked()
                 {
@@ -600,7 +603,7 @@ pub fn plugin_browser(
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(file).small()).on_hover_text(why);
                     if ui
-                        .small_button("Allow again")
+                        .small_button(tr("Allow again"))
                         .on_hover_text(format!("{why}. Load it again anyway?"))
                         .clicked()
                     {

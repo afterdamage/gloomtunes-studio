@@ -14,6 +14,7 @@ use gt_core::synth::{
 };
 use gt_core::{ChannelId, ParamId};
 
+use crate::i18n::tr;
 use crate::GloomTheme;
 
 /// What the panel shows besides the patch.
@@ -57,14 +58,14 @@ pub fn synth_panel(
     let ch = view.channel;
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(name).desired_width(120.0))
-            .on_hover_text("Channel name");
+            .on_hover_text(tr("Channel name"));
         ui.separator();
-        ui.label(RichText::new("Preset").color(theme.text_dim));
+        ui.label(RichText::new(tr("Preset")).color(theme.text_dim));
         egui::ComboBox::from_id_salt("synth_preset")
             .width(140.0)
             .selected_text(patch.name.clone())
             .show_ui(ui, |ui| {
-                ui.label(RichText::new("Factory").small().color(theme.text_dim));
+                ui.label(RichText::new(tr("Factory")).small().color(theme.text_dim));
                 let engine = patch.engine();
                 for f in SynthPatch::factory()
                     .into_iter()
@@ -77,7 +78,7 @@ pub fn synth_panel(
                 }
                 if !view.user_presets.is_empty() {
                     ui.separator();
-                    ui.label(RichText::new("Yours").small().color(theme.text_dim));
+                    ui.label(RichText::new(tr("Yours")).small().color(theme.text_dim));
                     for (n, path) in view.user_presets {
                         if ui.selectable_label(false, n).clicked() {
                             actions.push(SynthPanelAction::LoadFile(path.clone()));
@@ -86,7 +87,7 @@ pub fn synth_panel(
                 }
             });
         ui.add(egui::TextEdit::singleline(&mut patch.name).desired_width(110.0))
-            .on_hover_text("Preset name (used when saving)");
+            .on_hover_text(tr("Preset name (used when saving)"));
         let engine = patch.engine();
         egui::ComboBox::from_id_salt("synth_engine")
             .width(80.0)
@@ -103,10 +104,12 @@ pub fn synth_panel(
                 }
             })
             .response
-            .on_hover_text("Sound engine: Gloom (subtractive), FM (six operators) or Wavetable");
+            .on_hover_text(tr(
+                "Sound engine: Gloom (subtractive), FM (six operators) or Wavetable",
+            ));
         if ui
-            .button("Save preset")
-            .on_hover_text("Save this sound to your preset folder")
+            .button(tr("Save preset"))
+            .on_hover_text(tr("Save this sound to your preset folder"))
             .clicked()
         {
             actions.push(SynthPanelAction::Save);
@@ -284,10 +287,10 @@ fn wt_section(
             {
                 Some(name) => {
                     ui.label(RichText::new(name).small().color(theme.text))
-                        .on_hover_text("User table (replaces the factory table)");
+                        .on_hover_text(tr("User table (replaces the factory table)"));
                     if ui
                         .small_button("✕")
-                        .on_hover_text("Back to the factory table")
+                        .on_hover_text(tr("Back to the factory table"))
                         .clicked()
                     {
                         patch.tables[osc] = None;
@@ -312,8 +315,10 @@ fn wt_section(
                 }
             }
             if ui
-                .small_button("Load…")
-                .on_hover_text("Use a single-cycle WAV (or frames of 2048 samples) as the table")
+                .small_button(tr("Load…"))
+                .on_hover_text(tr(
+                    "Use a single-cycle WAV (or frames of 2048 samples) as the table",
+                ))
                 .clicked()
             {
                 actions.push(SynthPanelAction::LoadTable(osc));
@@ -344,7 +349,7 @@ fn fm_sections(
         *changed |= knob_rows(ui, theme, ch, patch, &[&[P::FmAlgorithm, P::FmFeedback]]);
         if free {
             ui.label(
-                RichText::new("Row: modulated operator · column: modulator")
+                RichText::new(tr("Row: modulated operator · column: modulator"))
                     .small()
                     .color(theme.text_dim),
             );
@@ -359,7 +364,7 @@ fn fm_sections(
                                 .color(theme.text_dim),
                         );
                     }
-                    ui.label(RichText::new("Out").small().color(theme.text_dim));
+                    ui.label(RichText::new(tr("Out")).small().color(theme.text_dim));
                     ui.end_row();
                     for i in 0..FM_OPS {
                         ui.label(
@@ -590,7 +595,7 @@ fn mod_matrix(
                             .suffix(" %")
                             .fixed_decimals(0),
                     )
-                    .on_hover_text("Amount. 100 % is the full range of the destination");
+                    .on_hover_text(tr("Amount. 100 % is the full range of the destination"));
                 if let Some(channel) = ch {
                     crate::param_ui::param_menu(theme, &r, ParamId::SynthMod { channel, slot: i });
                 }

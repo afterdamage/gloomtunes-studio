@@ -32,10 +32,12 @@
 use egui::{pos2, vec2, Color32, Pos2, Rect, Response, RichText, Sense, Stroke, Ui};
 use gt_core::{AutoPoint, Automation, ControlKind, ControlPoint, Note, ParamId, PPQ};
 
+use crate::keymap::{Command, Scope};
 use crate::GloomTheme;
 
 mod lanes;
 mod tools;
+use crate::i18n::tr;
 use lanes::LaneSnapshot;
 pub use lanes::{Lane, LaneDraw};
 
@@ -951,7 +953,7 @@ fn toolbar(
             }
         }
         ui.separator();
-        ui.label(dim("Snap"));
+        ui.label(dim(tr("Snap")));
         egui::ComboBox::from_id_salt("roll_snap")
             .width(56.0)
             .selected_text(st.snap.label())
@@ -961,7 +963,7 @@ fn toolbar(
                 }
             });
         ui.separator();
-        ui.label(dim("Scale"));
+        ui.label(dim(tr("Scale")));
         egui::ComboBox::from_id_salt("roll_scale_root")
             .width(40.0)
             .selected_text(key_name(st.scale_root).trim_end_matches('0').to_owned())
@@ -980,14 +982,15 @@ fn toolbar(
                 }
             });
         if st.scale != ScaleKind::Off {
-            ui.toggle_value(&mut st.scale_snap, "Snap")
-                .on_hover_text("Drawn and moved notes land on keys of the scale");
+            ui.toggle_value(&mut st.scale_snap, tr("Snap"))
+                .on_hover_text(tr("Drawn and moved notes land on keys of the scale"));
         }
-        ui.toggle_value(&mut st.fold, "Fold")
-            .on_hover_text("Show only rows in the scale or with notes");
-        ui.toggle_value(&mut st.stretch, "Stretch").on_hover_text(
-            "Dragging a note's end scales the whole selection in time (also Ctrl+drag)",
-        );
+        ui.toggle_value(&mut st.fold, tr("Fold"))
+            .on_hover_text(tr("Show only rows in the scale or with notes"));
+        ui.toggle_value(&mut st.stretch, tr("Stretch"))
+            .on_hover_text(tr(
+                "Dragging a note's end scales the whole selection in time (also Ctrl+drag)",
+            ));
         let swatch = |ui: &mut Ui, g: u8, selected: bool| {
             let (r, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::click());
             ui.painter().rect_filled(r, 2.0, group_color(theme, g));
@@ -1005,7 +1008,7 @@ fn toolbar(
         ui.menu_button(
             RichText::new("■").color(group_color(theme, st.color)),
             |ui| {
-                ui.label(dim("Colour for new notes and the selection"));
+                ui.label(dim(tr("Colour for new notes and the selection")));
                 ui.horizontal_wrapped(|ui| {
                     ui.set_max_width(8.0 * 18.0);
                     for g in 0..Note::COLORS {
@@ -1021,7 +1024,7 @@ fn toolbar(
                         }
                     }
                 });
-                if any_sel && ui.button("Select this colour").clicked() {
+                if any_sel && ui.button(tr("Select this colour")).clicked() {
                     for (s, n) in st.selected.iter_mut().zip(notes.iter()) {
                         *s = n.color == st.color;
                     }
@@ -1029,9 +1032,9 @@ fn toolbar(
             },
         )
         .response
-        .on_hover_text("Note colour group");
+        .on_hover_text(tr("Note colour group"));
         if !view.controls.is_empty() {
-            ui.menu_button("Controllers", |ui| {
+            ui.menu_button(tr("Controllers"), |ui| {
                 for kind in ControlKind::ALL {
                     let n = view.controls.iter().filter(|c| c.kind == kind).count();
                     if n > 0
@@ -1042,21 +1045,21 @@ fn toolbar(
                         actions.push(PianoRollAction::ClearControls(Some(kind)));
                     }
                 }
-                if ui.button("Clear all").clicked() {
+                if ui.button(tr("Clear all")).clicked() {
                     actions.push(PianoRollAction::ClearControls(None));
                 }
             })
             .response
-            .on_hover_text(
+            .on_hover_text(tr(
                 "Recorded pitch bend, sustain, mod wheel and aftertouch (drawn in the velocity \
                  lane)",
-            );
+            ));
         }
         lanes::lane_selector(ui, theme, st, view, actions);
         tools::tools_menu(ui, st);
         if ui
-            .add(egui::Button::selectable(st.ghosts, "Ghosts"))
-            .on_hover_text("Show other channels' notes in this pattern")
+            .add(egui::Button::selectable(st.ghosts, tr("Ghosts")))
+            .on_hover_text(tr("Show other channels' notes in this pattern"))
             .clicked()
         {
             st.ghosts = !st.ghosts;
@@ -1069,7 +1072,7 @@ fn toolbar(
                 format!("Edit channels ({})", n + 1)
             };
             ui.menu_button(label, |ui| {
-                ui.label(dim("Edit these channels' notes along with this one"));
+                ui.label(dim(tr("Edit these channels' notes along with this one")));
                 for g in &view.ghosts {
                     let mut on = st.editable.contains(&g.id);
                     if ui.checkbox(&mut on, g.name).changed() {
@@ -1083,12 +1086,14 @@ fn toolbar(
                 }
             })
             .response
-            .on_hover_text("Ghost channels whose notes can be edited here too");
+            .on_hover_text(tr("Ghost channels whose notes can be edited here too"));
         }
         ui.separator();
         if ui
-            .button("Quantize")
-            .on_hover_text("Snap note starts of the selection (or all notes) to the grid (Q)")
+            .button(tr("Quantize"))
+            .on_hover_text(tr(
+                "Snap note starts of the selection (or all notes) to the grid (Q)",
+            ))
             .clicked()
         {
             actions.push(PianoRollAction::Quantize);
@@ -1101,14 +1106,16 @@ fn toolbar(
                     .suffix(" %")
                     .speed(1.0),
             )
-            .on_hover_text("Quantize strength")
+            .on_hover_text(tr("Quantize strength"))
             .changed()
         {
             st.quantize_strength = q / 100.0;
         }
         if ui
-            .button("Humanize")
-            .on_hover_text("Randomly shift timing and velocity of the selection (or all notes)")
+            .button(tr("Humanize"))
+            .on_hover_text(tr(
+                "Randomly shift timing and velocity of the selection (or all notes)",
+            ))
             .clicked()
         {
             actions.push(PianoRollAction::Humanize);
@@ -1116,19 +1123,19 @@ fn toolbar(
         ui.add(
             egui::DragValue::new(&mut st.humanize_ticks)
                 .range(0..=240)
-                .suffix(" ticks")
+                .suffix(tr(" ticks"))
                 .speed(0.5),
         )
-        .on_hover_text("Humanize timing range (±, 960 ticks per beat)");
+        .on_hover_text(tr("Humanize timing range (±, 960 ticks per beat)"));
         let mut hv = st.humanize_velocity * 100.0;
         if ui
             .add(
                 egui::DragValue::new(&mut hv)
                     .range(0.0..=100.0)
-                    .suffix(" % vel")
+                    .suffix(tr(" % vel"))
                     .speed(0.5),
             )
-            .on_hover_text("Humanize velocity range (±)")
+            .on_hover_text(tr("Humanize velocity range (±)"))
             .changed()
         {
             st.humanize_velocity = hv / 100.0;
@@ -1153,16 +1160,16 @@ fn note_panel(
     let Some(mut n) = first.and_then(|i| notes.get(i).copied()) else {
         ui.horizontal(|ui| {
             ui.set_min_height(ui.spacing().interact_size.y);
-            ui.label(dim(
+            ui.label(dim(tr(
                 "Select notes to edit their pan, release, fine pitch, mod X/Y, slide and porta",
-            ));
+            )));
         });
         return false;
     };
     let before = n;
     ui.horizontal_wrapped(|ui| {
         ui.set_min_height(ui.spacing().interact_size.y);
-        ui.label(dim("Note"));
+        ui.label(dim(tr("Note")));
         let pct = |ui: &mut Ui, v: &mut f32, label: &str, tip: &str| {
             let mut x = *v * 100.0;
             if ui
@@ -1191,10 +1198,10 @@ fn note_panel(
             .add(
                 egui::DragValue::new(&mut pan)
                     .range(-100.0..=100.0)
-                    .prefix("Pan ")
+                    .prefix(tr("Pan "))
                     .speed(0.5),
             )
-            .on_hover_text("Pan, -100 (left) to 100 (right)")
+            .on_hover_text(tr("Pan, -100 (left) to 100 (right)"))
             .changed()
         {
             n.pan = pan / 100.0;
@@ -1202,11 +1209,11 @@ fn note_panel(
         ui.add(
             egui::DragValue::new(&mut n.fine)
                 .range(-100.0..=100.0)
-                .prefix("Fine ")
-                .suffix(" ct")
+                .prefix(tr("Fine "))
+                .suffix(tr(" ct"))
                 .speed(0.5),
         )
-        .on_hover_text("Fine pitch in cents");
+        .on_hover_text(tr("Fine pitch in cents"));
         pct(
             ui,
             &mut n.mod_x,
@@ -1219,11 +1226,13 @@ fn note_panel(
             "Y",
             "Mod Y: Gloom Synth resonance, sampler start (50 % neutral)",
         );
-        ui.toggle_value(&mut n.slide, "Slide")
-            .on_hover_text("Glide the sounding note to this key over this note's length");
-        ui.toggle_value(&mut n.porta, "Porta")
-            .on_hover_text("Start at the previous note's pitch and glide to this one");
-        ui.toggle_value(&mut n.muted, "Mute (M)");
+        ui.toggle_value(&mut n.slide, tr("Slide")).on_hover_text(tr(
+            "Glide the sounding note to this key over this note's length",
+        ));
+        ui.toggle_value(&mut n.porta, tr("Porta")).on_hover_text(tr(
+            "Start at the previous note's pitch and glide to this one",
+        ));
+        ui.toggle_value(&mut n.muted, tr("Mute (M)"));
     });
     if n == before {
         return false;
@@ -1652,7 +1661,7 @@ fn key_commands(
     owner_ids: &[u32],
     actions: &mut Vec<PianoRollAction>,
 ) -> bool {
-    use egui::{Event, Key, Modifiers};
+    use egui::Event;
     let mut changed = false;
     let events = ui.input(|i| i.events.clone());
     let any_sel = st.selected.iter().any(|&s| s);
@@ -1697,18 +1706,16 @@ fn key_commands(
             _ => {}
         }
     }
-    let pressed = |k: Key, m: Modifiers| ui.input_mut(|i| i.consume_key(m, k));
-    let shift = Modifiers::SHIFT;
-    let alt = Modifiers::ALT;
-    let cmd = Modifiers::COMMAND;
-    if pressed(Key::Delete, Modifiers::NONE) || pressed(Key::Backspace, Modifiers::NONE) {
+    let keys = crate::keymap::take_view(ui, Scope::PianoRoll);
+    let pressed = |c: Command| keys.contains(&c);
+    if pressed(Command::RollDelete) {
         let sel = st.selected.clone();
         changed |= delete_where(notes, st, |i| sel[i]);
     }
-    if pressed(Key::A, cmd) {
+    if pressed(Command::RollSelectAll) {
         st.selected.iter_mut().for_each(|s| *s = true);
     }
-    if pressed(Key::D, cmd) && any_sel {
+    if pressed(Command::RollDuplicate) && any_sel {
         let block = selected_block(st, notes);
         let start = block.iter().map(|(n, _)| n.start).min().unwrap_or(0);
         let end = block
@@ -1721,16 +1728,16 @@ fn key_commands(
         paste(notes, st, &block, span);
         changed = true;
     }
-    if pressed(Key::Q, Modifiers::NONE) {
+    if pressed(Command::RollQuantize) {
         actions.push(PianoRollAction::Quantize);
     }
-    if pressed(Key::P, Modifiers::NONE) {
+    if pressed(Command::RollDrawTool) {
         st.tool = Tool::Draw;
     }
-    if pressed(Key::E, Modifiers::NONE) {
+    if pressed(Command::RollSelectTool) {
         st.tool = Tool::Select;
     }
-    if pressed(Key::M, Modifiers::NONE) && any_sel {
+    if pressed(Command::RollMute) && any_sel {
         // Mutes the selection, or unmutes it when all of it is muted.
         let sel = selected_indices(st);
         let mute = !sel.iter().all(|&i| notes[i].muted);
@@ -1746,28 +1753,27 @@ fn key_commands(
         } else {
             ScaleKind::Off
         };
-        // Most modifiers first: egui matches shortcuts ignoring extra Shift.
-        let edits: [(Key, Modifiers, Edit); 16] = [
-            (Key::ArrowLeft, shift | alt, Edit::Length(-FINE_TICKS)),
-            (Key::ArrowRight, shift | alt, Edit::Length(FINE_TICKS)),
-            (Key::ArrowUp, shift | alt, Edit::Velocity(0.01)),
-            (Key::ArrowDown, shift | alt, Edit::Velocity(-0.01)),
-            (Key::ArrowLeft, shift, Edit::Length(-step)),
-            (Key::ArrowRight, shift, Edit::Length(step)),
-            (Key::ArrowUp, shift, Edit::Transpose(12)),
-            (Key::ArrowDown, shift, Edit::Transpose(-12)),
-            (Key::ArrowLeft, alt, Edit::Move(-FINE_TICKS)),
-            (Key::ArrowRight, alt, Edit::Move(FINE_TICKS)),
-            (Key::ArrowUp, alt, Edit::Velocity(0.1)),
-            (Key::ArrowDown, alt, Edit::Velocity(-0.1)),
-            (Key::ArrowUp, Modifiers::NONE, Edit::Degree(1)),
-            (Key::ArrowDown, Modifiers::NONE, Edit::Degree(-1)),
-            (Key::ArrowLeft, Modifiers::NONE, Edit::Move(-step)),
-            (Key::ArrowRight, Modifiers::NONE, Edit::Move(step)),
+        let edits: [(Command, Edit); 16] = [
+            (Command::RollFineShorter, Edit::Length(-FINE_TICKS)),
+            (Command::RollFineLonger, Edit::Length(FINE_TICKS)),
+            (Command::RollFineVelocityUp, Edit::Velocity(0.01)),
+            (Command::RollFineVelocityDown, Edit::Velocity(-0.01)),
+            (Command::RollShorter, Edit::Length(-step)),
+            (Command::RollLonger, Edit::Length(step)),
+            (Command::RollOctaveUp, Edit::Transpose(12)),
+            (Command::RollOctaveDown, Edit::Transpose(-12)),
+            (Command::RollNudgeLeft, Edit::Move(-FINE_TICKS)),
+            (Command::RollNudgeRight, Edit::Move(FINE_TICKS)),
+            (Command::RollVelocityUp, Edit::Velocity(0.1)),
+            (Command::RollVelocityDown, Edit::Velocity(-0.1)),
+            (Command::RollUp, Edit::Degree(1)),
+            (Command::RollDown, Edit::Degree(-1)),
+            (Command::RollLeft, Edit::Move(-step)),
+            (Command::RollRight, Edit::Move(step)),
         ];
         let mut moved = false;
-        for (k, m, edit) in edits {
-            if pressed(k, m) {
+        for (c, edit) in edits {
+            if pressed(c) {
                 moved |= edit_selection(notes, &st.selected, edit, scale, st.scale_root);
             }
         }

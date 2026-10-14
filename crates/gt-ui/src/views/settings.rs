@@ -3,6 +3,7 @@
 
 use egui::{Grid, Key, RichText, Ui};
 
+use crate::i18n::tr;
 use crate::keymap::{format_shortcut, shortcut_from_press, Command, Keymap};
 use crate::theme::{color_to_hex, FONT_SIZE_RANGE, MAX_RADIUS};
 use crate::views::{audio_panel, AudioAction, AudioPanelModel, CpuLoad, CPU_WARN};
@@ -111,9 +112,10 @@ pub fn shortcut_editor(
                 let s = shortcut_from_press(modifiers, key);
                 if let Some(from) = keymap.bind(cmd, s) {
                     notice = Some(format!(
-                        "{} now runs {} (it was {})",
+                        "{} now runs {} (it was {}: {})",
                         format_shortcut(&s),
                         cmd.label(),
+                        from.scope().label(),
                         from.label()
                     ));
                 }
@@ -123,9 +125,9 @@ pub fn shortcut_editor(
     }
 
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Filter").color(theme.text_dim));
+        ui.label(RichText::new(tr("Filter")).color(theme.text_dim));
         ui.add(egui::TextEdit::singleline(&mut state.filter).desired_width(160.0));
-        if ui.button("Reset all").clicked() {
+        if ui.button(tr("Reset all")).clicked() {
             *keymap = Keymap::default();
             changed = true;
         }
@@ -140,27 +142,42 @@ pub fn shortcut_editor(
                 .striped(true)
                 .spacing([12.0, 4.0])
                 .show(ui, |ui| {
+                    let mut scope = None;
                     for cmd in Command::ALL {
-                        if !filter.is_empty() && !cmd.label().to_lowercase().contains(&filter) {
+                        let s = cmd.scope();
+                        let hit = |c: Command| {
+                            filter.is_empty()
+                                || c.label().to_lowercase().contains(&filter)
+                                || c.scope().label().to_lowercase().contains(&filter)
+                        };
+                        if !hit(cmd) {
                             continue;
+                        }
+                        if scope != Some(s) {
+                            scope = Some(s);
+                            ui.label(RichText::new(s.label()).strong().color(theme.accent));
+                            ui.end_row();
                         }
                         ui.label(cmd.label());
                         let keys: Vec<String> =
                             keymap.get(cmd).iter().map(format_shortcut).collect();
                         let text = if state.capturing == Some(cmd) {
-                            RichText::new("Press a key… (Esc cancels)").color(theme.accent)
+                            RichText::new(tr("Press a key… (Esc cancels)")).color(theme.accent)
                         } else if keys.is_empty() {
-                            RichText::new("none").color(theme.text_dim)
+                            RichText::new(tr("none")).color(theme.text_dim)
                         } else {
                             RichText::new(keys.join(", ")).monospace()
                         };
                         ui.label(text);
                         ui.horizontal(|ui| {
-                            if ui.small_button("Set").clicked() {
+                            if ui.small_button(tr("Set")).clicked() {
                                 state.capturing = Some(cmd);
                             }
                             if ui
-                                .add_enabled(!keys.is_empty(), egui::Button::new("Clear").small())
+                                .add_enabled(
+                                    !keys.is_empty(),
+                                    egui::Button::new(tr("Clear")).small(),
+                                )
                                 .clicked()
                             {
                                 keymap.clear(cmd);
@@ -168,7 +185,7 @@ pub fn shortcut_editor(
                             }
                             let is_default = keymap.get(cmd) == cmd.defaults().as_slice();
                             if ui
-                                .add_enabled(!is_default, egui::Button::new("Default").small())
+                                .add_enabled(!is_default, egui::Button::new(tr("Default")).small())
                                 .clicked()
                             {
                                 keymap.reset(cmd);
@@ -181,10 +198,10 @@ pub fn shortcut_editor(
         });
     ui.add_space(4.0);
     ui.label(
-        RichText::new(
+        RichText::new(tr(
             "Keys inside the piano roll, playlist and rack (tools, arrows, Delete) and the \
              typing keyboard's notes are fixed.",
-        )
+        ))
         .color(theme.text_dim)
         .small(),
     );
@@ -206,7 +223,7 @@ pub enum ThemeEdit {
 /// Accent presets, every colour token and the two sizes. Edits `theme` in place.
 pub fn theme_editor(ui: &mut Ui, theme: &mut GloomTheme) -> ThemeEdit {
     let mut changed = false;
-    ui.label(RichText::new("Accent").color(theme.text_dim));
+    ui.label(RichText::new(tr("Accent")).color(theme.text_dim));
     if accent_swatches(ui, theme) {
         changed = true;
     }
@@ -241,24 +258,24 @@ pub fn theme_editor(ui: &mut Ui, theme: &mut GloomTheme) -> ThemeEdit {
         .num_columns(2)
         .spacing([12.0, 4.0])
         .show(ui, |ui| {
-            ui.label(RichText::new("Text size").color(dim));
+            ui.label(RichText::new(tr("Text size")).color(dim));
             changed |= ui
                 .add(
                     egui::Slider::new(&mut theme.font_size, FONT_SIZE_RANGE.0..=FONT_SIZE_RANGE.1)
                         .step_by(0.5)
                         .fixed_decimals(1)
-                        .suffix(" pt"),
+                        .suffix(tr(" pt")),
                 )
                 .changed();
             ui.end_row();
-            ui.label(RichText::new("Corner radius").color(dim));
+            ui.label(RichText::new(tr("Corner radius")).color(dim));
             changed |= ui
-                .add(egui::Slider::new(&mut theme.radius, 0..=MAX_RADIUS).suffix(" pt"))
+                .add(egui::Slider::new(&mut theme.radius, 0..=MAX_RADIUS).suffix(tr(" pt")))
                 .changed();
             ui.end_row();
         });
     ui.add_space(6.0);
-    if ui.button("Reset to Gloom").clicked() {
+    if ui.button(tr("Reset to Gloom")).clicked() {
         *theme = GloomTheme::gloom();
         changed = true;
     }
@@ -337,7 +354,7 @@ pub fn perf_panel(ui: &mut Ui, theme: &GloomTheme, m: &PerfModel) -> Option<Perf
         .num_columns(2)
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
-            ui.label(dim("Audio CPU"));
+            ui.label(dim(tr("Audio CPU")));
             match m.cpu {
                 Some(c) => {
                     let color = if c.load >= CPU_WARN {
@@ -355,12 +372,12 @@ pub fn perf_panel(ui: &mut Ui, theme: &GloomTheme, m: &PerfModel) -> Option<Perf
                     );
                 }
                 None => {
-                    ui.label("no audio stream");
+                    ui.label(tr("no audio stream"));
                 }
             }
             ui.end_row();
 
-            ui.label(dim("Dropouts"));
+            ui.label(dim(tr("Dropouts")));
             ui.horizontal(|ui| {
                 let (over, xruns) = m.cpu.map_or((0, 0), |c| (c.overloads, c.xruns));
                 let color = if over + xruns > 0 {
@@ -372,38 +389,38 @@ pub fn perf_panel(ui: &mut Ui, theme: &GloomTheme, m: &PerfModel) -> Option<Perf
                     RichText::new(format!("{over} late callbacks, {xruns} device underruns"))
                         .color(color),
                 );
-                if ui.small_button("Reset").clicked() {
+                if ui.small_button(tr("Reset")).clicked() {
                     action = Some(PerfAction::ResetCounters);
                 }
             });
             ui.end_row();
 
-            ui.label(dim("Buffer"));
+            ui.label(dim(tr("Buffer")));
             ui.label(m.buffer_ms.map_or("–".into(), |ms| format!("{ms:.1} ms")));
             ui.end_row();
 
-            ui.label(dim("Priority"));
+            ui.label(dim(tr("Priority")));
             if m.realtime_denied {
                 ui.label(
-                    RichText::new("real-time priority refused by the system").color(theme.warn),
+                    RichText::new(tr("real-time priority refused by the system")).color(theme.warn),
                 )
-                .on_hover_text(
+                .on_hover_text(tr(
                     "Audio still plays, but other programs can interrupt it. On Linux, \
                          add yourself to the audio group (or install rtkit); see README.",
-                );
+                ));
             } else {
-                ui.label("real-time requested");
+                ui.label(tr("real-time requested"));
             }
             ui.end_row();
 
-            ui.label(dim("UI frame"));
+            ui.label(dim(tr("UI frame")));
             ui.label(format!(
                 "{:.1} ms average, {:.1} ms worst (last second)",
                 m.frame_ms.0, m.frame_ms.1
             ));
             ui.end_row();
 
-            ui.label(dim("Memory"));
+            ui.label(dim(tr("Memory")));
             ui.label(
                 m.memory_mb
                     .map_or("not reported on this platform".into(), |mb| {
@@ -412,23 +429,23 @@ pub fn perf_panel(ui: &mut Ui, theme: &GloomTheme, m: &PerfModel) -> Option<Perf
             );
             ui.end_row();
 
-            ui.label(dim("Startup"));
+            ui.label(dim(tr("Startup")));
             ui.label(
                 m.startup_ms
                     .map_or("–".into(), |ms| format!("{ms:.0} ms to the first frame")),
             );
             ui.end_row();
 
-            ui.label(dim("Renderer"));
+            ui.label(dim(tr("Renderer")));
             ui.label(&m.renderer);
             ui.end_row();
         });
     ui.add_space(6.0);
     ui.label(
-        RichText::new(
+        RichText::new(tr(
             "Late callbacks took longer than the audio they produced; each one is likely an \
              audible click. If they appear, raise the buffer size in Audio and MIDI.",
-        )
+        ))
         .color(theme.text_dim)
         .small(),
     );
@@ -444,7 +461,7 @@ pub fn privacy_panel(ui: &mut Ui, theme: &GloomTheme, enabled: bool, folder: &st
     let mut on = enabled;
     ui.checkbox(
         &mut on,
-        "Save a crash report when GloomTunes closes unexpectedly",
+        tr("Save a crash report when GloomTunes closes unexpectedly"),
     );
     ui.add_space(4.0);
     ui.add(
@@ -552,12 +569,12 @@ pub fn first_run(
             }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Text size").color(dim));
+                ui.label(RichText::new(tr("Text size")).color(dim));
                 let r = ui.add(
                     egui::Slider::new(&mut theme.font_size, FONT_SIZE_RANGE.0..=FONT_SIZE_RANGE.1)
                         .step_by(0.5)
                         .fixed_decimals(1)
-                        .suffix(" pt"),
+                        .suffix(tr(" pt")),
                 );
                 // Applied when the drag ends, so the slider does not move under the pointer.
                 if r.drag_stopped() || (r.changed() && !r.dragged()) {
@@ -598,32 +615,32 @@ pub fn first_run(
     ui.add_space(8.0);
     ui.separator();
     ui.horizontal(|ui| {
-        if state.page > 0 && ui.button("Back").clicked() {
+        if state.page > 0 && ui.button(tr("Back")).clicked() {
             state.page -= 1;
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if state.page + 1 < pages.len() {
                 if ui
-                    .button(RichText::new("Next").color(theme.accent))
+                    .button(RichText::new(tr("Next")).color(theme.accent))
                     .clicked()
                 {
                     state.page += 1;
                 }
                 if ui
-                    .button(RichText::new("Skip").color(theme.text_dim))
-                    .on_hover_text("Keep the defaults and open the demo song")
+                    .button(RichText::new(tr("Skip")).color(theme.text_dim))
+                    .on_hover_text(tr("Keep the defaults and open the demo song"))
                     .clicked()
                 {
                     out.push(FirstRunAction::Finish { demo: true });
                 }
             } else {
                 if ui
-                    .button(RichText::new("Open the demo song").color(theme.accent))
+                    .button(RichText::new(tr("Open the demo song")).color(theme.accent))
                     .clicked()
                 {
                     out.push(FirstRunAction::Finish { demo: true });
                 }
-                if ui.button("Start empty").clicked() {
+                if ui.button(tr("Start empty")).clicked() {
                     out.push(FirstRunAction::Finish { demo: false });
                 }
             }

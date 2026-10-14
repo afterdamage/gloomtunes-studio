@@ -51,7 +51,7 @@ pub use plugin::{
 };
 pub use project::{
     Adsr, BuiltInSample, Channel, ChannelId, Instrument, LoopMode, Note, Pattern, PatternId,
-    Project, SampleSource, SamplerSettings, MAX_CHANNELS, ROOT_KEY, STEP_TICKS,
+    Project, ProjectInfo, SampleSource, SamplerSettings, MAX_CHANNELS, ROOT_KEY, STEP_TICKS,
 };
 pub use recording::{AudioInput, Gap, MonitorMode, MAX_INPUT_CHANNELS};
 pub use sample::SampleData;
