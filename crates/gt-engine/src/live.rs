@@ -449,11 +449,16 @@ mod tests {
 
     #[test]
     fn sending_keeps_events_even_without_an_engine() {
+        // Start the clock first: if `send` started it, the stamp could read 0 on a coarse
+        // Windows timer.
+        clock_ns();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let before = clock_ns();
         let live = LiveInput::default();
         assert!(!live.send(LiveNote::on(60, 1.0)));
         let got = live.recent();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].port, KEYBOARD);
-        assert!(got[0].at_ns > 0, "stamped on arrival");
+        assert!(got[0].at_ns >= before && before > 0, "stamped on arrival");
     }
 }
