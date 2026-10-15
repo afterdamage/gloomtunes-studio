@@ -3,7 +3,7 @@
 //! [`FIRST_PAD_KEY`]` + 16·b + p`, so the channel rack's steps (on [`crate::ROOT_KEY`]) play
 //! the first pad and the piano roll reaches every pad.
 
-use crate::drum_synth::DrumVoice;
+use crate::drum_synth::{DrumModel, DrumVoice};
 use crate::project::{Adsr, SampleSource};
 use crate::ROOT_KEY;
 
@@ -164,6 +164,149 @@ impl DrumKit {
         k
     }
 
+    /// The factory drum synth kits (Prompt 28), by name: the default kit reshaped per style.
+    /// All original.
+    pub fn factory_kits() -> Vec<(&'static str, DrumKit)> {
+        // (name, kick [pitch, sweep, decay, click, drive, length], snare [pitch, noise,
+        //  noise decay, noise freq], hats [pitch, closed decay, open decay, noise freq],
+        //  clap [spread, noise decay, noise freq], toms and perc pitch scale)
+        #[allow(clippy::type_complexity)]
+        let table: [(&str, [f32; 6], [f32; 4], [f32; 4], [f32; 3], f32); 12] = [
+            (
+                "Gloom Default",
+                [48.0, 112.0, 0.16, 0.35, 2.2, 0.55],
+                [185.0, 0.9, 0.075, 1800.0],
+                [263.0, 0.022, 0.2, 7000.0],
+                [0.009, 0.07, 1100.0],
+                1.0,
+            ),
+            (
+                "Deep House",
+                [45.0, 90.0, 0.22, 0.2, 1.5, 0.6],
+                [200.0, 0.8, 0.09, 1500.0],
+                [300.0, 0.03, 0.28, 8000.0],
+                [0.011, 0.09, 1000.0],
+                0.9,
+            ),
+            (
+                "Hard Techno",
+                [52.0, 160.0, 0.14, 0.6, 5.0, 0.45],
+                [210.0, 1.0, 0.06, 2400.0],
+                [340.0, 0.015, 0.15, 9000.0],
+                [0.007, 0.06, 1400.0],
+                1.1,
+            ),
+            (
+                "Boom Bap Synth",
+                [55.0, 70.0, 0.12, 0.45, 1.2, 0.4],
+                [170.0, 1.0, 0.11, 1300.0],
+                [230.0, 0.035, 0.18, 6000.0],
+                [0.012, 0.1, 900.0],
+                0.85,
+            ),
+            (
+                "Long Boom",
+                [42.0, 60.0, 0.9, 0.15, 0.8, 1.8],
+                [190.0, 0.7, 0.08, 2000.0],
+                [320.0, 0.02, 0.25, 9500.0],
+                [0.01, 0.08, 1200.0],
+                0.8,
+            ),
+            (
+                "Electro Snap",
+                [60.0, 140.0, 0.1, 0.5, 2.5, 0.35],
+                [240.0, 0.95, 0.05, 2600.0],
+                [380.0, 0.012, 0.12, 10000.0],
+                [0.006, 0.05, 1600.0],
+                1.25,
+            ),
+            (
+                "Lo-Fi Dust",
+                [50.0, 80.0, 0.14, 0.25, 3.5, 0.45],
+                [160.0, 1.0, 0.1, 900.0],
+                [200.0, 0.03, 0.16, 4500.0],
+                [0.013, 0.09, 800.0],
+                0.9,
+            ),
+            (
+                "Trap Night",
+                [40.0, 75.0, 1.1, 0.3, 1.8, 2.0],
+                [220.0, 0.85, 0.07, 2200.0],
+                [360.0, 0.014, 0.22, 9000.0],
+                [0.008, 0.11, 1300.0],
+                1.0,
+            ),
+            (
+                "Minimal Click",
+                [58.0, 200.0, 0.08, 0.8, 1.0, 0.3],
+                [300.0, 0.6, 0.04, 3000.0],
+                [420.0, 0.01, 0.09, 11000.0],
+                [0.005, 0.04, 2000.0],
+                1.4,
+            ),
+            (
+                "Industrial",
+                [46.0, 180.0, 0.25, 0.7, 8.0, 0.6],
+                [150.0, 1.0, 0.13, 1200.0],
+                [250.0, 0.04, 0.3, 5000.0],
+                [0.015, 0.12, 700.0],
+                0.75,
+            ),
+            (
+                "Disco Tight",
+                [54.0, 100.0, 0.11, 0.3, 1.6, 0.4],
+                [230.0, 0.75, 0.06, 2100.0],
+                [310.0, 0.018, 0.2, 8500.0],
+                [0.009, 0.06, 1250.0],
+                1.15,
+            ),
+            (
+                "Dub Wide",
+                [44.0, 85.0, 0.3, 0.2, 1.4, 0.8],
+                [175.0, 0.85, 0.12, 1400.0],
+                [270.0, 0.028, 0.35, 6500.0],
+                [0.014, 0.13, 950.0],
+                0.8,
+            ),
+        ];
+        table
+            .iter()
+            .map(|&(name, kick, snare, hats, clap, toms)| {
+                let mut k = Self::synth_kit();
+                for pad in k.banks[0].iter_mut() {
+                    let Some(v) = pad.synth.as_mut() else {
+                        continue;
+                    };
+                    match (v.model, pad.name.as_str()) {
+                        (DrumModel::Kick, _) => {
+                            [v.pitch, v.sweep, v.decay, v.click, v.drive, v.length] = kick;
+                        }
+                        (DrumModel::Snare, _) => {
+                            v.pitch2 *= snare[0] / v.pitch;
+                            [v.pitch, v.noise, v.noise_decay, v.noise_freq] = snare;
+                        }
+                        (DrumModel::Hat, n) => {
+                            v.pitch = hats[0];
+                            v.decay = if n == "Open hat" { hats[2] } else { hats[1] };
+                            v.noise_freq = hats[3];
+                        }
+                        (DrumModel::Clap, _) => {
+                            v.tail_at *= clap[0] / v.spread;
+                            [v.spread, v.noise_decay, v.noise_freq] = clap;
+                        }
+                        (DrumModel::Tom | DrumModel::Perc, _) => {
+                            v.pitch *= toms;
+                            v.pitch2 *= toms;
+                            v.sweep *= toms;
+                        }
+                    }
+                    v.sanitize();
+                }
+                (name, k)
+            })
+            .collect()
+    }
+
     /// True when any pad plays a synthesized sound.
     pub fn has_synth(&self) -> bool {
         self.banks.iter().flatten().any(|p| p.synth.is_some())
@@ -265,6 +408,23 @@ impl DrumKit {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn factory_kits_start_from_the_default_and_differ() {
+        let kits = DrumKit::factory_kits();
+        assert_eq!(kits.len(), 12);
+        assert_eq!(kits[0].1, DrumKit::synth_kit());
+        let mut names: Vec<_> = kits.iter().map(|(n, _)| *n).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), kits.len());
+        for (i, (n, k)) in kits.iter().enumerate() {
+            let mut s = k.clone();
+            s.sanitize(crate::INSERTS);
+            assert_eq!(&s, k, "{n}");
+            assert!(kits[..i].iter().all(|(_, o)| o != k), "{n} repeats a kit");
+        }
+    }
+
     use super::*;
 
     #[test]

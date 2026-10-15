@@ -24,6 +24,7 @@
 
 pub mod bounce;
 pub mod formats;
+pub mod packs;
 pub mod smf;
 pub mod video;
 
@@ -901,6 +902,40 @@ mod tests {
     fn short_song() -> Project {
         // The demo's first two bars (the intro).
         Project::demo()
+    }
+
+    #[test]
+    fn every_factory_demo_renders_loud_and_clean() {
+        for demo in &gt_core::demos::DEMOS {
+            let project = (demo.build)();
+            // Two bars from the third marker, where every demo has most of its parts.
+            let start = project.playlist.markers.get(2).map_or(0, |m| m.at);
+            let settings = ExportSettings {
+                range: Range::Ticks {
+                    start,
+                    end: start + 2 * 3840,
+                },
+                tail: false,
+                ..ExportSettings::default()
+            };
+            let (samples, missing) = load_samples(&project, settings.sample_rate);
+            assert!(missing.is_empty(), "{}", demo.name);
+            let out = render(
+                &project,
+                &samples,
+                &settings,
+                &Progress::default(),
+                &mut Vec::new(),
+            )
+            .unwrap();
+            let audio = &out[0].audio;
+            let peak = audio.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+            let rms = (audio.iter().map(|x| x * x).sum::<f32>() / audio.len() as f32).sqrt();
+            assert!(audio.iter().all(|x| x.is_finite()), "{}", demo.name);
+            assert!(peak > 0.2 && peak <= 1.0, "{}: peak {peak}", demo.name);
+            eprintln!("{}: peak {peak:.2}, rms {rms:.3}", demo.name);
+            assert!(rms > 0.02, "{}: rms {rms}", demo.name);
+        }
     }
 
     #[test]

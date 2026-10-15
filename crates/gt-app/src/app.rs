@@ -125,6 +125,8 @@ pub struct GloomApp {
     packs: Vec<(String, PathBuf)>,
     /// Packs opened for the player panel, or why they did not open.
     opened_packs: HashMap<PathBuf, Result<gt_project::pack::Pack, String>>,
+    /// Set by the worker that builds missing factory packs when it finishes.
+    packs_built: Arc<std::sync::atomic::AtomicBool>,
     history: History,
     /// Label of the document change made since the last undo step, if any. Committed to the
     /// history once the gesture ends (no mouse button down, no text field focused).
@@ -336,6 +338,7 @@ impl GloomApp {
             drum_state: gt_ui::views::DrumPadState::default(),
             packs: list_packs(),
             opened_packs: HashMap::new(),
+            packs_built: build_factory_packs(),
             history,
             pending_edit: None,
             humanize_seed: 0x9E37_79B9_7F4A_7C15,
@@ -1862,6 +1865,11 @@ impl GloomApp {
                     self.dialog = Some(Dialog::NewProject { templates });
                 }
             }
+            Then::Demo(n) => {
+                if let Some(demo) = gt_core::demos::DEMOS.get(n) {
+                    self.replace_project((demo.build)(), None);
+                }
+            }
             Then::OpenPending => {
                 if let Some(path) = self.pending_open.take() {
                     self.open_path(&path);
@@ -2209,6 +2217,16 @@ impl GloomApp {
                     pick = then.map(FileCmd::Request);
                 }
             }
+            ui.menu_button(tr("Demo songs"), |ui| {
+                for (n, demo) in gt_core::demos::DEMOS.iter().enumerate() {
+                    if ui
+                        .button(format!("{} ({})", demo.name, tr(demo.style)))
+                        .clicked()
+                    {
+                        pick = Some(FileCmd::Request(Then::Demo(n)));
+                    }
+                }
+            });
             ui.separator();
             if ui
                 .add(egui::Button::new(tr("Save")).shortcut_text(self.keys(Command::Save)))
@@ -2614,6 +2632,9 @@ impl eframe::App for GloomApp {
                 _ => None,
             })
             .unwrap_or_default();
+        if self.packs_built.swap(false, Ordering::Relaxed) {
+            self.packs = list_packs();
+        }
         // The selected player's pack, opened before the channel is borrowed.
         let player_pack = self
             .project
@@ -2894,4 +2915,23 @@ fn list_packs() -> Vec<(String, PathBuf)> {
             (name, p)
         })
         .collect()
+}
+
+/// Builds the factory packs missing from the packs folder on a worker thread; the flag is set
+/// when it is done.
+fn build_factory_packs() -> Arc<std::sync::atomic::AtomicBool> {
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&done);
+    let spawned = std::thread::Builder::new()
+        .name("factory-packs".into())
+        .spawn(move || {
+            if let Err(e) = gt_export::packs::ensure_factory_packs(&packs_folder()) {
+                eprintln!("factory packs: {e}");
+            }
+            flag.store(true, Ordering::Relaxed);
+        });
+    if spawned.is_err() {
+        done.store(true, Ordering::Relaxed);
+    }
+    done
 }

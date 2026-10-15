@@ -180,7 +180,7 @@ pub fn vorbis_comment(tags: &Tags) -> Vec<u8> {
     out
 }
 
-fn flac_bytes(
+pub(crate) fn flac_bytes(
     audio: &[f32],
     settings: &ExportSettings,
     seed: u64,

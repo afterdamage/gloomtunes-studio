@@ -2935,6 +2935,22 @@ mod tests {
     }
 
     #[test]
+    fn the_factory_demos_round_trip() {
+        for demo in &gt_core::demos::DEMOS {
+            let p = (demo.build)();
+            let v = to_value(&p, None, &HashMap::new());
+            let back = from_value(v, None).unwrap();
+            assert!(
+                back.warnings.is_empty(),
+                "{}: {:?}",
+                demo.name,
+                back.warnings
+            );
+            assert_eq!(back.project, p, "{}", demo.name);
+        }
+    }
+
+    #[test]
     fn drum_synth_pads_round_trip() {
         let mut p = Project::empty();
         let id = p.add_drum_synth_channel("Synth kit").unwrap();

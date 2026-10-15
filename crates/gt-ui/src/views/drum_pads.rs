@@ -63,6 +63,21 @@ pub fn drum_pads(
                     out.changed = true;
                 }
             });
+            ui.menu_button(tr("Synth kits ▾"), |ui| {
+                ui.label(
+                    RichText::new(tr("Replaces bank A with a drum synth kit"))
+                        .color(theme.text_dim)
+                        .small(),
+                );
+                for (n, k) in DrumKit::factory_kits() {
+                    if ui.button(n).clicked() {
+                        kit.banks[0].clone_from(&k.banks[0]);
+                        st.bank = 0;
+                        out.changed = true;
+                        ui.close();
+                    }
+                }
+            });
             if ui
                 .button(tr("Fill from folder…"))
                 .on_hover_text(tr("Put a folder's samples on the pads, from the selected pad on (you can also drop files here)"))
