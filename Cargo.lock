@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "gt-app"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "cpal",
  "eframe",
@@ -2123,11 +2123,11 @@ dependencies = [
 
 [[package]]
 name = "gt-core"
-version = "1.0.0"
+version = "1.1.0"
 
 [[package]]
 name = "gt-dsp"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "criterion",
  "gt-core",
@@ -2138,7 +2138,7 @@ dependencies = [
 
 [[package]]
 name = "gt-engine"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "assert_no_alloc",
  "criterion",
@@ -2149,7 +2149,7 @@ dependencies = [
 
 [[package]]
 name = "gt-export"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "flacenc",
  "gt-core",
@@ -2165,7 +2165,7 @@ dependencies = [
 
 [[package]]
 name = "gt-plugin-host"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "clack-extensions",
  "clack-host",
@@ -2193,7 +2193,7 @@ dependencies = [
 
 [[package]]
 name = "gt-project"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "gt-core",
  "hound",
@@ -2206,7 +2206,7 @@ dependencies = [
 
 [[package]]
 name = "gt-test-plugin"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "clack-extensions",
  "clack-plugin",
@@ -2215,14 +2215,14 @@ dependencies = [
 
 [[package]]
 name = "gt-test-vst3"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "vst3",
 ]
 
 [[package]]
 name = "gt-ui"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "egui",
  "gt-core",
