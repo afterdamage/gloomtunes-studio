@@ -153,7 +153,7 @@ pub struct PluginOutput {
     /// Its name, as the plugin gives it.
     pub name: String,
     /// The mixer insert it plays into; None: not heard.
-    pub route: Option<u8>,
+    pub route: Option<u16>,
 }
 
 impl PluginRef {

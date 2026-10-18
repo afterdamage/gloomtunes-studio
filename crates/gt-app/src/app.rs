@@ -1131,15 +1131,24 @@ impl GloomApp {
             self.sent_mixer = Some(params);
         }
         let rate = self.rate() as f32;
+        let live = self.project.mixer.strips.len();
         for strip in 0..STRIPS {
+            if strip >= live && self.sent_fx[strip].iter().all(Option::is_none) {
+                continue;
+            }
             for k in 0..FX_SLOTS {
-                let want = self.project.mixer.strips[strip].slots[k].clone();
+                let want = self
+                    .project
+                    .mixer
+                    .strips
+                    .get(strip)
+                    .and_then(|s| s.slots[k].clone());
                 let have = self.sent_fx[strip][k].clone();
                 match (want, have) {
                     (None, None) => {}
                     (None, Some(_)) => {
                         if self.try_send(EngineCommand::SetEffect {
-                            strip: strip as u8,
+                            strip: strip as u16,
                             slot: k as u8,
                             effect: None,
                         }) {
@@ -1160,7 +1169,7 @@ impl GloomApp {
                         for (i, (&a, &b)) in w.params.iter().zip(&h.params).enumerate() {
                             if a != b
                                 && self.try_send(EngineCommand::SetEffectParam {
-                                    strip: strip as u8,
+                                    strip: strip as u16,
                                     slot: k as u8,
                                     index: i as u8,
                                     value: a,
@@ -1177,7 +1186,7 @@ impl GloomApp {
                         let effect = create_effect_with(&w, rate, file.as_deref());
                         let scope = effect.0.scope();
                         if self.try_send(EngineCommand::SetEffect {
-                            strip: strip as u8,
+                            strip: strip as u16,
                             slot: k as u8,
                             effect: Some(effect),
                         }) {
@@ -2657,6 +2666,7 @@ impl eframe::App for GloomApp {
         let mut swing_changed = false;
         let rack_swing = self.project.swing;
         let groups = gt_ui::views::rack_groups(&self.project);
+        self.drum_state.inserts = self.project.mixer.inserts();
         let layerable: Vec<(gt_core::ChannelId, String)> = self
             .project
             .channels

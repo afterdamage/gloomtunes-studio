@@ -711,6 +711,19 @@ sound identical; the golden export test stays.
   them anywhere), and 10 demo songs in 10 styles under File > Demo songs. 155 presets in all.
 - Limits: pack samples are one-shots (long notes on pads end with the sample).
 
+### Prompt 29 part 1: Dynamic mixer and free routing
+- 1 to 256 inserts (64 in a new project): "+" after the last strip adds one, the bin in the
+  strip header deletes one and renumbers everything that names a strip (D141).
+- The 4 send buses are gone: any insert sends to up to 8 other strips, each with a level and
+  pre- or post-fader, as long as the graph stays free of loops. Sends, a changed output and
+  the sidechain key are all delay-compensated; edits while playing crossfade.
+- Pan law on the master strip: 0 dB (the old balance), -3, -4.5 or -6 dB.
+- Schema 8: old files load as 68 inserts, the old buses as plain inserts fed by sends, and
+  render exactly as before (the golden hash is unchanged).
+- Tests: routing edits while playing without clicks, PDC over sends and sidechain keys,
+  pan-law levels, pre-fader sends, 256 inserts, insert removal, the v7 migration.
+- Limits: a send's pre-fader tap is after the effects and before fader and pan.
+
 ---
 
 ## v1.0 scope

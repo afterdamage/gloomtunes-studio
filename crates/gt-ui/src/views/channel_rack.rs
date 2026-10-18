@@ -133,6 +133,7 @@ pub fn channel_rack(
     let mut remove = None;
     let mut add = None;
     let steps = project.current_pattern().steps;
+    let inserts = project.mixer.inserts();
     let silenced: Vec<bool> = (0..project.channels.len())
         .map(|i| project.is_silenced(i))
         .collect();
@@ -166,6 +167,7 @@ pub fn channel_rack(
                     steps,
                     playhead: view.playhead_step,
                     others: &names,
+                    inserts,
                 };
                 let grid_x = ui
                     .horizontal(|ui| {
@@ -357,6 +359,8 @@ struct RowCtx<'a> {
     playhead: Option<u16>,
     /// Channels that can take a copy of the step row (not layers).
     others: &'a [(ChannelId, String)],
+    /// Inserts in the mixer.
+    inserts: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -431,7 +435,7 @@ fn channel_row(
         .add_sized(
             vec2(24.0, 18.0),
             egui::DragValue::new(&mut insert)
-                .range(0..=gt_core::INSERTS)
+                .range(0..=row.inserts)
                 .speed(0.1)
                 .custom_formatter(|v, _| {
                     if v < 0.5 {

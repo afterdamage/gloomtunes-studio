@@ -11,7 +11,7 @@
 //! slots by index (they are fixed positions on the mixer).
 
 use crate::effects::EffectKind;
-use crate::mixer::{MixerStrip, StripKind, FX_SLOTS, MASTER, SENDS, STRIPS};
+use crate::mixer::{MixerStrip, StripKind, FX_SLOTS, MASTER, STRIPS};
 use crate::param::ParamCurve::{Linear, Power};
 use crate::param::ParamUnit::{Gain, Pan, Percent, Semitones, SignedPercent};
 use crate::param::{ParamCurve, ParamInfo, ParamUnit};
@@ -158,7 +158,7 @@ pub enum StripParam {
     Volume,
     /// The balance knob.
     Pan,
-    /// Level of one of the four sends (inserts only).
+    /// Level of the strip's send to another strip (inserts only; the send must exist).
     Send(usize),
 }
 
@@ -202,7 +202,7 @@ pub enum ParamId {
     },
     /// A mixer strip's fader, balance or send.
     Strip {
-        /// Strip index ([`MASTER`], an insert or a send bus).
+        /// Strip index ([`MASTER`] or an insert).
         strip: usize,
         /// Which control.
         param: StripParam,
@@ -231,6 +231,44 @@ pub enum ParamId {
 }
 
 impl ParamId {
+    /// The same parameter with its strip indices passed through `f` (which returns `None` for a
+    /// strip that is gone; the parameter is then gone too). Others come back unchanged.
+    pub fn remap_strips(self, f: impl Fn(usize) -> Option<usize>) -> Option<Self> {
+        Some(match self {
+            Self::Strip { strip, param } => Self::Strip {
+                strip: f(strip)?,
+                param: match param {
+                    StripParam::Send(to) => StripParam::Send(f(to)?),
+                    p => p,
+                },
+            },
+            Self::Effect {
+                strip,
+                slot,
+                kind,
+                index,
+            } => Self::Effect {
+                strip: f(strip)?,
+                slot,
+                kind,
+                index,
+            },
+            Self::Plugin {
+                owner: PluginOwner::Effect { strip, slot },
+                plugin,
+                id,
+            } => Self::Plugin {
+                owner: PluginOwner::Effect {
+                    strip: f(strip)?,
+                    slot,
+                },
+                plugin,
+                id,
+            },
+            p => p,
+        })
+    }
+
     /// A strip's fader.
     pub fn strip_volume(strip: usize) -> Self {
         Self::Strip {
@@ -341,7 +379,7 @@ impl ParamId {
                 let param = match rest {
                     ["volume"] => StripParam::Volume,
                     ["pan"] => StripParam::Pan,
-                    ["send", k] => StripParam::Send(num(k).filter(|&k| k < SENDS)?),
+                    ["send", k] => StripParam::Send(num(k).filter(|&k| k < STRIPS)?),
                     ["fx", slot, "plugin", h, k] => {
                         return Some(Self::Plugin {
                             owner: PluginOwner::Effect {
@@ -400,7 +438,7 @@ impl ParamId {
             Self::Strip { param, .. } => match param {
                 StripParam::Volume => "Volume".to_owned(),
                 StripParam::Pan => "Pan".to_owned(),
-                StripParam::Send(k) => format!("Send {}", k + 1),
+                StripParam::Send(k) => format!("Send to {}", StripKind::of(k).short()),
             },
             Self::Effect { kind, index, .. } => {
                 let Some(p) = kind.params().get(index) else {
@@ -500,7 +538,7 @@ impl ParamId {
                     StripParam::Volume => Some(s.volume),
                     StripParam::Pan => Some(s.pan),
                     StripParam::Send(k) if matches!(StripKind::of(strip), StripKind::Insert(_)) => {
-                        s.sends.get(k).copied()
+                        s.sends.iter().find(|x| x.to == k).map(|x| x.level)
                     }
                     StripParam::Send(_) => None,
                 }
@@ -594,7 +632,11 @@ impl ParamId {
                 match param {
                     StripParam::Volume => s.volume = v,
                     StripParam::Pan => s.pan = v,
-                    StripParam::Send(k) => s.sends[k] = v,
+                    StripParam::Send(k) => {
+                        if let Some(x) = s.send_mut(k) {
+                            x.level = v;
+                        }
+                    }
                 }
                 true
             }
@@ -636,7 +678,7 @@ impl ParamId {
         for ch in &project.channels {
             out.extend(Self::of_channel(ch));
         }
-        for strip in 0..STRIPS {
+        for strip in 0..project.mixer.strips.len() {
             out.extend(Self::of_strip(project, strip));
         }
         out
@@ -679,13 +721,13 @@ impl ParamId {
     /// The parameters of one mixer strip, its sends and the effects in its slots.
     pub fn of_strip(project: &Project, strip: usize) -> Vec<ParamId> {
         let mut out = vec![Self::strip_volume(strip), Self::strip_pan(strip)];
-        if matches!(StripKind::of(strip), StripKind::Insert(_)) {
-            out.extend((0..SENDS).map(|k| Self::Strip {
-                strip,
-                param: StripParam::Send(k),
-            }));
-        }
         if let Some(s) = project.mixer.strips.get(strip) {
+            if matches!(StripKind::of(strip), StripKind::Insert(_)) {
+                out.extend(s.sends.iter().map(|x| Self::Strip {
+                    strip,
+                    param: StripParam::Send(x.to),
+                }));
+            }
             for (slot, fx) in s.slots.iter().enumerate() {
                 if let Some(p) = fx.as_ref().and_then(|f| f.plugin.as_deref()) {
                     out.extend(Self::of_plugin(PluginOwner::Effect { strip, slot }, p));
@@ -833,9 +875,14 @@ mod tests {
         assert!(!pitch.set(&mut p, 3.0));
         let send_of_master = ParamId::Strip {
             strip: MASTER,
-            param: StripParam::Send(0),
+            param: StripParam::Send(1),
         };
         assert!(send_of_master.get(&p).is_none());
+        let no_send = ParamId::Strip {
+            strip: 1,
+            param: StripParam::Send(2),
+        };
+        assert!(!no_send.is_valid(&p), "insert 1 has no send to insert 2");
         let gone = ParamId::Channel {
             channel: ChannelId(9999),
             param: ChannelParam::Volume,
@@ -847,7 +894,7 @@ mod tests {
             "channel/x/volume",
             "channel/1/nope",
             "mixer/999/volume",
-            "mixer/1/send/9",
+            "mixer/1/send/999",
             "mixer/1/fx/2/eq/zzz",
             "mixer/1/fx/99/eq/b1.freq",
         ] {

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use crate::effects::{EffectKind, EffectSlot};
 use crate::midi::ControlPoint;
-use crate::mixer::{Mixer, StripKind, FIRST_SEND, FX_SLOTS, INSERTS, MASTER};
+use crate::mixer::{Mixer, StripKind, FX_SLOTS, MASTER};
 use crate::modulation::{ModSourceKind, Modulator, ModulatorId, MAX_MODULATORS};
 use crate::params::ParamId;
 use crate::playlist::{AutoPoint, Automation, ClipKind, Curve, Playlist};
@@ -811,7 +811,7 @@ impl Project {
             self.modulator_mut(id).expect("just added").amount = 0.3;
         }
         if let Some(id) = self.add_modulator(
-            ParamId::strip_volume(FIRST_SEND),
+            ParamId::strip_volume(crate::mixer::DEMO_REVERB),
             ModSourceKind::default_follower(kick),
         ) {
             self.modulator_mut(id).expect("just added").amount = -0.35;
@@ -880,7 +880,7 @@ impl Project {
         pl.add_clip(t_main, 2 * BAR, 4 * BAR, ClipKind::Pattern(main));
         pl.add_clip(t_break, 6 * BAR, 2 * BAR, ClipKind::Pattern(brk));
         pl.add_clip(t_main, 8 * BAR, 4 * BAR, ClipKind::Pattern(main));
-        let delay = ParamId::strip_volume(FIRST_SEND + 1);
+        let delay = ParamId::strip_volume(crate::mixer::DEMO_DELAY);
         let cutoff = ParamId::Synth {
             channel: bass,
             param: SynthParam::Cutoff,
@@ -958,8 +958,7 @@ impl Project {
         let bass = self
             .channel_index(bass)
             .map_or(MASTER, |i| self.channels[i].insert);
-        let reverb = FIRST_SEND;
-        let delay = FIRST_SEND + 1;
+        let (reverb, delay) = self.mixer.fx_returns();
         let m = &mut self.mixer;
         m.strips[reverb].name = "Reverb".to_owned();
         m.strips[reverb].slots[0] = Some(
@@ -976,9 +975,9 @@ impl Project {
                 .with("feedback", 0.35),
         );
         m.strips[delay].volume = 0.7;
-        m.strips[snare].sends[0] = 0.35;
-        m.strips[clap].sends[0] = 0.45;
-        m.strips[hat].sends[1] = 0.25;
+        m.add_send(snare, reverb, 0.35, false);
+        m.add_send(clap, reverb, 0.45, false);
+        m.add_send(hat, delay, 0.25, false);
         m.strips[hat].pan = 0.2;
         m.strips[bass].slots[0] = Some(
             EffectSlot::new(EffectKind::Eq)
@@ -1030,6 +1029,8 @@ impl Project {
     pub fn sanitize(&mut self) {
         let fin =
             |v: f32, lo: f32, hi: f32, d: f32| if v.is_finite() { v.clamp(lo, hi) } else { d };
+        self.mixer.sanitize();
+        let inserts = self.mixer.inserts();
         // Channels: unique ids, at most MAX_CHANNELS, values in range.
         let mut seen = std::collections::BTreeSet::new();
         self.channels.retain(|c| seen.insert(c.id));
@@ -1037,7 +1038,7 @@ impl Project {
         for c in &mut self.channels {
             c.volume = fin(c.volume, 0.0, Channel::MAX_VOLUME, Channel::DEFAULT_VOLUME);
             c.pan = fin(c.pan, -1.0, 1.0, 0.0);
-            if c.insert > INSERTS {
+            if c.insert > inserts {
                 c.insert = MASTER;
             }
             match &mut c.instrument {
@@ -1048,7 +1049,7 @@ impl Project {
                 }
                 Instrument::Synth(p) => p.sanitize(),
                 Instrument::Plugin(p) => p.sanitize(),
-                Instrument::Drums(k) => k.sanitize(INSERTS),
+                Instrument::Drums(k) => k.sanitize(inserts),
                 Instrument::Layer(_) => {}
             }
             c.swing = c.swing.filter(|s| s.is_finite()).map(|s| s.clamp(0.0, 1.0));
@@ -1108,9 +1109,13 @@ impl Project {
             self.current_pattern = self.patterns[0].id;
         }
         self.swing = fin(self.swing, 0.0, 1.0, 0.0);
-        self.mixer.sanitize();
         let patterns: Vec<PatternId> = self.patterns.iter().map(|p| p.id).collect();
         self.playlist.sanitize(|id| patterns.contains(&id));
+        for t in &mut self.playlist.tracks {
+            if t.insert > inserts {
+                t.insert = MASTER;
+            }
+        }
         // Modulators: unique ids, valid targets kept even if they no longer resolve (a deleted
         // effect slot), at most MAX_MODULATORS.
         let mut seen = std::collections::BTreeSet::new();
@@ -1275,7 +1280,7 @@ impl Project {
         }
         let id = ChannelId(self.next_id());
         // Each new channel gets the first insert no other channel uses, named after it.
-        let insert = (1..=INSERTS)
+        let insert = (1..=self.mixer.inserts())
             .find(|&i| self.channels.iter().all(|c| c.insert != i))
             .unwrap_or(MASTER);
         if insert != MASTER {
@@ -1316,6 +1321,78 @@ impl Project {
             p.notes.remove(&id);
             p.controls.remove(&id);
         }
+    }
+
+    /// Appends a mixer insert; `None` when there are [`crate::MAX_INSERTS`].
+    pub fn add_insert(&mut self) -> Option<usize> {
+        self.mixer.add_insert()
+    }
+
+    /// Deletes mixer insert `i` (Prompt 29). Inserts after it move down one, and everything
+    /// that names a strip follows: channels, pads and plugin outputs, tracks, routing,
+    /// automation, modulators and MIDI bindings. What played into `i` now plays into the
+    /// master; automation, modulators and bindings of `i` itself are removed. False when `i`
+    /// is not an insert or is the last one.
+    pub fn remove_insert(&mut self, i: usize) -> bool {
+        if !self.mixer.remove_insert(i) {
+            return false;
+        }
+        let strip = |s: usize| Mixer::remap(i, s);
+        let to = |s: usize| strip(s).unwrap_or(MASTER);
+        for c in &mut self.channels {
+            c.insert = to(c.insert);
+            if let Some(k) = c.drums_mut() {
+                for p in k.banks.iter_mut().flatten() {
+                    p.output = p.output.and_then(strip);
+                }
+            }
+            if let Some(p) = c.plugin_mut() {
+                for o in &mut p.outputs {
+                    o.route = o
+                        .route
+                        .and_then(|r| strip(usize::from(r)))
+                        .map(|r| r as u16);
+                }
+            }
+        }
+        for t in &mut self.playlist.tracks {
+            t.insert = to(t.insert);
+        }
+        let keep = |a: &mut crate::Automation| match a.target.remap_strips(strip) {
+            Some(t) => {
+                a.target = t;
+                true
+            }
+            None => false,
+        };
+        self.playlist.clips.retain_mut(|c| match &mut c.kind {
+            ClipKind::Automation(a) => keep(a),
+            _ => true,
+        });
+        for p in &mut self.patterns {
+            p.automation.retain_mut(keep);
+        }
+        self.modulators.retain_mut(|m| {
+            if let crate::ModSourceKind::Follower { strip: s, .. } = &mut m.source {
+                *s = to(*s);
+            }
+            match m.target.remap_strips(strip) {
+                Some(t) => {
+                    m.target = t;
+                    true
+                }
+                None => false,
+            }
+        });
+        self.midi_map
+            .retain_mut(|b| match b.param.remap_strips(strip) {
+                Some(t) => {
+                    b.param = t;
+                    true
+                }
+                None => false,
+            });
+        true
     }
 
     /// Index of a channel in the rack.
@@ -1633,5 +1710,40 @@ mod tests {
         p.remove_channel(id);
         assert_eq!(p.channels.len(), 4);
         assert!(!p.current_pattern().notes.contains_key(&id));
+    }
+
+    #[test]
+    fn removing_an_insert_renumbers_everything_that_names_a_strip() {
+        let mut p = Project::demo();
+        let (reverb, delay) = (crate::mixer::DEMO_REVERB, crate::mixer::DEMO_DELAY);
+        let kick = p.channels[0].insert;
+        let hat = p.channels.iter().find(|c| c.name == "Hat").unwrap().insert;
+        assert!(p.mixer.strips[hat].sends.iter().any(|s| s.to == delay));
+        let mods = p.modulators.len();
+        p.midi_map.push(crate::MidiBinding {
+            channel: 0,
+            cc: 7,
+            param: ParamId::strip_volume(delay),
+        });
+        assert!(p.remove_insert(reverb));
+        assert_eq!(p.mixer.inserts(), delay - 1);
+        // The delay moved down into the reverb's place, with everything pointing at it.
+        assert_eq!(p.mixer.strips[reverb].name, "Delay");
+        assert!(p.mixer.strips[hat].sends.iter().any(|s| s.to == reverb));
+        assert!(p
+            .mixer
+            .strips
+            .iter()
+            .all(|s| s.sends.iter().all(|x| x.to < delay)));
+        assert_eq!(
+            p.midi_map.last().unwrap().param,
+            ParamId::strip_volume(reverb)
+        );
+        // The follower on the reverb's volume went with it.
+        assert_eq!(p.modulators.len(), mods - 1);
+        assert_eq!(p.channels[0].insert, kick);
+        assert!(!p.remove_insert(MASTER));
+        p.sanitize();
+        assert!(p.mixer.processing_order().is_some());
     }
 }

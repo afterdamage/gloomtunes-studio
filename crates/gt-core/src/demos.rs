@@ -3,7 +3,7 @@
 //! anywhere. All CC0.
 
 use crate::effects::{EffectKind, EffectSlot};
-use crate::mixer::{FIRST_SEND, FX_SLOTS, MASTER};
+use crate::mixer::{DEMO_DELAY, DEMO_REVERB, FX_SLOTS, MASTER};
 use crate::pads::DrumKit;
 use crate::playlist::ClipKind;
 use crate::project::{ChannelId, Note, PatternId, Project, STEP_TICKS};
@@ -130,21 +130,22 @@ impl Song {
         // The empty project's first pattern is replaced by the song's own.
         p.patterns.clear();
         let m = &mut p.mixer;
-        m.strips[FIRST_SEND].name = "Reverb".to_owned();
-        m.strips[FIRST_SEND].slots[0] = Some(
+        let (reverb, delay) = m.fx_returns();
+        m.strips[reverb].name = "Reverb".to_owned();
+        m.strips[reverb].slots[0] = Some(
             EffectSlot::new(EffectKind::Reverb)
                 .with("decay", 2.4)
                 .with("mix", 1.0)
                 .with("damping", 6000.0),
         );
-        m.strips[FIRST_SEND + 1].name = "Delay".to_owned();
-        m.strips[FIRST_SEND + 1].slots[0] = Some(
+        m.strips[delay].name = "Delay".to_owned();
+        m.strips[delay].slots[0] = Some(
             EffectSlot::new(EffectKind::Delay)
                 .with("time", 6.0)
                 .with("mix", 1.0)
                 .with("feedback", 0.4),
         );
-        m.strips[FIRST_SEND + 1].volume = 0.7;
+        m.strips[delay].volume = 0.7;
         m.strips[MASTER].slots[FX_SLOTS - 1] =
             Some(EffectSlot::new(EffectKind::Limiter).with("ceiling", -0.3));
         Self {
@@ -191,8 +192,12 @@ impl Song {
     /// Reverb and delay send levels of `ch`'s insert.
     fn sends(&mut self, ch: ChannelId, reverb: f32, delay: f32) {
         let i = self.insert(ch);
-        self.p.mixer.strips[i].sends[0] = reverb;
-        self.p.mixer.strips[i].sends[1] = delay;
+        let m = &mut self.p.mixer;
+        for (to, level) in [(DEMO_REVERB, reverb), (DEMO_DELAY, delay)] {
+            if level > 0.0 {
+                m.add_send(i, to, level, false);
+            }
+        }
     }
 
     /// A new pattern of `bars` bars.

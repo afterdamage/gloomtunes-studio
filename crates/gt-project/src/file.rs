@@ -2,7 +2,7 @@
 //! audio files the project uses.
 //!
 //! ```text
-//! project.json          { "format": "gloomtunes-project", "schema_version": 6, "project": {...} }
+//! project.json          { "format": "gloomtunes-project", "schema_version": 8, "project": {...} }
 //! samples/<hash>-<name> embedded copies of the audio files, byte for byte (optional)
 //! plugins/<hash>.bin    the saved state of each third-party plugin, as the plugin wrote it
 //! ```
@@ -34,11 +34,11 @@ use gt_core::{
     Adsr, AudioEdit, AudioInput, AudioTake, AutoPoint, Automation, BuiltInSample, Channel,
     ChannelId, Clip, ClipId, ClipKind, ClipStretch, Curve, DrumKit, EffectSlot, Fade, FadeCurve,
     Frozen, Gap, Instrument, Interp, KeyZone, LfoRate, LfoShape, LfoTarget, LoopMode, Marker,
-    MidiControl, ModSourceKind, Modulator, ModulatorId, Note, Pad, PadLayer, ParamId, Pattern,
-    PatternId, PluginFormat, PluginInstanceId, PluginKind, PluginParamInfo, PluginRef, Project,
-    SampleSource, SamplerFilter, SamplerFilterMode, SamplerLfo, SamplerSettings, SigChange,
-    StretchMode, TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, Track, TrackId, WarpMarker,
-    FX_SLOTS, SENDS,
+    MidiControl, ModSourceKind, Modulator, ModulatorId, Note, Pad, PadLayer, PanLaw, ParamId,
+    Pattern, PatternId, PluginFormat, PluginInstanceId, PluginKind, PluginParamInfo, PluginRef,
+    Project, SampleSource, SamplerFilter, SamplerFilterMode, SamplerLfo, SamplerSettings,
+    SigChange, StretchMode, TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap, Track, TrackId,
+    WarpMarker, FX_SLOTS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -438,6 +438,9 @@ struct ProjectDto {
     channels: Vec<ChannelDto>,
     patterns: Vec<PatternDto>,
     mixer: Vec<StripDto>,
+    /// Mixer pan law ("-3"; schema 8), left out at 0 dB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pan_law: Option<String>,
     playlist: PlaylistDto,
     modulators: Vec<ModulatorDto>,
     /// MIDI learn bindings (added in Step 10; absent in older files).
@@ -820,7 +823,7 @@ struct PluginDto {
 struct PluginOutputDto {
     name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    route: Option<u8>,
+    route: Option<u16>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1012,8 +1015,9 @@ struct StripDto {
     phase_invert: bool,
     #[serde(default)]
     output: usize,
+    /// Sends to other strips (schema 8; see `migrate::v7_to_v8`).
     #[serde(default)]
-    sends: Vec<f32>,
+    sends: Vec<SendDto>,
     #[serde(default)]
     sidechain: Option<usize>,
     #[serde(default)]
@@ -1021,6 +1025,14 @@ struct StripDto {
     /// Live device input ("1", "1-2"; schema 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     input: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SendDto {
+    to: usize,
+    level: f32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pre: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1493,7 +1505,15 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
             solo: s.solo,
             phase_invert: s.phase_invert,
             output: s.output,
-            sends: s.sends.to_vec(),
+            sends: s
+                .sends
+                .iter()
+                .map(|x| SendDto {
+                    to: x.to,
+                    level: x.level,
+                    pre: x.pre,
+                })
+                .collect(),
             sidechain: s.sidechain,
             input: s.input.map(AudioInput::key),
             slots: s
@@ -1655,6 +1675,7 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
         channels,
         patterns,
         mixer,
+        pan_law: (p.mixer.pan_law != PanLaw::Zero).then(|| p.mixer.pan_law.key().to_owned()),
         playlist,
         modulators,
         midi_map: p
@@ -2063,6 +2084,13 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
     }
     p.current_pattern = PatternId(d.current_pattern);
 
+    let strips = d.mixer.len().clamp(2, gt_core::STRIPS);
+    p.mixer.strips = (0..strips).map(gt_core::MixerStrip::new).collect();
+    p.mixer.pan_law = d
+        .pan_law
+        .as_deref()
+        .and_then(PanLaw::from_key)
+        .unwrap_or_default();
     for (strip, sd) in p.mixer.strips.iter_mut().zip(d.mixer) {
         strip.name = sd.name;
         strip.volume = sd.volume;
@@ -2071,9 +2099,16 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
         strip.solo = sd.solo;
         strip.phase_invert = sd.phase_invert;
         strip.output = sd.output;
-        for (to, from) in strip.sends.iter_mut().zip(sd.sends.iter().take(SENDS)) {
-            *to = *from;
-        }
+        strip.sends = sd
+            .sends
+            .iter()
+            .take(gt_core::MAX_SENDS)
+            .map(|x| gt_core::Send {
+                to: x.to,
+                level: x.level,
+                pre: x.pre,
+            })
+            .collect();
         strip.sidechain = sd.sidechain;
         strip.input = sd.input.as_deref().and_then(AudioInput::from_key);
         for (slot, ed) in strip

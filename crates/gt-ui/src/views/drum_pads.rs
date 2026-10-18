@@ -5,7 +5,7 @@
 
 use egui::{vec2, Color32, RichText, Sense, Stroke, Ui};
 use gt_core::pads::{CHOKE_GROUPS, MAX_BANKS, PADS_PER_BANK};
-use gt_core::{DrumKit, DrumModel, DrumVoice, Pad, INSERTS};
+use gt_core::{DrumKit, DrumModel, DrumVoice, Pad};
 
 use crate::i18n::tr;
 use crate::widgets::labeled_knob;
@@ -18,6 +18,8 @@ pub struct DrumPadState {
     pub bank: usize,
     /// Selected pad in it.
     pub pad: usize,
+    /// Inserts in the mixer (pad outputs).
+    pub inserts: usize,
 }
 
 /// What the panel asks of the app.
@@ -42,6 +44,7 @@ pub fn drum_pads(
     st: &mut DrumPadState,
 ) -> DrumPadOut {
     let mut out = DrumPadOut::default();
+    let inserts = st.inserts;
     st.bank = st.bank.min(kit.banks.len().saturating_sub(1));
     st.pad = st.pad.min(PADS_PER_BANK - 1);
     ui.horizontal(|ui| {
@@ -93,7 +96,7 @@ pub fn drum_pads(
         });
         pad_grid(ui, theme, kit, st, &mut out);
         ui.separator();
-        pad_editor(ui, theme, &mut kit.banks[st.bank][st.pad], &mut out);
+        pad_editor(ui, theme, &mut kit.banks[st.bank][st.pad], inserts, &mut out);
     });
     if let Some(v) = &mut kit.banks[st.bank][st.pad].synth {
         ui.separator();
@@ -181,7 +184,13 @@ fn pad_grid(
     });
 }
 
-fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadOut) {
+fn pad_editor(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    pad: &mut Pad,
+    inserts: usize,
+    out: &mut DrumPadOut,
+) {
     let dim = |t: &str| RichText::new(t).color(theme.text_dim);
     ui.vertical(|ui| {
         ui.set_width(200.0);
@@ -225,7 +234,7 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
                 ));
         });
         if pad.synth.is_some() {
-            pad_settings(ui, theme, pad, out);
+            pad_settings(ui, theme, pad, inserts, out);
             return;
         }
         let mut remove = None;
@@ -280,13 +289,19 @@ fn pad_editor(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadO
                 out.load = Some(true);
             }
         });
-        pad_settings(ui, theme, pad, out);
+        pad_settings(ui, theme, pad, inserts, out);
     });
     pad_knobs(ui, theme, pad, out);
 }
 
 /// Choke group and output of a pad.
-fn pad_settings(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPadOut) {
+fn pad_settings(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    pad: &mut Pad,
+    inserts: usize,
+    out: &mut DrumPadOut,
+) {
     let dim = |t: &str| RichText::new(t).color(theme.text_dim);
     {
         ui.horizontal(|ui| {
@@ -323,7 +338,7 @@ fn pad_settings(ui: &mut Ui, theme: &GloomTheme, pad: &mut Pad, out: &mut DrumPa
                     out.changed |= ui
                         .selectable_value(&mut pad.output, None, tr("Channel"))
                         .changed();
-                    for o in 1..=INSERTS {
+                    for o in 1..=inserts {
                         out.changed |= ui
                             .selectable_value(&mut pad.output, Some(o), format!("Insert {o}"))
                             .changed();

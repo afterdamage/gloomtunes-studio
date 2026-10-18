@@ -38,7 +38,10 @@ pub use effects::{EffectKind, EffectSlot};
 pub use midi::{
     ControlKind, ControlPoint, MidiBinding, MidiRoute, MAX_LEARN_CC, MAX_MIDI_BINDINGS,
 };
-pub use mixer::{Mixer, MixerStrip, StripKind, FX_SLOTS, INSERTS, MASTER, SENDS, STRIPS};
+pub use mixer::{
+    Mixer, MixerStrip, PanLaw, Send, StripKind, DEFAULT_INSERTS, FX_SLOTS, MASTER, MAX_INSERTS,
+    MAX_SENDS, STRIPS,
+};
 pub use modulation::{
     LfoRate, LfoShape, MidiControl, ModSourceKind, Modulator, ModulatorId, MAX_MODULATORS,
 };

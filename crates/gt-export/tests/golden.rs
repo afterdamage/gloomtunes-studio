@@ -7,7 +7,9 @@
 //! hash. When a change is meant to alter the sound, listen to the new export, then update the
 //! hashes: the failure message prints the new one.
 //!
-//! `tests/fixtures/reference.gloom` is the demo project saved with schema version 1. Regenerate
+//! `tests/fixtures/reference.gloom` is the demo project saved with schema version 1, so this is
+//! also the test that old files render identically after every migration (Prompt 29 replaced
+//! its four send buses with inserts fed by sends; the hash did not move). Regenerate
 //! it only together with a new schema version (the old one must keep loading):
 //! `cargo test -p gt-export --test golden -- --ignored regenerate`.
 
@@ -49,6 +51,13 @@ fn reference_project_exports_to_the_stored_hash() {
     let loaded = file::load(&fixture(), &dir.join("samples")).expect("fixture loads");
     assert!(loaded.missing.is_empty() && loaded.warnings.is_empty());
     assert_eq!(loaded.schema_version, 1);
+    // The old send buses are inserts 65 to 68 now, fed by sends.
+    let mixer = &loaded.project.mixer;
+    assert_eq!(mixer.inserts(), 68);
+    assert!(mixer
+        .strips
+        .iter()
+        .any(|s| s.sends.iter().any(|x| x.to == 65)));
     // Bars 3 and 4 (the drop: drums, bass, filter automation, LFO and follower), 16-bit with
     // dither, the tail rendered until silent.
     let settings = ExportSettings {

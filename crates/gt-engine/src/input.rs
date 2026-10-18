@@ -49,7 +49,7 @@ pub struct InputRoute {
     /// The input.
     pub input: AudioInput,
     /// Mixer strip it is added to (before the strip's effects).
-    pub strip: u8,
+    pub strip: u16,
     /// `None`: always (a mixer insert's input). `Some(mode)`: an armed track's input, heard
     /// as the monitoring mode says.
     pub armed: Option<MonitorMode>,

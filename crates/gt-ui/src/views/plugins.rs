@@ -145,7 +145,7 @@ fn plugin_routing(
     actions: &mut Vec<PluginAction>,
 ) {
     let id = plugin.instance;
-    let strip = |s: Option<u8>| {
+    let strip = |s: Option<u16>| {
         s.and_then(|s| view.strips.get(usize::from(s)).cloned())
             .unwrap_or_else(|| "Off".to_owned())
     };
@@ -162,7 +162,7 @@ fn plugin_routing(
                         .changed();
                     for (i, name) in view.strips.iter().enumerate() {
                         routed |= ui
-                            .selectable_value(&mut out.route, Some(i as u8), name)
+                            .selectable_value(&mut out.route, Some(i as u16), name)
                             .changed();
                     }
                 })

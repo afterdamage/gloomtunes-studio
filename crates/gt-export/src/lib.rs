@@ -670,7 +670,7 @@ fn load_engine(
                     h,
                     p,
                     EngineCommand::SetEffect {
-                        strip: si as u8,
+                        strip: si as u16,
                         slot: k as u8,
                         effect: Some(create_effect_with(slot, rate as f32, file.as_ref())),
                     },
@@ -721,7 +721,7 @@ fn render_one(
     progress: &Progress,
     (job, jobs): (u32, u32),
     plugins: &mut Vec<Box<PluginBox>>,
-    tap: Option<(u8, gt_engine::Tap)>,
+    tap: Option<(u16, gt_engine::Tap)>,
 ) -> Result<Vec<f32>, ExportError> {
     let rate = settings.sample_rate;
     let (mut h, mut p) = create(EngineConfig {

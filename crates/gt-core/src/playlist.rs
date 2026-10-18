@@ -918,7 +918,7 @@ impl Playlist {
             }
         }
         for t in &mut self.tracks {
-            if t.insert >= crate::mixer::FIRST_SEND {
+            if t.insert >= crate::mixer::STRIPS {
                 t.insert = MASTER;
             }
             if t.input.is_some_and(|x| !x.fits(crate::MAX_INPUT_CHANNELS)) {
@@ -1122,7 +1122,7 @@ mod tests {
         let a = p.add_clip(t, 0, 10, pat());
         p.add_clip(t, 0, 10, ClipKind::Pattern(PatternId(1)));
         p.clip_mut(a).unwrap().offset = -5;
-        p.tracks[0].insert = 67;
+        p.tracks[0].insert = 999;
         p.add_marker(50, "b");
         p.add_marker(10, "a");
         p.sanitize(|id| id == PatternId(7));

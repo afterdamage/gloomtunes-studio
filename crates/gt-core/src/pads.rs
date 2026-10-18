@@ -419,7 +419,7 @@ mod tests {
         assert_eq!(names.len(), kits.len());
         for (i, (n, k)) in kits.iter().enumerate() {
             let mut s = k.clone();
-            s.sanitize(crate::INSERTS);
+            s.sanitize(crate::DEFAULT_INSERTS);
             assert_eq!(&s, k, "{n}");
             assert!(kits[..i].iter().all(|(_, o)| o != k), "{n} repeats a kit");
         }

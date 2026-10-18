@@ -44,7 +44,7 @@ fn rig(recording: bool) -> Rig {
                 .enumerate()
                 .map(|(k, &input)| InputRoute {
                     input,
-                    strip: 1 + k as u8,
+                    strip: 1 + k as u16,
                     armed: Some(MonitorMode::Mixer),
                 })
                 .collect(),

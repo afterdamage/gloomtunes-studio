@@ -78,8 +78,8 @@ impl GloomApp {
                     .engine()
                     .map_or(0, |e| e.telemetry().latency_frames.load(Ordering::Relaxed));
                 let open_plugin = self.mixer_state.slot.and_then(|k| {
-                    let strip =
-                        &self.project.mixer.strips[self.mixer_state.selected.min(STRIPS - 1)];
+                    let strip = &self.project.mixer.strips
+                        [self.mixer_state.selected.min(self.project.mixer.inserts())];
                     let p = strip.slots.get(k)?.as_ref()?.plugin.as_ref()?;
                     Some(plugin_view(&self.plugins, &self.project, p.instance))
                 });
@@ -103,6 +103,13 @@ impl GloomApp {
                     view,
                 ) {
                     out.mixer_changed = true;
+                }
+                if let Some(i) = self.mixer_state.remove_request.take() {
+                    if self.project.remove_insert(i) {
+                        self.mixer_state.selected = i.min(self.project.mixer.inserts());
+                        self.mixer_state.slot = None;
+                        out.mixer_changed = true;
+                    }
                 }
             }
         }
