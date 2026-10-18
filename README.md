@@ -189,6 +189,9 @@ and the app shows it that way. Function keys on a Mac laptop may need **fn** hel
     source and, on inserts, up to eight sends to other strips, each with a level and a Pre
     switch (pre-fader). Routes that would make a loop are not offered. The master's panel sets
     the pan law (0, -3, -4.5 or -6 dB at centre).
+  - Give a strip a colour and an icon, link a playlist track to it (the track plays into it and
+    lends it its name and colour), and save or load strip and effect-chain presets from the
+    strip's Presets menus. Export can write stems per track or per mixer insert.
   - Ten effect slots per strip: pick an effect in a slot's menu, switch it On/Off, click it to
     edit. The EQ shows its curve: drag a handle to move a band; the knobs below set type, gain and Q. Compressors
     show gain reduction. Set a compressor's Sidechain knob to 1 to key it from the strip's

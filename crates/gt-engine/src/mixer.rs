@@ -663,6 +663,8 @@ pub enum Tap {
     /// The strip's freeze point: after the effects of an insert, before the master's effects
     /// (those belong to the whole mix). Frozen audio joins here.
     Freeze,
+    /// What the strip outputs, after its fader and pan (stems per insert, Prompt 29).
+    Output,
 }
 
 /// True when frozen audio on `strip` joins after the strip's effects (every insert) rather
@@ -962,6 +964,15 @@ impl MixerEngine {
         let st = &mut self.strips[s];
         st.has_input = true;
         (&mut st.latent_l, &mut st.latent_r)
+    }
+
+    /// How late strip `strip`'s output is against the timeline, in frames (0 if out of range).
+    pub(crate) fn output_latency(&self, strip: usize) -> usize {
+        if strip < self.live {
+            self.out_lat[strip]
+        } else {
+            0
+        }
     }
 
     /// The instrument latency of strip `strip` (0 if out of range).
@@ -1303,6 +1314,10 @@ impl MixerEngine {
             if *m < 1e-14 {
                 *m = 0.0;
             }
+        }
+        if tap == Some(Tap::Output) {
+            self.tap_l = st.out_l;
+            self.tap_r = st.out_r;
         }
         let cell = &telemetry.meters[s];
         cell.peak[0].fetch_max(peak_l, Ordering::Relaxed);

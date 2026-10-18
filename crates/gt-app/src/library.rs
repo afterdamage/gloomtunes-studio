@@ -258,6 +258,17 @@ pub fn synth_preset_folder() -> std::path::PathBuf {
     }
 }
 
+/// Where mixer strip and effect-chain presets are saved (Prompt 29).
+pub fn mixer_preset_folder() -> std::path::PathBuf {
+    if (cfg!(windows) && std::env::var_os("APPDATA").is_some())
+        || (cfg!(target_os = "macos") && std::env::var_os("HOME").is_some())
+    {
+        data_folder().join("Presets").join("Mixer")
+    } else {
+        data_folder().join("presets").join("mixer")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

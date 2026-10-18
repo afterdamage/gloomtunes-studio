@@ -19,7 +19,7 @@ use gt_engine::{
     SongSnapshot, TransportState,
 };
 use gt_plugin_host::{PluginHost, PluginStatus};
-use gt_project::{ops, presets, History};
+use gt_project::{ops, presets, strip_presets, History};
 use gt_ui::param_ui::{self, ParamMarks, ParamRequest};
 use gt_ui::views::{
     add_automation, browser, modulators_panel, piano_roll, plugin_controls, sampler_panel,
@@ -139,6 +139,10 @@ pub struct GloomApp {
     preset_dir: std::path::PathBuf,
     user_presets: Vec<(String, std::path::PathBuf)>,
     preset_status: Option<String>,
+    /// Mixer strip and effect-chain presets (Prompt 29).
+    strip_presets: Vec<(String, std::path::PathBuf)>,
+    chain_presets: Vec<(String, std::path::PathBuf)>,
+    strip_preset_status: Option<String>,
 
     mixer_state: MixerState,
     /// Mixer settings and effects as last sent to the engine (none: send everything).
@@ -347,6 +351,9 @@ impl GloomApp {
             preset_dir: synth_preset_folder(),
             user_presets: Vec::new(),
             preset_status: None,
+            strip_presets: Vec::new(),
+            chain_presets: Vec::new(),
+            strip_preset_status: None,
             mixer_state: MixerState::default(),
             sent_mixer: None,
             sent_fx: vec![Default::default(); STRIPS],
@@ -852,17 +859,69 @@ impl GloomApp {
     }
 
     fn refresh_presets(&mut self) {
-        self.user_presets = presets::list(&self.preset_dir)
-            .into_iter()
-            .map(|p| {
-                let name = p
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                (name, p)
-            })
-            .collect();
+        let named = |v: Vec<std::path::PathBuf>| -> Vec<(String, std::path::PathBuf)> {
+            v.into_iter()
+                .map(|p| {
+                    let name = p
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    (name, p)
+                })
+                .collect()
+        };
+        self.user_presets = named(presets::list(&self.preset_dir));
+        let dir = crate::library::mixer_preset_folder();
+        self.strip_presets = named(strip_presets::list(&dir, strip_presets::Kind::Strip));
+        self.chain_presets = named(strip_presets::list(&dir, strip_presets::Kind::Chain));
         self.refresh_browser();
+    }
+
+    /// Saves or loads a mixer preset, or links a track, for the mixer (Prompt 29).
+    pub(crate) fn on_mixer_request(&mut self, r: gt_ui::views::MixerRequest) {
+        use gt_ui::views::MixerRequest as R;
+        let kind = |chain: bool| {
+            if chain {
+                strip_presets::Kind::Chain
+            } else {
+                strip_presets::Kind::Strip
+            }
+        };
+        match r {
+            R::LinkTrack(strip, track) => {
+                if self.project.link_track(strip, track) {
+                    self.pending_edit = Some("Link track");
+                }
+            }
+            R::Save { strip, chain } => {
+                let Some(s) = self.project.mixer.strips.get(strip) else {
+                    return;
+                };
+                let dir = crate::library::mixer_preset_folder();
+                self.strip_preset_status =
+                    Some(match strip_presets::save(&dir, &s.preset(), kind(chain)) {
+                        Ok(path) => format!(
+                            "Saved {}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ),
+                        Err(e) => format!("Could not save: {e}"),
+                    });
+                self.refresh_presets();
+            }
+            R::Load { strip, chain, path } => match strip_presets::load(&path, kind(chain)) {
+                Ok((preset, warnings)) => {
+                    if self.project.apply_strip_preset(strip, &preset, chain) {
+                        self.pending_edit = Some(if chain {
+                            "Load effect chain"
+                        } else {
+                            "Load strip preset"
+                        });
+                    }
+                    self.strip_preset_status = warnings.first().cloned();
+                }
+                Err(e) => self.strip_preset_status = Some(e.to_string()),
+            },
+        }
     }
 
     fn on_synth_panel(&mut self, action: SynthPanelAction) {

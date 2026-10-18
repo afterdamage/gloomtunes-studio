@@ -40,7 +40,37 @@ pub struct MixerState {
     /// The user asked to delete this insert (the app renumbers the project, see
     /// [`gt_core::Project::remove_insert`]).
     pub remove_request: Option<usize>,
+    /// Something only the app can do (presets, track links).
+    pub request: Option<MixerRequest>,
 }
+
+/// What the mixer asks of the app.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MixerRequest {
+    /// Link playlist track `.1` to strip `.0` ([`gt_core::Project::link_track`]).
+    LinkTrack(usize, gt_core::TrackId),
+    /// Save strip `.0` as a strip preset (`chain`: only its effects).
+    Save {
+        /// Strip index.
+        strip: usize,
+        /// Only the effect chain.
+        chain: bool,
+    },
+    /// Load the preset file into strip `strip` (`chain`: only its effects).
+    Load {
+        /// Strip index.
+        strip: usize,
+        /// Only the effect chain.
+        chain: bool,
+        /// The file.
+        path: std::path::PathBuf,
+    },
+}
+
+/// Icons a strip can show (an index is stored, see [`gt_core::STRIP_ICONS`]).
+pub const STRIP_ICON_GLYPHS: [&str; gt_core::STRIP_ICONS as usize] = [
+    "🎵", "🎸", "🎹", "🎤", "🎧", "🎻", "🎺", "🔊", "⭐", "🔥", "💧", "🌙", "⚡", "❄", "🌿", "💀",
+];
 
 impl Default for MixerState {
     fn default() -> Self {
@@ -53,6 +83,7 @@ impl Default for MixerState {
             file_request: None,
             analyzer: AnalyzerState::default(),
             remove_request: None,
+            request: None,
         }
     }
 }
@@ -92,6 +123,14 @@ pub struct MixerView<'a> {
     pub inputs: &'a [gt_core::AudioInput],
     /// The signal tap of the open slot's effect, when it has one (the analyzer).
     pub scope: Option<&'a Scope>,
+    /// Playlist tracks: id, name and the strip each plays into.
+    pub tracks: &'a [(gt_core::TrackId, String, usize)],
+    /// Saved strip presets (name, file).
+    pub strip_presets: &'a [(String, std::path::PathBuf)],
+    /// Saved effect-chain presets (name, file).
+    pub chain_presets: &'a [(String, std::path::PathBuf)],
+    /// The last preset save or load, to show.
+    pub preset_status: Option<&'a str>,
 }
 
 /// Short routing label of a strip: "M", "3".
@@ -122,6 +161,11 @@ pub fn mixer_view(
                         ui.spacing_mut().item_spacing.x = 2.0;
                         for i in 0..mixer.strips.len() {
                             let meter = view.meters.get(i).copied().unwrap_or_default();
+                            let track = view
+                                .tracks
+                                .iter()
+                                .find(|t| t.2 == i && i != MASTER)
+                                .map(|t| t.1.as_str());
                             let (c, clicked) = strip(
                                 ui,
                                 theme,
@@ -129,6 +173,7 @@ pub fn mixer_view(
                                 &mut mixer.strips[i],
                                 state.selected == i,
                                 meter,
+                                track,
                             );
                             changed |= c;
                             if clicked && state.selected != i {
@@ -179,6 +224,7 @@ fn strip(
     s: &mut MixerStrip,
     selected: bool,
     meter: StripMeter,
+    track: Option<&str>,
 ) -> (bool, bool) {
     let mut changed = false;
     let fill = if selected {
@@ -196,7 +242,26 @@ fn strip(
             ui.set_height(h - 6.0);
             ui.vertical_centered(|ui| {
                 ui.spacing_mut().item_spacing.y = 3.0;
-                ui.label(RichText::new(short(i)).small().color(theme.text_dim));
+                if let Some(c) = s.color {
+                    // A bar in the frame's top margin, so coloured strips stay aligned.
+                    let top = ui.max_rect();
+                    let r = egui::Rect::from_min_size(
+                        pos2(top.left(), top.top() - 3.0),
+                        vec2(top.width(), 3.0),
+                    );
+                    ui.painter()
+                        .rect_filled(r, 1.0, Color32::from_rgb(c[0], c[1], c[2]));
+                }
+                let icon = s
+                    .icon
+                    .and_then(|k| STRIP_ICON_GLYPHS.get(usize::from(k)))
+                    .copied()
+                    .unwrap_or("");
+                ui.label(
+                    RichText::new(format!("{icon} {}", short(i)))
+                        .small()
+                        .color(theme.text_dim),
+                );
                 ui.add(
                     egui::Label::new(RichText::new(&s.name).small().color(theme.text)).truncate(),
                 )
@@ -207,7 +272,18 @@ fn strip(
                 } else {
                     String::new()
                 };
-                ui.label(RichText::new(fx_text).small().color(theme.accent));
+                // The linked playlist track shares the line with the effect count.
+                let line = match track {
+                    Some(t) if fx_count > 0 => format!("{fx_text} · {t}"),
+                    Some(t) => t.to_owned(),
+                    None => fx_text,
+                };
+                let r = ui.add(
+                    egui::Label::new(RichText::new(line).small().color(theme.accent)).truncate(),
+                );
+                if let Some(t) = track {
+                    r.on_hover_text(format!("{}: {t}", tr("Linked playlist track")));
+                }
                 let meter_h = (h - 150.0).max(60.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
@@ -278,6 +354,140 @@ fn strip(
     // Pressing anywhere on the strip (fader and knob included) selects it.
     let clicked = ui.rect_contains_pointer(resp.rect) && ui.input(|i| i.pointer.any_pressed());
     (changed, clicked)
+}
+
+/// Colour, icon, the linked playlist track and presets of strip `i`.
+fn looks(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    mixer: &mut Mixer,
+    state: &mut MixerState,
+    view: &MixerView<'_>,
+    i: usize,
+) -> bool {
+    let mut changed = false;
+    let s = &mut mixer.strips[i];
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.label(RichText::new(tr("Colour")).small().color(theme.text_dim));
+        if ui
+            .add(egui::Button::selectable(
+                s.color.is_none(),
+                RichText::new("–").small(),
+            ))
+            .on_hover_text(tr("No colour"))
+            .clicked()
+        {
+            s.color = None;
+            changed = true;
+        }
+        for c in gt_core::playlist::TRACK_COLORS {
+            let (r, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::click());
+            ui.painter()
+                .rect_filled(r.shrink(1.0), 2.0, Color32::from_rgb(c[0], c[1], c[2]));
+            if s.color == Some(c) {
+                ui.painter().rect_stroke(
+                    r,
+                    2.0,
+                    Stroke::new(1.5, theme.text),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            if resp.clicked() {
+                s.color = Some(c);
+                changed = true;
+            }
+        }
+        ui.add_space(6.0);
+        let shown = s
+            .icon
+            .and_then(|k| STRIP_ICON_GLYPHS.get(usize::from(k)))
+            .copied()
+            .unwrap_or("–");
+        let mut icon = s.icon;
+        egui::ComboBox::from_id_salt(("mixer_icon", i))
+            .width(44.0)
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut icon, None, tr("None"));
+                for (k, g) in STRIP_ICON_GLYPHS.iter().enumerate() {
+                    ui.selectable_value(&mut icon, Some(k as u8), *g);
+                }
+            })
+            .response
+            .on_hover_text(tr("Strip icon"));
+        if icon != s.icon {
+            s.icon = icon;
+            changed = true;
+        }
+    });
+    if i != MASTER && !view.tracks.is_empty() {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(tr("Track")).small().color(theme.text_dim))
+                .on_hover_text(tr(
+                    "Link a playlist track: its audio plays into this strip, and the strip \
+                     takes its name and colour",
+                ));
+            let linked: Vec<&str> = view
+                .tracks
+                .iter()
+                .filter(|t| t.2 == i)
+                .map(|t| t.1.as_str())
+                .collect();
+            let shown = if linked.is_empty() {
+                tr("Link a track…").to_owned()
+            } else {
+                linked.join(", ")
+            };
+            egui::ComboBox::from_id_salt(("mixer_track", i))
+                .width(180.0)
+                .selected_text(RichText::new(shown).small())
+                .show_ui(ui, |ui| {
+                    for (id, name, _) in view.tracks {
+                        if ui.selectable_label(false, name).clicked() {
+                            state.request = Some(MixerRequest::LinkTrack(i, *id));
+                        }
+                    }
+                });
+        });
+    }
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(tr("Presets")).small().color(theme.text_dim));
+        for (chain, label, list) in [
+            (false, tr("Strip"), view.strip_presets),
+            (true, tr("Effect chain"), view.chain_presets),
+        ] {
+            ui.menu_button(RichText::new(label).small(), |ui| {
+                let tip = if chain {
+                    tr("Save the ten effect slots as a preset")
+                } else {
+                    tr("Save the strip's name, fader, pan, colour, icon and effects (not its routing)")
+                };
+                if ui.button(tr("Save…")).on_hover_text(tip).clicked() {
+                    state.request = Some(MixerRequest::Save { strip: i, chain });
+                    ui.close();
+                }
+                if !list.is_empty() {
+                    ui.separator();
+                }
+                for (name, path) in list {
+                    if ui.button(name).clicked() {
+                        state.request = Some(MixerRequest::Load {
+                            strip: i,
+                            chain,
+                            path: path.clone(),
+                        });
+                        ui.close();
+                    }
+                }
+            });
+        }
+        if let Some(st) = view.preset_status {
+            ui.label(RichText::new(st).small().color(theme.text_dim));
+        }
+    });
+    changed
 }
 
 /// The sends of insert `i`: level, pre-fader switch and removal per send, and a menu adding a
@@ -497,6 +707,7 @@ fn detail(
             }
         });
 
+    changed |= looks(ui, theme, mixer, state, &view, i);
     if matches!(kind, StripKind::Insert(_)) {
         changed |= sends(ui, theme, mixer, i);
     }

@@ -266,6 +266,17 @@ impl AudioProcessor {
         self.mixer.input_delay(usize::from(strip))
     }
 
+    /// How late `strip`'s output is against the timeline (its delay compensation plus its
+    /// effects' latency), in frames.
+    pub fn strip_output_latency(&self, strip: u16) -> usize {
+        self.mixer.output_latency(usize::from(strip))
+    }
+
+    /// Total latency of the mix, in frames.
+    pub fn mix_latency(&self) -> usize {
+        self.mixer.latency()
+    }
+
     /// Number of strips the mixer has.
     pub(crate) fn mixer_capacity(&self) -> usize {
         self.mixer.capacity()

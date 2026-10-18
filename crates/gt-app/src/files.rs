@@ -45,6 +45,8 @@ pub struct ExportForm {
     pub loop_only: bool,
     pub tail: bool,
     pub stems: bool,
+    /// Stems per mixer insert instead of per track (Prompt 29).
+    pub insert_stems: bool,
     /// One file per marker region.
     pub regions: bool,
     pub format: Format,
@@ -80,6 +82,7 @@ impl ExportForm {
             loop_only: false,
             tail: true,
             stems: false,
+            insert_stems: false,
             regions: false,
             format: Format::from_path(&path).unwrap_or_default(),
             ogg_quality: 6.0,
@@ -113,6 +116,11 @@ impl ExportForm {
             tail: self.tail,
             max_tail_seconds: 10.0,
             stems: self.stems,
+            stem_kind: if self.insert_stems {
+                gt_export::StemKind::Inserts
+            } else {
+                gt_export::StemKind::Tracks
+            },
             regions: self.regions,
             format: self.format,
             ogg_quality: self.ogg_quality,
@@ -717,10 +725,18 @@ fn export_form(ui: &mut Ui, theme: &GloomTheme, f: &mut ExportForm) -> Option<Di
                     ));
                 ui.end_row();
                 ui.label("");
-                ui.checkbox(&mut f.stems, tr("One file per track (stems)"))
-                    .on_hover_text(tr(
-                        "Each playlist track with patterns or audio, through the mixer",
-                    ));
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut f.stems, tr("Stems: one file per"))
+                        .on_hover_text(tr(
+                            "Per track: each playlist track with patterns or audio, through \
+                             the whole mixer. Per insert: what each mixer insert outputs, \
+                             after its effects and fader",
+                        ));
+                    ui.add_enabled_ui(f.stems, |ui| {
+                        ui.selectable_value(&mut f.insert_stems, false, tr("track"));
+                        ui.selectable_value(&mut f.insert_stems, true, tr("insert"));
+                    });
+                });
                 ui.end_row();
                 ui.label("");
                 ui.checkbox(&mut f.regions, tr("One file per marker region"))

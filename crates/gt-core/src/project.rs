@@ -1251,6 +1251,57 @@ impl Project {
         self.plugin_mut(owner)
     }
 
+    /// Loads a mixer-strip preset into strip `i`, or only its effect chain with `chain_only`
+    /// (Prompt 29). Plugins in it get new instances. False if there is no such strip.
+    pub fn apply_strip_preset(
+        &mut self,
+        i: usize,
+        p: &crate::StripPreset,
+        chain_only: bool,
+    ) -> bool {
+        let Some(s) = self.mixer.strips.get_mut(i) else {
+            return false;
+        };
+        if chain_only {
+            s.slots = p.slots.clone();
+        } else {
+            s.apply_preset(p);
+        }
+        for fx in s.slots.iter_mut().flatten() {
+            fx.sanitize();
+            if let Some(pl) = fx.plugin.as_deref_mut() {
+                pl.instance = PluginInstanceId::fresh();
+            }
+        }
+        true
+    }
+
+    /// Links playlist track `track` to mixer strip `strip` so they show side by side: the
+    /// track's audio plays into the strip, an unnamed strip takes the track's name, and the
+    /// strip takes the track's colour (Prompt 29).
+    pub fn link_track(&mut self, strip: usize, track: crate::TrackId) -> bool {
+        let Some(t) = self.playlist.tracks.iter_mut().find(|t| t.id == track) else {
+            return false;
+        };
+        let Some(s) = self.mixer.strips.get_mut(strip) else {
+            return false;
+        };
+        t.insert = strip;
+        if strip != MASTER && s.name == StripKind::of(strip).default_name() {
+            s.name = t.name.clone();
+        }
+        s.color = Some(t.color);
+        true
+    }
+
+    /// The playlist tracks linked to (playing into) mixer strip `strip`.
+    pub fn tracks_of_strip(&self, strip: usize) -> impl Iterator<Item = &crate::Track> {
+        self.playlist
+            .tracks
+            .iter()
+            .filter(move |t| t.insert == strip)
+    }
+
     /// Gives every plugin its own instance id: a copied channel or slot must not share the
     /// running plugin of the original.
     pub fn make_plugin_instances_unique(&mut self) {
@@ -1745,5 +1796,41 @@ mod tests {
         assert!(!p.remove_insert(MASTER));
         p.sanitize();
         assert!(p.mixer.processing_order().is_some());
+    }
+
+    #[test]
+    fn strip_presets_and_track_links() {
+        let mut p = Project::demo();
+        let (reverb, delay) = (crate::mixer::DEMO_REVERB, crate::mixer::DEMO_DELAY);
+        let preset = p.mixer.strips[reverb].preset();
+        let routing = (
+            p.mixer.strips[delay].output,
+            p.mixer.strips[delay].sends.clone(),
+        );
+        assert!(p.apply_strip_preset(delay, &preset, false));
+        assert_eq!(p.mixer.strips[delay].name, "Reverb");
+        assert_eq!(p.mixer.strips[delay].slots, p.mixer.strips[reverb].slots);
+        assert_eq!(
+            (
+                p.mixer.strips[delay].output,
+                p.mixer.strips[delay].sends.clone()
+            ),
+            routing
+        );
+        let mut chain = preset.clone();
+        chain.name = "x".into();
+        assert!(p.apply_strip_preset(3, &chain, true));
+        assert_ne!(p.mixer.strips[3].name, "x");
+        assert!(!p.apply_strip_preset(999, &chain, true));
+
+        let t = p.playlist.tracks[7].id;
+        let free = p.add_insert().unwrap();
+        assert!(p.link_track(free, t));
+        assert_eq!(
+            p.tracks_of_strip(free).map(|t| t.id).collect::<Vec<_>>(),
+            vec![t]
+        );
+        assert_eq!(p.mixer.strips[free].name, p.playlist.tracks[7].name);
+        assert_eq!(p.mixer.strips[free].color, Some(p.playlist.tracks[7].color));
     }
 }

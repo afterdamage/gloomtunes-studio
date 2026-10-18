@@ -39,8 +39,8 @@ pub use midi::{
     ControlKind, ControlPoint, MidiBinding, MidiRoute, MAX_LEARN_CC, MAX_MIDI_BINDINGS,
 };
 pub use mixer::{
-    Mixer, MixerStrip, PanLaw, Send, StripKind, DEFAULT_INSERTS, FX_SLOTS, MASTER, MAX_INSERTS,
-    MAX_SENDS, STRIPS,
+    Mixer, MixerStrip, PanLaw, Send, StripKind, StripPreset, DEFAULT_INSERTS, FX_SLOTS, MASTER,
+    MAX_INSERTS, MAX_SENDS, STRIPS, STRIP_ICONS,
 };
 pub use modulation::{
     LfoRate, LfoShape, MidiControl, ModSourceKind, Modulator, ModulatorId, MAX_MODULATORS,

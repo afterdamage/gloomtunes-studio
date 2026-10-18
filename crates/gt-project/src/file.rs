@@ -792,7 +792,7 @@ struct Sampler2Dto {
 }
 
 #[derive(Serialize, Deserialize)]
-struct PluginDto {
+pub(crate) struct PluginDto {
     format: String,
     id: String,
     name: String,
@@ -1025,6 +1025,12 @@ struct StripDto {
     /// Live device input ("1", "1-2"; schema 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     input: Option<String>,
+    /// Strip colour (Prompt 29).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<[u8; 3]>,
+    /// Strip icon (Prompt 29).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon: Option<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1036,7 +1042,7 @@ struct SendDto {
 }
 
 #[derive(Serialize, Deserialize)]
-struct EffectDto {
+pub(crate) struct EffectDto {
     kind: String,
     enabled: bool,
     params: BTreeMap<String, f32>,
@@ -1516,30 +1522,9 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                 .collect(),
             sidechain: s.sidechain,
             input: s.input.map(AudioInput::key),
-            slots: s
-                .slots
-                .iter()
-                .map(|slot| {
-                    slot.as_ref().map(|e| EffectDto {
-                        kind: e.kind.key().to_owned(),
-                        enabled: e.enabled,
-                        params: e
-                            .kind
-                            .params()
-                            .iter()
-                            .zip(&e.params)
-                            .map(|(info, &v)| (info.key.to_owned(), v))
-                            .collect(),
-                        plugin: e.plugin.as_deref().map(plugin_dto),
-                        mix: e.mix,
-                        file: e
-                            .file
-                            .as_deref()
-                            .and_then(|f| dir.and_then(|d| relative_path(d, f))),
-                        file_absolute: e.file.as_ref().map(|f| f.to_string_lossy().into_owned()),
-                    })
-                })
-                .collect(),
+            slots: slots_dto(&s.slots, dir),
+            color: s.color,
+            icon: s.icon,
         })
         .collect();
     let pl = &p.playlist;
@@ -2111,46 +2096,9 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
             .collect();
         strip.sidechain = sd.sidechain;
         strip.input = sd.input.as_deref().and_then(AudioInput::from_key);
-        for (slot, ed) in strip
-            .slots
-            .iter_mut()
-            .zip(sd.slots.into_iter().take(FX_SLOTS))
-        {
-            *slot = ed.and_then(|ed| {
-                let Some(kind) = EffectKind::from_key(&ed.kind) else {
-                    warnings.push(format!("unknown effect \"{}\" removed", ed.kind));
-                    return None;
-                };
-                if kind == EffectKind::Plugin {
-                    let mut e = EffectSlot::plugin(plugin(ed.plugin?, &mut warnings)?);
-                    e.enabled = ed.enabled;
-                    e.mix = ed.mix;
-                    e.sanitize();
-                    return Some(e);
-                }
-                let mut e = EffectSlot::new(kind);
-                e.enabled = ed.enabled;
-                e.mix = ed.mix;
-                // The relative path wins when the file is there (the folder moved).
-                let relative = ed
-                    .file
-                    .filter(|f| !f.is_empty())
-                    .and_then(|f| dir.map(|d| d.join(from_slashes(&f))));
-                let absolute = ed
-                    .file_absolute
-                    .filter(|f| !f.is_empty())
-                    .map(PathBuf::from);
-                e.file = match (relative, absolute) {
-                    (Some(r), _) if r.exists() => Some(r),
-                    (r, a) => a.or(r),
-                };
-                e.sanitize();
-                for (key, v) in &ed.params {
-                    e = e.with(key, *v);
-                }
-                Some(e)
-            });
-        }
+        strip.color = sd.color;
+        strip.icon = sd.icon;
+        strip.slots = slots_from_dto(sd.slots, dir, &mut warnings, &mut plugin);
     }
 
     let pl = &mut p.playlist;
@@ -2363,6 +2311,83 @@ fn state_entry(state: &[u8]) -> String {
     format!("{PLUGINS_DIR}{:016x}.bin", fnv1a(state))
 }
 
+/// Effect slots for a file; `dir` is the folder the file sits in (for relative paths).
+pub(crate) fn slots_dto(
+    slots: &[Option<EffectSlot>; FX_SLOTS],
+    dir: Option<&Path>,
+) -> Vec<Option<EffectDto>> {
+    slots
+        .iter()
+        .map(|slot| {
+            slot.as_ref().map(|e| EffectDto {
+                kind: e.kind.key().to_owned(),
+                enabled: e.enabled,
+                params: e
+                    .kind
+                    .params()
+                    .iter()
+                    .zip(&e.params)
+                    .map(|(info, &v)| (info.key.to_owned(), v))
+                    .collect(),
+                plugin: e.plugin.as_deref().map(plugin_dto),
+                mix: e.mix,
+                file: e
+                    .file
+                    .as_deref()
+                    .and_then(|f| dir.and_then(|d| relative_path(d, f))),
+                file_absolute: e.file.as_ref().map(|f| f.to_string_lossy().into_owned()),
+            })
+        })
+        .collect()
+}
+
+/// Effect slots read from a file; unknown effects are dropped with a warning.
+pub(crate) fn slots_from_dto(
+    slots: Vec<Option<EffectDto>>,
+    dir: Option<&Path>,
+    warnings: &mut Vec<String>,
+    plugin: &mut impl FnMut(PluginDto, &mut Vec<String>) -> Option<PluginRef>,
+) -> [Option<EffectSlot>; FX_SLOTS] {
+    let mut out: [Option<EffectSlot>; FX_SLOTS] = Default::default();
+    for (slot, ed) in out.iter_mut().zip(slots.into_iter().take(FX_SLOTS)) {
+        *slot = ed.and_then(|ed| {
+            let Some(kind) = EffectKind::from_key(&ed.kind) else {
+                warnings.push(format!("unknown effect \"{}\" removed", ed.kind));
+                return None;
+            };
+            if kind == EffectKind::Plugin {
+                let mut e = EffectSlot::plugin(plugin(ed.plugin?, warnings)?);
+                e.enabled = ed.enabled;
+                e.mix = ed.mix;
+                e.sanitize();
+                return Some(e);
+            }
+            let mut e = EffectSlot::new(kind);
+            e.enabled = ed.enabled;
+            e.mix = ed.mix;
+            // The relative path wins when the file is there (the folder moved).
+            let relative = ed
+                .file
+                .filter(|f| !f.is_empty())
+                .and_then(|f| dir.map(|d| d.join(from_slashes(&f))));
+            let absolute = ed
+                .file_absolute
+                .filter(|f| !f.is_empty())
+                .map(PathBuf::from);
+            e.file = match (relative, absolute) {
+                (Some(r), _) if r.exists() => Some(r),
+                (r, a) => a.or(r),
+            };
+            e.sanitize();
+            for (key, v) in &ed.params {
+                e = e.with(key, *v);
+            }
+            Some(e)
+        });
+    }
+    out
+}
+
 fn plugin_dto(p: &PluginRef) -> PluginDto {
     PluginDto {
         format: p.format.key().to_owned(),
@@ -2404,7 +2429,7 @@ fn plugin_dto(p: &PluginRef) -> PluginDto {
 }
 
 /// A plugin entry and the zip entry of its state, if it has one.
-fn plugin_from_dto(
+pub(crate) fn plugin_from_dto(
     d: PluginDto,
     warnings: &mut Vec<String>,
 ) -> Option<(PluginRef, Option<String>)> {
@@ -2610,6 +2635,12 @@ mod tests {
         assert!(p.learn_midi(9, 74, pan));
         assert!(p.learn_midi(0, 1, gt_core::MASTER_VOLUME));
         p.channels[0].bend_range = 12.0;
+        // Prompt 29: more inserts, a pre-fader send, pan law, strip colour and icon.
+        p.add_insert();
+        p.mixer.add_send(2, 67, 0.4, true);
+        p.mixer.pan_law = gt_core::PanLaw::Minus4_5;
+        p.mixer.strips[3].color = Some([10, 20, 30]);
+        p.mixer.strips[3].icon = Some(2);
         let ch0 = p.channels[0].id;
         p.current_pattern_mut().controls.insert(
             ch0,

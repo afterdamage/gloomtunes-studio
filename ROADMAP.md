@@ -724,6 +724,20 @@ sound identical; the golden export test stays.
   pan-law levels, pre-fader sends, 256 inserts, insert removal, the v7 migration.
 - Limits: a send's pre-fader tap is after the effects and before fader and pan.
 
+### Prompt 29 part 2: Strip looks, track links, presets, insert stems
+- Strips get a colour (bar above the name) and one of 16 icons; names were already editable.
+- Linking a playlist track to an insert routes the track's audio there and gives the strip
+  the track's name and colour; the strip shows the track, the track header the insert's name.
+- Mixer-strip presets (`.gtstrip`: name, fader, pan, polarity, colour, icon, effects, not the
+  routing) and effect-chain presets (`.gtchain`: the ten slots) saved to a presets folder and
+  loaded from the strip's Presets menus (D142).
+- Export: stems per mixer insert (what each insert outputs after its effects and fader, lined
+  up with the mix) as well as per track; unfed and silent inserts are skipped.
+- Tests: preset round trips and repairs, track links, insert stems summing to the mix with a
+  latent effect on one insert.
+- Limits: plugin slots in presets keep the plugin and its parameters but not its saved state;
+  no strip docking (left/right sections).
+
 ---
 
 ## v1.0 scope

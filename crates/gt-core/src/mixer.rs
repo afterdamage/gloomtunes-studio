@@ -165,6 +165,32 @@ pub struct MixerStrip {
     pub slots: [Option<EffectSlot>; FX_SLOTS],
     /// A device input heard live through this strip (inserts only), for live effects.
     pub input: Option<AudioInput>,
+    /// Strip colour (sRGB); `None` uses the theme's.
+    pub color: Option<[u8; 3]>,
+    /// Icon shown above the name, an index into the UI's icon set (Prompt 29).
+    pub icon: Option<u8>,
+}
+
+/// Most strip icons.
+pub const STRIP_ICONS: u8 = 16;
+
+/// What a mixer-strip preset holds: the sound of a strip without its routing (Prompt 29).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StripPreset {
+    /// Strip name.
+    pub name: String,
+    /// Fader.
+    pub volume: f32,
+    /// Pan.
+    pub pan: f32,
+    /// Polarity.
+    pub phase_invert: bool,
+    /// Colour.
+    pub color: Option<[u8; 3]>,
+    /// Icon.
+    pub icon: Option<u8>,
+    /// The effect chain.
+    pub slots: [Option<EffectSlot>; FX_SLOTS],
 }
 
 impl MixerStrip {
@@ -187,7 +213,33 @@ impl MixerStrip {
             sidechain: None,
             slots: Default::default(),
             input: None,
+            color: None,
+            icon: None,
         }
+    }
+
+    /// The strip's sound as a preset.
+    pub fn preset(&self) -> StripPreset {
+        StripPreset {
+            name: self.name.clone(),
+            volume: self.volume,
+            pan: self.pan,
+            phase_invert: self.phase_invert,
+            color: self.color,
+            icon: self.icon,
+            slots: self.slots.clone(),
+        }
+    }
+
+    /// Takes on a preset's sound, keeping routing, mute, solo and input.
+    pub fn apply_preset(&mut self, p: &StripPreset) {
+        self.name = p.name.clone();
+        self.volume = p.volume;
+        self.pan = p.pan;
+        self.phase_invert = p.phase_invert;
+        self.color = p.color;
+        self.icon = p.icon;
+        self.slots = p.slots.clone();
     }
 
     /// Level of the send to `to` (0 when there is none).
@@ -478,6 +530,7 @@ impl Mixer {
             if s.sidechain.is_some_and(|x| x >= n || x == i || x == MASTER) {
                 s.sidechain = None;
             }
+            s.icon = s.icon.filter(|&k| k < STRIP_ICONS);
             for slot in s.slots.iter_mut() {
                 if let Some(fx) = slot {
                     fx.sanitize();

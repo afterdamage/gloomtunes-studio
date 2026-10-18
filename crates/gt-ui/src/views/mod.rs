@@ -37,7 +37,7 @@ pub use midi_panel::{
     midi_panel, AutoMode, LoopPasses, MidiAction, MidiPanelModel, MidiPortRow, MidiRouteRow,
     RecordMode,
 };
-pub use mixer::{mixer_view, MixerState, MixerView, StripMeter};
+pub use mixer::{mixer_view, MixerRequest, MixerState, MixerView, StripMeter, STRIP_ICON_GLYPHS};
 pub use modulators::{modulators_panel, ModulatorsState};
 pub use piano_roll::{
     group_color, key_name, piano_roll, stretch_notes, GhostChannel, Lane, LaneDraw, NoteProp,

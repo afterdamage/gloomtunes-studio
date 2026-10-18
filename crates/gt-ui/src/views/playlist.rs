@@ -2715,6 +2715,12 @@ fn track_headers(
     let mut insert_at = None;
     let n = project.playlist.tracks.len();
     let inserts = project.mixer.inserts();
+    let strip_names: Vec<String> = project
+        .mixer
+        .strips
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
     for row in 0..n {
         let top = geo.row_top(row);
         if top > headers.bottom() || top + geo.track_h < headers.top() {
@@ -2815,7 +2821,9 @@ fn track_headers(
                             if v < 0.5 {
                                 "audio to M".to_owned()
                             } else {
-                                format!("audio to {v:.0}")
+                                // The linked insert's name, side by side with the track.
+                                let name = strip_names.get(v as usize).map_or("", |n| n.as_str());
+                                format!("{v:.0} {name}")
                             }
                         }),
                 )

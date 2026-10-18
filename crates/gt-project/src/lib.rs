@@ -13,6 +13,7 @@ pub mod migrate;
 pub mod ops;
 pub mod pack;
 pub mod presets;
+pub mod strip_presets;
 
 pub use history::{Edit, History, Transaction};
 pub use loader::{is_audio_file, list_audio_files, load_sample, LoadError, AUDIO_EXTENSIONS};

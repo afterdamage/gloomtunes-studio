@@ -86,7 +86,18 @@ impl GloomApp {
                 let scope = self.mixer_state.slot.and_then(|k| {
                     self.scopes[self.mixer_state.selected.min(STRIPS - 1)][k].as_deref()
                 });
+                let tracks: Vec<(gt_core::TrackId, String, usize)> = self
+                    .project
+                    .playlist
+                    .tracks
+                    .iter()
+                    .map(|t| (t.id, t.name.clone(), t.insert))
+                    .collect();
                 let view = MixerView {
+                    tracks: &tracks,
+                    strip_presets: &self.strip_presets,
+                    chain_presets: &self.chain_presets,
+                    preset_status: self.strip_preset_status.as_deref(),
                     scope,
                     meters: &self.strip_view,
                     fx_meters: &self.fx_meters,
@@ -103,6 +114,9 @@ impl GloomApp {
                     view,
                 ) {
                     out.mixer_changed = true;
+                }
+                if let Some(r) = self.mixer_state.request.take() {
+                    self.on_mixer_request(r);
                 }
                 if let Some(i) = self.mixer_state.remove_request.take() {
                     if self.project.remove_insert(i) {
