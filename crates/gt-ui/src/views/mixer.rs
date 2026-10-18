@@ -307,7 +307,7 @@ fn sends(ui: &mut Ui, theme: &GloomTheme, mixer: &mut Mixer, i: usize) -> bool {
                     changed = true;
                 }
                 ui.add(
-                    egui::Label::new(RichText::new(format!("→ {name}")).small().color(theme.text))
+                    egui::Label::new(RichText::new(format!("{} {name}", tr("to"))).small().color(theme.text))
                         .truncate(),
                 )
                 .on_hover_text(format_gain(x.level));
