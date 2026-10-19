@@ -147,7 +147,7 @@ fn process_does_not_allocate() {
             for (k, slot) in strip.slots.iter().enumerate() {
                 if let Some(slot) = slot {
                     h.send(EngineCommand::SetEffect {
-                        strip: si as u8,
+                        strip: si as u16,
                         slot: k as u8,
                         effect: Some(create_effect(slot, sr as f32)),
                     })
@@ -164,7 +164,7 @@ fn process_does_not_allocate() {
                 slot,
                 params: Box::new(ChannelParams {
                     gain: 0.5,
-                    route: (slot % 12) as u8,
+                    route: slot % 12,
                     ..ChannelParams::default()
                 }),
             })
@@ -254,9 +254,11 @@ fn process_does_not_allocate() {
             },
             ParamId::Strip {
                 strip: 2,
-                param: StripParam::Send(1),
+                param: StripParam::Send(gt_core::mixer::DEMO_DELAY),
             },
         ];
+        song.mixer
+            .add_send(2, gt_core::mixer::DEMO_DELAY, 0.2, true);
         song.mixer.strips[10].slots[2] = Some(EffectSlot::new(EffectKind::Delay));
         for target in targets {
             song.playlist.add_clip(

@@ -98,7 +98,7 @@ pub struct AudioPlay {
     /// Linear gain.
     pub gain: f32,
     /// Mixer strip it plays into.
-    pub route: u8,
+    pub route: u16,
     /// Fade in at the left edge (the clip starts inside the audio, so it would click).
     pub fade_in: bool,
     /// Fade out at the right edge (the clip ends before the audio does).
@@ -387,7 +387,7 @@ impl SongSnapshot {
                 live: None,
                 sample,
                 gain: 1.0,
-                route: t.insert.min(gt_core::STRIPS - 1) as u8,
+                route: t.insert.min(gt_core::STRIPS - 1) as u16,
             });
         }
         for clip in &pl.clips {
@@ -474,7 +474,7 @@ impl SongSnapshot {
                         live,
                         sample,
                         gain: gain.clamp(0.0, 4.0),
-                        route: route as u8,
+                        route: route as u16,
                     });
                 }
                 ClipKind::Automation(a) => {
@@ -1000,13 +1000,13 @@ pub struct ChannelParams {
     /// Envelope.
     pub adsr: Adsr,
     /// Mixer strip the channel plays into.
-    pub route: u8,
+    pub route: u16,
     /// The plugin instance it plays (when `kind` is `Plugin`).
     pub plugin: Option<gt_core::PluginInstanceId>,
     /// Pitch bend range in semitones (built-in instruments; plugins use their own).
     pub bend_range: f32,
     /// Mixer insert of each extra stereo output of a multi-output plugin (None: not heard).
-    pub extra_routes: [Option<u8>; gt_core::MAX_EXTRA_OUTPUTS],
+    pub extra_routes: [Option<u16>; gt_core::MAX_EXTRA_OUTPUTS],
     /// Channel slot that plays the plugin's MIDI output (None: dropped).
     pub midi_out: Option<u16>,
     /// Sampler 2 settings.
@@ -1053,7 +1053,7 @@ impl ChannelParams {
             gain: ch.volume.clamp(0.0, Channel::MAX_VOLUME),
             silenced,
             pan: ch.pan.clamp(-1.0, 1.0),
-            route: ch.insert.min(gt_core::STRIPS - 1) as u8,
+            route: ch.insert.min(gt_core::STRIPS - 1) as u16,
             bend_range: ch.bend_range.clamp(0.0, Channel::MAX_BEND),
             choke: ch.choke,
             keys: KeyParams {

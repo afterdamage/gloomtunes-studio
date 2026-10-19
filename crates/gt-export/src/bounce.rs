@@ -197,7 +197,7 @@ pub fn render(
         progress,
         (0, 1),
         plugins,
-        Some((insert as u8, b.tap)),
+        Some((insert as u16, b.tap)),
     )?;
     progress
         .permille

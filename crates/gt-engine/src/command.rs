@@ -123,10 +123,13 @@ pub enum EngineCommand {
     /// Replace the mixer settings (faders, pans, routing, processing order, effect bypass).
     /// Levels glide; effects keep their state.
     SetMixer(Box<MixerParams>),
+    /// More mixer strips, built on the UI thread. [`crate::EngineHandle::send`] queues this
+    /// itself before a command that needs strips the engine does not have yet.
+    GrowMixer(Box<crate::mixer::NewStrips>),
     /// Put an effect into a mixer slot, or empty it. The previous effect comes back as garbage.
     SetEffect {
         /// Strip index.
-        strip: u8,
+        strip: u16,
         /// Slot index, below `FX_SLOTS`.
         slot: u8,
         /// The new effect, built with [`crate::create_effect`].
@@ -135,7 +138,7 @@ pub enum EngineCommand {
     /// Change one effect parameter (plain value; the effect smooths it).
     SetEffectParam {
         /// Strip index.
-        strip: u8,
+        strip: u16,
         /// Slot index.
         slot: u8,
         /// Parameter index in the effect's table.
@@ -205,6 +208,7 @@ impl EngineCommand {
                 | Self::SetChannelTables { .. }
                 | Self::PreviewSample(_)
                 | Self::SetMixer(_)
+                | Self::GrowMixer(_)
                 | Self::SetEffect { .. }
                 | Self::SetPlugin { .. }
                 | Self::SetInput(_)
@@ -302,6 +306,8 @@ pub enum Garbage {
     Tables(Arc<gt_dsp::synth::wavetable::SynthTables>),
     /// A mixer-settings box, already copied into the mixer.
     Mixer(Box<MixerParams>),
+    /// The emptied list of new strips.
+    NewStrips(Box<crate::mixer::NewStrips>),
     /// An effect taken out of a slot.
     Effect(EffectBox),
     /// A plugin taken out of the plugin table (already stopped).

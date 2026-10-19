@@ -255,15 +255,31 @@ impl AudioProcessor {
     /// Offline renders: outputs the signal of strip `strip` at `point` instead of the master
     /// (render to audio, consolidate, freeze; D105). `None` restores the master output. Not
     /// for a running device stream: call it before or between offline passes.
-    pub fn set_tap(&mut self, tap: Option<(u8, crate::Tap)>) {
+    pub fn set_tap(&mut self, tap: Option<(u16, crate::Tap)>) {
         self.tapped = tap.is_some();
         self.mixer.set_tap(tap.map(|(s, p)| (usize::from(s), p)));
     }
 
     /// Frames by which delay compensation holds back what clips and channels send into
     /// `strip` (so a render taken at its [`crate::Tap::Input`] lags the timeline by this much).
-    pub fn strip_input_delay(&self, strip: u8) -> usize {
+    pub fn strip_input_delay(&self, strip: u16) -> usize {
         self.mixer.input_delay(usize::from(strip))
+    }
+
+    /// How late `strip`'s output is against the timeline (its delay compensation plus its
+    /// effects' latency), in frames.
+    pub fn strip_output_latency(&self, strip: u16) -> usize {
+        self.mixer.output_latency(usize::from(strip))
+    }
+
+    /// Total latency of the mix, in frames.
+    pub fn mix_latency(&self) -> usize {
+        self.mixer.latency()
+    }
+
+    /// Number of strips the mixer has.
+    pub(crate) fn mixer_capacity(&self) -> usize {
+        self.mixer.capacity()
     }
 
     /// The telemetry this processor publishes (also visible through the `EngineHandle`).
@@ -1213,6 +1229,10 @@ impl AudioProcessor {
                 velocity,
             } => self.slot_note_on(usize::from(slot), key, velocity),
             EngineCommand::NoteOff { slot, key } => self.slot_note_off(usize::from(slot), key),
+            EngineCommand::GrowMixer(mut strips) => {
+                self.mixer.grow(&mut strips);
+                self.retire(Garbage::NewStrips(strips));
+            }
             EngineCommand::SetMixer(params) => {
                 self.mixer.set_params(&params);
                 self.mixer.resolve_plugins(&self.plugins);
@@ -2331,7 +2351,7 @@ mod tests {
                 plugin: Some(synth),
                 gain: 1.0,
                 pan: 0.0,
-                route: MASTER as u8,
+                route: MASTER as u16,
                 ..crate::ChannelParams::default()
             }),
         })
@@ -2429,7 +2449,7 @@ mod tests {
                     plugin: Some(PluginInstanceId(id)),
                     gain: 1.0,
                     pan: 0.0,
-                    route: MASTER as u8,
+                    route: MASTER as u16,
                     ..crate::ChannelParams::default()
                 }),
             })
@@ -2510,11 +2530,11 @@ mod tests {
         use gt_core::{PluginInstanceId, MASTER};
         let (mut h, mut p) = engine(48_000, 2);
         h.send(EngineCommand::SetMetronome(false)).unwrap();
-        let arp = |extra: Option<u8>, midi_out: Option<u16>| crate::ChannelParams {
+        let arp = |extra: Option<u16>, midi_out: Option<u16>| crate::ChannelParams {
             kind: crate::InstrumentKind::Plugin,
             plugin: Some(PluginInstanceId(9201)),
             gain: 1.0,
-            route: MASTER as u8,
+            route: MASTER as u16,
             extra_routes: {
                 let mut r = [None; gt_core::MAX_EXTRA_OUTPUTS];
                 r[0] = extra;
@@ -2534,7 +2554,7 @@ mod tests {
                 kind: crate::InstrumentKind::Plugin,
                 plugin: Some(PluginInstanceId(9202)),
                 gain: 1.0,
-                route: MASTER as u8,
+                route: MASTER as u16,
                 ..crate::ChannelParams::default()
             }),
         })
@@ -2575,7 +2595,7 @@ mod tests {
         // Routed to the master, the extra output is heard.
         h.send(EngineCommand::SetChannelParams {
             slot: 0,
-            params: Box::new(arp(Some(MASTER as u8), Some(1))),
+            params: Box::new(arp(Some(MASTER as u16), Some(1))),
         })
         .unwrap();
         for _ in 0..20 {

@@ -78,7 +78,7 @@ pub struct ZoneMap {
     /// round-robin takes share a range).
     pub zones: Vec<Zone>,
     /// Mixer inserts of the separate outputs zones use (see [`Zone::aux`]).
-    pub routes: Vec<u8>,
+    pub routes: Vec<u16>,
 }
 
 impl ZoneMap {
@@ -130,7 +130,7 @@ impl ZoneMap {
     ) -> Option<Self> {
         let mut map = Self::default();
         for (key, pad) in kit.pads() {
-            let aux = match pad.output.and_then(|o| u8::try_from(o).ok()) {
+            let aux = match pad.output.and_then(|o| u16::try_from(o).ok()) {
                 None => 0,
                 Some(o) => match map.routes.iter().position(|&r| r == o) {
                     Some(i) => i as u8 + 1,

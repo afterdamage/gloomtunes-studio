@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use gt_core::{EffectSlot, PluginKind, PluginOwner, FX_SLOTS, STRIPS};
+use gt_core::{EffectSlot, PluginKind, PluginOwner, FX_SLOTS};
 use gt_plugin_host::PluginInfo;
 use gt_ui::views::{
     plugin_browser, PluginAction, PluginBrowserAction, PluginBrowserView, PluginEntry,
@@ -41,7 +41,7 @@ impl GloomApp {
         if self.plugin_slot.is_some() {
             return self.plugin_slot;
         }
-        let strip = self.mixer_state.selected.min(STRIPS - 1);
+        let strip = self.mixer_state.selected.min(self.project.mixer.inserts());
         let slots = &self.project.mixer.strips[strip].slots;
         self.mixer_state
             .slot

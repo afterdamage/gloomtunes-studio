@@ -676,12 +676,12 @@ impl ChannelSlot {
     }
 
     /// Mixer strip this channel plays into.
-    pub(crate) fn route(&self) -> u8 {
+    pub(crate) fn route(&self) -> u16 {
         self.params.route
     }
 
     /// Inserts of a multi-output plugin's extra outputs.
-    pub(crate) fn extra_routes(&self) -> &[Option<u8>; gt_core::MAX_EXTRA_OUTPUTS] {
+    pub(crate) fn extra_routes(&self) -> &[Option<u16>; gt_core::MAX_EXTRA_OUTPUTS] {
         &self.params.extra_routes
     }
 
@@ -711,13 +711,13 @@ impl ChannelSlot {
     }
 
     /// The mixer inserts of the separate outputs (drum pads), in aux order.
-    pub(crate) fn aux_routes(&self) -> &[u8] {
+    pub(crate) fn aux_routes(&self) -> &[u16] {
         self.zones.as_ref().map_or(&[], |m| m.routes.as_slice())
     }
 
     /// Hands each separate output's quantum (with the channel's volume) to `f` with its
     /// insert, then clears it.
-    pub(crate) fn drain_aux(&mut self, mut f: impl FnMut(u8, &[f32], &[f32], f32)) {
+    pub(crate) fn drain_aux(&mut self, mut f: impl FnMut(u16, &[f32], &[f32], f32)) {
         let gain = self.extra_gain();
         let Some(m) = &self.zones else {
             return;

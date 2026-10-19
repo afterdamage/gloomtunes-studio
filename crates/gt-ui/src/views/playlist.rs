@@ -29,7 +29,7 @@ use gt_core::playlist::TRACK_COLORS;
 use gt_core::{
     AutoPoint, Automation, ClipId, ClipKind, ClipStretch, Curve, FadeCurve, ParamId, PatternId,
     Peaks, Project, SampleSource, SigChange, StretchMode, StripKind, TempoMap, TempoPoint, Tick,
-    TimeSig, TimeSigMap, TrackId, FX_SLOTS, MASTER, PPQ, STRIPS,
+    TimeSig, TimeSigMap, TrackId, FX_SLOTS, MASTER, PPQ,
 };
 
 use crate::i18n::tr;
@@ -594,13 +594,10 @@ fn automation_menu(ui: &mut Ui, project: &Project) -> Option<ParamId> {
     });
     ui.menu_button(tr("Mixer"), |ui| {
         let mixer = &project.mixer;
-        for i in 0..STRIPS {
-            let s = &mixer.strips[i];
+        for (i, s) in mixer.strips.iter().enumerate() {
             let kind = StripKind::of(i);
-            let used = i == MASTER
-                || matches!(kind, StripKind::Send(_))
-                || s.name != kind.default_name()
-                || s.slots.iter().any(Option::is_some);
+            let used =
+                i == MASTER || s.name != kind.default_name() || s.slots.iter().any(Option::is_some);
             if !used {
                 continue;
             }
@@ -2717,6 +2714,13 @@ fn track_headers(
     let mut remove = None;
     let mut insert_at = None;
     let n = project.playlist.tracks.len();
+    let inserts = project.mixer.inserts();
+    let strip_names: Vec<String> = project
+        .mixer
+        .strips
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
     for row in 0..n {
         let top = geo.row_top(row);
         if top > headers.bottom() || top + geo.track_h < headers.top() {
@@ -2811,13 +2815,15 @@ fn track_headers(
                 .put(
                     line2,
                     egui::DragValue::new(&mut ins)
-                        .range(0..=gt_core::INSERTS as i64)
+                        .range(0..=inserts as i64)
                         .speed(0.1)
                         .custom_formatter(|v, _| {
                             if v < 0.5 {
                                 "audio to M".to_owned()
                             } else {
-                                format!("audio to {v:.0}")
+                                // The linked insert's name, side by side with the track.
+                                let name = strip_names.get(v as usize).map_or("", |n| n.as_str());
+                                format!("{v:.0} {name}")
                             }
                         }),
                 )
@@ -2825,7 +2831,7 @@ fn track_headers(
                     "Mixer strip this track's audio clips play into (M = master)",
                 ));
             if resp.changed() {
-                t.insert = ins.clamp(0, gt_core::INSERTS as i64) as usize;
+                t.insert = ins.clamp(0, inserts as i64) as usize;
                 changed = true;
             }
             let line2b = Rect::from_min_max(

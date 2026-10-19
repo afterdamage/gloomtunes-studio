@@ -79,7 +79,7 @@ impl GloomApp {
             .filter_map(|(i, s)| {
                 Some(InputRoute {
                     input: s.input?,
-                    strip: i as u8,
+                    strip: i as u16,
                     armed: None,
                 })
             })
@@ -88,7 +88,7 @@ impl GloomApp {
             if let (true, Some(input)) = (self.playlist.armed.contains(&t.id), t.input) {
                 routes.push(InputRoute {
                     input,
-                    strip: t.insert.min(gt_core::STRIPS - 1) as u8,
+                    strip: t.insert.min(gt_core::STRIPS - 1) as u16,
                     armed: Some(monitor),
                 });
             }

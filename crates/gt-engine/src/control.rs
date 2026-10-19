@@ -39,14 +39,14 @@ pub enum ParamDest {
     /// A mixer strip's fader, balance or send.
     Strip {
         /// Strip index.
-        strip: u8,
+        strip: u16,
         /// Which control.
         param: StripParam,
     },
     /// An effect parameter.
     Effect {
         /// Strip index.
-        strip: u8,
+        strip: u16,
         /// Slot index.
         slot: u8,
         /// Parameter index.
@@ -83,7 +83,7 @@ impl ParamDest {
                 row: u(row)?,
             },
             ParamId::Strip { strip, param } => Self::Strip {
-                strip: u(strip)?,
+                strip: u16::try_from(strip).ok()?,
                 param,
             },
             ParamId::Effect {
@@ -92,7 +92,7 @@ impl ParamDest {
                 index,
                 ..
             } => Self::Effect {
-                strip: u(strip)?,
+                strip: u16::try_from(strip).ok()?,
                 slot: u(fx)?,
                 index: u(index)?,
             },

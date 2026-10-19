@@ -32,7 +32,7 @@ fn main() {
             slot,
             params: Box::new(ChannelParams {
                 gain: 0.3,
-                route: (slot % 8 + 1) as u8,
+                route: slot % 8 + 1,
                 ..ChannelParams::default()
             }),
         })
@@ -42,7 +42,7 @@ fn main() {
         for (k, slot) in strip.slots.iter().enumerate() {
             if let Some(slot) = slot {
                 h.send(EngineCommand::SetEffect {
-                    strip: si as u8,
+                    strip: si as u16,
                     slot: k as u8,
                     effect: Some(create_effect(slot, sr as f32)),
                 })

@@ -13,7 +13,7 @@ playlist, with built-in instruments and effects, wrapped in a dark, moody "Gloom
 > crashes, and songs, loop regions or per-track stems export to WAV. Every knob and fader can
 > be automated with curved automation clips or modulated by LFOs and envelope followers, in a
 > playlist that arranges pattern, audio and automation clips on unlimited tracks, with tempo and
-> time-signature changes, markers and a loop region, on top of a mixer with 64 inserts, 4 send buses and eight built-in
+> time-signature changes, markers and a loop region, on top of a mixer with up to 256 inserts, free sends and eight built-in
 > effects, Gloom Synth (a subtractive polysynth with presets), a piano roll with undo/redo, a
 > channel rack with a step sequencer, a sampler, a sample browser, four built-in drums and a
 > sample-accurate transport. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
@@ -180,18 +180,23 @@ and the app shows it that way. Function keys on a Mac laptop may need **fn** hel
     arrows (move by the snap or a semitone), Shift+Up/Down (an octave), Q (quantize).
   - The toolbar sets snap (1/4 to 1/32, triplets), scale highlighting, ghost notes from the other
     channels, quantize strength and humanize amounts.
-- **Mixer** (tab or **F9**) shows the master, 64 inserts and 4 send buses. Each channel in the
+- **Mixer** (tab or **F9**) shows the master and the inserts (64 to start; **+** adds more, up to
+  256, and the bin next to a strip's name deletes it). Each channel in the
   rack has an insert box (M is the master); new channels get a free insert named after them.
   - Each strip has a fader (double-click resets to 0 dB), balance, mute, solo, polarity (Ø) and
     peak/RMS meters. Click a strip to edit it on the right.
-  - The detail panel sets where the strip goes (master, an insert or a send bus), the sidechain
-    source and, on inserts, four post-fader send levels. Routes that would make a loop are not
-    offered.
+  - The detail panel sets where the strip goes (the master or another insert), the sidechain
+    source and, on inserts, up to eight sends to other strips, each with a level and a Pre
+    switch (pre-fader). Routes that would make a loop are not offered. The master's panel sets
+    the pan law (0, -3, -4.5 or -6 dB at centre).
+  - Give a strip a colour and an icon, link a playlist track to it (the track plays into it and
+    lends it its name and colour), and save or load strip and effect-chain presets from the
+    strip's Presets menus. Export can write stems per track or per mixer insert.
   - Ten effect slots per strip: pick an effect in a slot's menu, switch it On/Off, click it to
     edit. The EQ shows its curve: drag a handle to move a band; the knobs below set type, gain and Q. Compressors
     show gain reduction. Set a compressor's Sidechain knob to 1 to key it from the strip's
     sidechain source.
-  - The demo mix sends snare and clap to a reverb bus and the hat to a delay bus, ducks the bass
+  - The demo mix sends snare and clap to a reverb insert and the hat to a delay insert, ducks the bass
     with the kick and has a limiter on the master. Latency added by the limiter is compensated on
     every path and shown on the master strip.
 - **Automation and modulation from any control:** right-click a knob or fader (rack volume and

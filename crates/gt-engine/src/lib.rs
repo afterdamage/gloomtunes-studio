@@ -49,7 +49,8 @@ pub use live::{
 };
 pub use load::LoadMeter;
 pub use mixer::{
-    create_effect, create_effect_with, EffectBox, MixerParams, StripParams, MAX_PDC_FRAMES,
+    create_effect, create_effect_with, EffectBox, MixerParams, SendParams, StripParams,
+    MAX_PDC_FRAMES,
 };
 pub use mixer::{freeze_post_fx, Tap};
 pub use plugin::{PluginBox, PluginContext, PluginProcessor, MAX_PLUGINS};
@@ -297,12 +298,33 @@ pub struct EngineHandle {
     live: Option<Producer<LiveEvent>>,
     telemetry: Arc<Telemetry>,
     config: EngineConfig,
+    /// Strips the engine's mixer has (or will have once the queued settings arrive).
+    mixer_strips: usize,
 }
 
 impl EngineHandle {
     /// Queues a command for the audio thread. Never blocks; if the queue is full the command is
     /// handed back so the caller can retry later.
     pub fn send(&mut self, cmd: EngineCommand) -> Result<(), EngineCommand> {
+        // A command about strips the engine does not have yet: build them here first.
+        let strips = match &cmd {
+            EngineCommand::SetMixer(p) => p.strips.len(),
+            EngineCommand::SetEffect { strip, .. }
+            | EngineCommand::SetEffectParam { strip, .. } => usize::from(*strip) + 1,
+            _ => 0,
+        }
+        .min(gt_core::STRIPS);
+        if strips > self.mixer_strips {
+            let new = mixer::NewStrips::new(strips - self.mixer_strips);
+            if self
+                .commands
+                .push(EngineCommand::GrowMixer(Box::new(new)))
+                .is_err()
+            {
+                return Err(cmd);
+            }
+            self.mixer_strips = strips;
+        }
         self.commands
             .push(cmd)
             .map_err(|rtrb::PushError::Full(c)| c)
@@ -370,6 +392,7 @@ pub fn create(config: EngineConfig) -> (EngineHandle, AudioProcessor) {
         live: Some(live_tx),
         telemetry,
         config,
+        mixer_strips: processor.mixer_capacity(),
     };
     (handle, processor)
 }

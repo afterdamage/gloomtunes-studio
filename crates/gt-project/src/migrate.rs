@@ -29,19 +29,30 @@
 //!   channel swing, choke and filter groups and key settings. Older builds would reset odd
 //!   lengths to 16 steps and could not read a layer, so the version is bumped. The upgrade
 //!   from 5 changes nothing: every new field is optional.
+//! - 7 (Prompt 28): drum synth pads, the bass engine and player channels, all new values.
+//! - 8 (Prompt 29): a variable number of inserts and free sends. Each strip's `sends` was a
+//!   list of four levels into the send buses (strips 65 to 68); it is now a list of
+//!   `{ "to", "level", "pre" }`. The upgrade turns every non-zero level `k` into a post-fader
+//!   send to strip `65 + k` (the buses become ordinary inserts, so the file keeps its 68
+//!   inserts) and rewrites `mixer/N/send/K` parameter keys to `mixer/N/send/{65 + K}`.
 
 use serde_json::Value;
 
 use crate::file::{FileError, FORMAT};
 
 /// The schema version this build writes.
-pub const CURRENT: u32 = 7;
+pub const CURRENT: u32 = 8;
 
 /// One upgrade: rewrites a tree of version `from` into version `from + 1`.
 pub type Migration = fn(&mut Value) -> Result<(), String>;
 
 /// Upgrades by version: entry `i` turns version `i + 1` into `i + 2`.
-pub const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5, v5_to_v6, v6_to_v7];
+pub const MIGRATIONS: &[Migration] = &[
+    v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5, v5_to_v6, v6_to_v7, v7_to_v8,
+];
+
+/// First send bus before version 8.
+const OLD_FIRST_SEND: u64 = 65;
 
 /// Version 2 added plugins; a version 1 tree is already a valid version 2 tree.
 fn v1_to_v2(_v: &mut Value) -> Result<(), String> {
@@ -76,6 +87,54 @@ fn v5_to_v6(_v: &mut Value) -> Result<(), String> {
 /// version 6 tree is already a valid version 7 tree.
 fn v6_to_v7(_v: &mut Value) -> Result<(), String> {
     Ok(())
+}
+
+/// Version 8 replaced the four send levels per strip with a list of sends to any strip.
+fn v7_to_v8(v: &mut Value) -> Result<(), String> {
+    if let Some(strips) = v
+        .get_mut("project")
+        .and_then(|p| p.get_mut("mixer"))
+        .and_then(Value::as_array_mut)
+    {
+        for strip in strips {
+            let Some(levels) = strip.get("sends").and_then(Value::as_array) else {
+                continue;
+            };
+            // Already a list of sends (a newer tree labelled old): leave it.
+            if !levels.iter().all(Value::is_number) {
+                continue;
+            }
+            let sends: Vec<Value> = levels
+                .iter()
+                .enumerate()
+                .filter_map(|(k, l)| Some((k, l.as_f64().filter(|&l| l > 0.0)?)))
+                .map(|(k, level)| {
+                    serde_json::json!({ "to": OLD_FIRST_SEND + k as u64, "level": level })
+                })
+                .collect();
+            strip["sends"] = Value::Array(sends);
+        }
+    }
+    rename_send_keys(v);
+    Ok(())
+}
+
+/// Rewrites every string `mixer/N/send/K` (K below 4) in the tree to `mixer/N/send/{65 + K}`.
+fn rename_send_keys(v: &mut Value) {
+    match v {
+        Value::String(s) => {
+            let parts: Vec<&str> = s.split('/').collect();
+            if let ["mixer", strip, "send", k] = parts[..] {
+                // Version 7 had four sends, 0 to 3.
+                if let (Ok(_), Ok(k @ 0..4)) = (strip.parse::<u32>(), k.parse::<u64>()) {
+                    *s = format!("mixer/{strip}/send/{}", OLD_FIRST_SEND + k);
+                }
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(rename_send_keys),
+        Value::Object(o) => o.values_mut().for_each(rename_send_keys),
+        _ => {}
+    }
 }
 
 /// Checks the format tag and upgrades `v` to [`CURRENT`]. Returns the tree and the version the
@@ -160,6 +219,28 @@ mod tests {
             upgrade(json!({ "format": FORMAT })),
             Err(FileError::Format(_))
         ));
+    }
+
+    #[test]
+    fn version_7_sends_become_sends_to_the_old_buses() {
+        let mut v = json!({ "project": {
+            "mixer": [
+                { "name": "Master", "sends": [0.0, 0.0, 0.0, 0.0] },
+                { "name": "Kick", "sends": [0.0, 0.5, 0.0, 0.25] },
+            ],
+            "playlist": { "clips": [{ "target": "mixer/1/send/3" }] },
+            "modulators": [{ "target": "mixer/1/send/0" }, { "target": "mixer/1/volume" }],
+        }});
+        v7_to_v8(&mut v).unwrap();
+        let p = &v["project"];
+        assert_eq!(p["mixer"][0]["sends"], json!([]));
+        assert_eq!(
+            p["mixer"][1]["sends"],
+            json!([{ "to": 66, "level": 0.5 }, { "to": 68, "level": 0.25 }])
+        );
+        assert_eq!(p["playlist"]["clips"][0]["target"], "mixer/1/send/68");
+        assert_eq!(p["modulators"][0]["target"], "mixer/1/send/65");
+        assert_eq!(p["modulators"][1]["target"], "mixer/1/volume");
     }
 
     #[test]

@@ -101,8 +101,10 @@ pub struct ExportSettings {
     pub tail: bool,
     /// Longest tail.
     pub max_tail_seconds: f32,
-    /// One file per playlist track instead of the mix.
+    /// One file per playlist track (or mixer insert, see `stem_kind`) instead of the mix.
     pub stems: bool,
+    /// What a stem is.
+    pub stem_kind: StemKind,
     /// One file per marker region (from each marker to the next, the last to the song end)
     /// instead of the range; with `stems`, one file per track and region.
     pub regions: bool,
@@ -125,12 +127,24 @@ impl Default for ExportSettings {
             tail: true,
             max_tail_seconds: 10.0,
             stems: false,
+            stem_kind: StemKind::Tracks,
             regions: false,
             format: Format::Wav,
             ogg_quality: 6.0,
             mp3: Mp3Mode::default(),
         }
     }
+}
+
+/// What one stem holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StemKind {
+    /// One playlist track alone through the whole mix (stems add up to the mix).
+    #[default]
+    Tracks,
+    /// What one mixer insert outputs, after its effects and fader, lined up with the mix
+    /// (Prompt 29). Inserts that nothing plays into are skipped, and so are silent ones.
+    Inserts,
 }
 
 /// Why an export failed.
@@ -271,17 +285,24 @@ pub fn render(
 ) -> Result<Vec<Rendered>, ExportError> {
     let (start, end) = range_ticks(project, settings.range).ok_or(ExportError::Empty)?;
     let base = trimmed(project, end);
-    let jobs: Vec<(String, Project)> = if settings.stems {
-        stem_projects(&base)
-    } else {
-        vec![(String::new(), base)]
+    type Job = (String, Project, Option<(u16, gt_engine::Tap)>);
+    let jobs: Vec<Job> = match (settings.stems, settings.stem_kind) {
+        (false, _) => vec![(String::new(), base, None)],
+        (true, StemKind::Tracks) => stem_projects(&base)
+            .into_iter()
+            .map(|(n, p)| (n, p, None))
+            .collect(),
+        (true, StemKind::Inserts) => insert_stems(&base)
+            .into_iter()
+            .map(|(n, i)| (n, base.clone(), Some((i as u16, gt_engine::Tap::Output))))
+            .collect(),
     };
     if jobs.is_empty() {
         return Err(ExportError::Empty);
     }
     let n = jobs.len() as u32;
     let mut out = Vec::new();
-    for (k, (name, p)) in jobs.into_iter().enumerate() {
+    for (k, (name, p, tap)) in jobs.into_iter().enumerate() {
         let audio = render_one(
             &p,
             samples,
@@ -291,9 +312,15 @@ pub fn render(
             progress,
             (k as u32, n),
             plugins,
-            None,
+            tap,
         )?;
+        if tap.is_some() && audio.iter().all(|x| *x == 0.0) {
+            continue;
+        }
         out.push(Rendered { name, audio });
+    }
+    if out.is_empty() {
+        return Err(ExportError::Empty);
     }
     if let Some(db) = settings.normalize_db {
         // One gain for every file, so stems still add up to the mix.
@@ -555,6 +582,60 @@ fn stem_projects(base: &Project) -> Vec<(String, Project)> {
     out
 }
 
+/// The inserts that something plays into (a channel, a pad or plugin output, a track with
+/// sound clips, another strip or a device input), with their stem names.
+fn insert_stems(base: &Project) -> Vec<(String, usize)> {
+    let m = &base.mixer;
+    let mut fed = vec![false; m.strips.len()];
+    let mut mark = |i: usize| {
+        if let Some(f) = fed.get_mut(i) {
+            *f = true;
+        }
+    };
+    for c in &base.channels {
+        mark(c.insert);
+        if let Some(k) = c.drums() {
+            k.pads().filter_map(|(_, p)| p.output).for_each(&mut mark);
+        }
+        if let Some(p) = c.plugin() {
+            p.outputs
+                .iter()
+                .filter_map(|o| o.route)
+                .for_each(|r| mark(usize::from(r)));
+        }
+    }
+    let pl = &base.playlist;
+    for t in &pl.tracks {
+        if pl
+            .clips
+            .iter()
+            .any(|c| c.track == t.id && !matches!(c.kind, ClipKind::Automation(_)))
+        {
+            mark(t.insert);
+        }
+    }
+    for (i, s) in m.strips.iter().enumerate().skip(1) {
+        if s.input.is_some() {
+            mark(i);
+        }
+    }
+    // Whatever a fed strip outputs or sends to is fed too; the order puts sources first.
+    for i in m.processing_order().unwrap_or_default() {
+        if i != gt_core::MASTER && fed[i] {
+            let s = &m.strips[i];
+            fed[s.output] = true;
+            for x in &s.sends {
+                fed[x.to] = true;
+            }
+        }
+    }
+    let audible = m.audible();
+    (1..m.strips.len())
+        .filter(|&i| fed[i] && audible[i])
+        .map(|i| (format!("{i} {}", m.strips[i].name), i))
+        .collect()
+}
+
 /// Sends a command, rendering silent quanta while the queue is full.
 fn send(h: &mut EngineHandle, p: &mut AudioProcessor, mut cmd: EngineCommand) {
     let mut scratch = [0.0_f32; 64];
@@ -670,7 +751,7 @@ fn load_engine(
                     h,
                     p,
                     EngineCommand::SetEffect {
-                        strip: si as u8,
+                        strip: si as u16,
                         slot: k as u8,
                         effect: Some(create_effect_with(slot, rate as f32, file.as_ref())),
                     },
@@ -721,7 +802,7 @@ fn render_one(
     progress: &Progress,
     (job, jobs): (u32, u32),
     plugins: &mut Vec<Box<PluginBox>>,
-    tap: Option<(u8, gt_engine::Tap)>,
+    tap: Option<(u16, gt_engine::Tap)>,
 ) -> Result<Vec<f32>, ExportError> {
     let rate = settings.sample_rate;
     let (mut h, mut p) = create(EngineConfig {
@@ -749,6 +830,16 @@ fn render_one(
         let mut a = a.clone();
         a.drain(..d.min(a.len()));
         return Ok(a);
+    }
+    // An insert's output is earlier than the mix by the delay compensation after it: line the
+    // stem up with the mix.
+    if let (Ok(a), Some((strip, gt_engine::Tap::Output))) = (&audio, tap) {
+        let d = 2 * p
+            .mix_latency()
+            .saturating_sub(p.strip_output_latency(strip));
+        let mut out = vec![0.0; d.min(a.len())];
+        out.extend_from_slice(&a[..a.len() - out.len()]);
+        return Ok(out);
     }
     audio
 }
@@ -902,6 +993,58 @@ mod tests {
     fn short_song() -> Project {
         // The demo's first two bars (the intro).
         Project::demo()
+    }
+
+    #[test]
+    fn insert_stems_line_up_and_add_up_to_the_mix() {
+        let mut project = short_song();
+        // Plain routing (every insert straight to the master, no master effects), with a
+        // latent gate on the kick's insert so the others must be delayed to line up.
+        for s in &mut project.mixer.strips {
+            s.slots = Default::default();
+            s.sends.clear();
+            s.sidechain = None;
+            s.output = gt_core::MASTER;
+        }
+        let kick = project.channels[0].insert;
+        project.mixer.strips[kick].slots[0] = Some(
+            gt_core::EffectSlot::new(gt_core::EffectKind::Gate)
+                .with("threshold", -80.0)
+                .with("attack", 0.01)
+                .with("lookahead", 2.0),
+        );
+        let settings = ExportSettings {
+            range: Range::Ticks {
+                start: 2 * 3840,
+                end: 3 * 3840,
+            },
+            tail: false,
+            ..ExportSettings::default()
+        };
+        let (samples, _) = load_samples(&project, 48_000);
+        let go = |s: &ExportSettings| {
+            render(&project, &samples, s, &Progress::default(), &mut Vec::new()).unwrap()
+        };
+        let mix = go(&settings);
+        let stems = go(&ExportSettings {
+            stems: true,
+            stem_kind: StemKind::Inserts,
+            ..settings
+        });
+        assert!(stems.len() >= 3, "{}", stems.len());
+        assert!(stems.iter().any(|s| s.name == format!("{kick} Kick")));
+        let mut sum = vec![0.0_f32; mix[0].audio.len()];
+        for s in &stems {
+            assert_eq!(s.audio.len(), sum.len(), "{}", s.name);
+            for (d, x) in sum.iter_mut().zip(&s.audio) {
+                *d += x;
+            }
+        }
+        let err = sum
+            .iter()
+            .zip(&mix[0].audio)
+            .fold(0.0_f32, |m, (a, b)| m.max((a - b).abs()));
+        assert!(err < 1e-3, "{err}");
     }
 
     #[test]
