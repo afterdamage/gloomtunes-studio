@@ -228,7 +228,19 @@ pub enum ParamId {
         /// The plugin's id for the parameter.
         id: u32,
     },
+    /// The song tempo (Prompt 31). Automation clips of it become ramps and steps of the
+    /// tempo map the song plays with ([`Project::song_tempo`]); nothing else moves it.
+    Tempo,
 }
+
+/// Range of tempo automation: 40 to 240 BPM, linear.
+pub static TEMPO_INFO: ParamInfo = info(
+    "tempo",
+    "Tempo",
+    (40.0, 240.0, 120.0),
+    ParamCurve::Linear,
+    ParamUnit::Bpm,
+);
 
 impl ParamId {
     /// The same parameter with its strip indices passed through `f` (which returns `None` for a
@@ -298,6 +310,7 @@ impl ParamId {
             },
             Self::Effect { kind, index, .. } => kind.params().get(index).unwrap_or(&MOD_AMOUNT),
             Self::Plugin { .. } => &PLUGIN_PARAM,
+            Self::Tempo => &TEMPO_INFO,
         }
     }
 
@@ -342,6 +355,7 @@ impl ParamId {
                     format!("mixer/{strip}/fx/{slot}/plugin/{plugin:08x}/{id}")
                 }
             },
+            Self::Tempo => "tempo".to_owned(),
         }
     }
 
@@ -351,6 +365,7 @@ impl ParamId {
         let parts: Vec<&str> = key.split('/').collect();
         let num = |s: &str| s.parse::<usize>().ok();
         match parts.as_slice() {
+            ["tempo"] => Some(Self::Tempo),
             ["channel", id, rest @ ..] => {
                 let channel = ChannelId(id.parse().ok()?);
                 match rest {
@@ -451,6 +466,7 @@ impl ParamId {
                 }
             }
             Self::Plugin { id, .. } => format!("Parameter {id}"),
+            Self::Tempo => "Tempo".to_owned(),
         }
     }
 
@@ -494,6 +510,7 @@ impl ParamId {
                     None => format!("{place} · (plugin gone) · {}", self.label()),
                 }
             }
+            Self::Tempo => "Song · Tempo".to_owned(),
         }
     }
 
@@ -501,6 +518,10 @@ impl ParamId {
     /// channel, a sampler setting of a synth channel, an empty or different effect slot).
     pub fn get(&self, project: &Project) -> Option<f32> {
         match *self {
+            Self::Tempo => Some(
+                self.info()
+                    .clamp(project.tempo.bpm_at(crate::Tick(0)) as f32),
+            ),
             Self::Channel { channel, param } => {
                 let ch = &project.channels[project.channel_index(channel)?];
                 if !param.sampler_only() {
@@ -656,6 +677,8 @@ impl ParamId {
                 .plugin_mut(owner)
                 .filter(|p| p.id_hash() == plugin)
                 .is_some_and(|p| p.set_value(id, v)),
+            // Only automation clips move the tempo, through the song's tempo map.
+            Self::Tempo => false,
         }
     }
 

@@ -37,6 +37,7 @@ impl GloomApp {
     /// Once per frame, before the views: engine events, MIDI controllers, the typing
     /// keyboard, the live channel and the transport bar's live state.
     pub(super) fn live_frame(&mut self, ctx: &egui::Context, dt: f32) {
+        self.tick_performance();
         let mut recorded = self.sweep_take();
         for e in self.audio.take_events() {
             match e {
@@ -321,7 +322,7 @@ impl GloomApp {
     /// The pattern position a live event at song tick `tick` belongs to: the player heard
     /// the music late by the output latency, so they played late too.
     fn recorded_at(&self, tick: f64) -> Option<i64> {
-        let bpm = self.project.tempo.bpm_at(Tick(tick.max(0.0) as i64));
+        let bpm = self.project.song_tempo().bpm_at(Tick(tick.max(0.0) as i64));
         let ms = f64::from(self.audio.buffer_ms().unwrap_or(0.0) + self.midi_model.extra_ms);
         let t = (tick - ms_to_ticks(ms, bpm)).round() as i64;
         self.pattern_tick_at(t.max(0))
@@ -473,7 +474,7 @@ impl GloomApp {
         let selected =
             (self.rack.selected < self.project.channels.len()).then_some(self.rack.selected as u16);
         let channels = self.project.channels.len();
-        let bpm = self.project.tempo.bpm_at(self.transport.position);
+        let bpm = self.project.song_tempo().bpm_at(self.transport.position);
         let got = crate::live::capture(&events, gt_engine::clock_ns(), bpm, |e| {
             routes
                 .slot(e.port, e.channel, selected)

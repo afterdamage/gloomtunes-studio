@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use gt_core::{
-    Note, PatternId, Project, SigChange, SynthPatch, TempoMap, TempoPoint, Tick, TimeSig,
+    Curve, Note, PatternId, Project, SigChange, SynthPatch, TempoMap, TempoPoint, Tick, TimeSig,
     TimeSigMap, PPQ,
 };
 use gt_engine::{NoteKind, SongSnapshot};
@@ -74,12 +74,12 @@ pub fn to_bytes(project: &Project, scope: SmfScope) -> Vec<u8> {
 
     // Track 0: tempo and time signatures.
     let mut conductor: Vec<Timed<'_>> = Vec::new();
-    for p in project.tempo.points() {
-        let us = (60_000_000.0 / p.bpm)
+    for (at, bpm) in tempo_events(&project.song_tempo()) {
+        let us = (60_000_000.0 / bpm)
             .round()
             .clamp(1.0, f64::from(0x00FF_FFFF));
         conductor.push((
-            p.at.0,
+            at,
             0,
             TrackEventKind::Meta(MetaMessage::Tempo(u24::new(us as u32))),
         ));
@@ -326,7 +326,11 @@ impl SmfImport {
                 let mut pts: Vec<TempoPoint> = self
                     .tempo
                     .iter()
-                    .map(|&(at, bpm)| TempoPoint { at: Tick(at), bpm })
+                    .map(|&(at, bpm)| TempoPoint {
+                        at: Tick(at),
+                        bpm,
+                        ramp: gt_core::Curve::Hold,
+                    })
                     .collect();
                 // The map must start at 0.
                 if pts[0].at.0 > 0 {
@@ -335,6 +339,7 @@ impl SmfImport {
                         TempoPoint {
                             at: Tick(0),
                             bpm: pts[0].bpm,
+                            ramp: gt_core::Curve::Hold,
                         },
                     );
                 }
@@ -381,6 +386,33 @@ fn signatures_from_ticks(changes: &[(i64, TimeSig)]) -> TimeSigMap {
         );
     }
     TimeSigMap::new(&out)
+}
+
+/// Ticks between the tempo events that approximate a ramp in a MIDI file.
+pub const RAMP_STEP_TICKS: i64 = PPQ / 16;
+
+/// The tempo events of a song (ticks at [`PPQ`], BPM). MIDI files only know steps, so a ramp
+/// becomes a step every [`RAMP_STEP_TICKS`], each holding the average tempo over its step:
+/// every step then lasts exactly as long as in the song, and the error never adds up.
+pub fn tempo_events(tempo: &TempoMap) -> Vec<(i64, f64)> {
+    let pts: Vec<TempoPoint> = tempo.points().collect();
+    let mut out = Vec::new();
+    for (i, p) in pts.iter().enumerate() {
+        let next = pts.get(i + 1).map(|n| n.at.0);
+        match next {
+            Some(end) if p.ramp != Curve::Hold => {
+                let mut a = p.at.0;
+                while a < end {
+                    let b = (a + RAMP_STEP_TICKS).min(end);
+                    let s = tempo.tick_to_seconds(b as f64) - tempo.tick_to_seconds(a as f64);
+                    out.push((a, (b - a) as f64 * 60.0 / (PPQ as f64 * s)));
+                    a = b;
+                }
+            }
+            _ => out.push((p.at.0, p.bpm)),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -439,10 +471,12 @@ mod tests {
             TempoPoint {
                 at: Tick(0),
                 bpm: 100.0,
+                ramp: gt_core::Curve::Hold,
             },
             TempoPoint {
                 at: Tick(4 * 3840),
                 bpm: 140.0,
+                ramp: gt_core::Curve::Hold,
             },
         ]);
         let song = SongSnapshot::compile_song(&p, |_| None);
@@ -461,6 +495,30 @@ mod tests {
             .find(|e| matches!(e.kind, NoteKind::On { .. }))
             .unwrap();
         assert_eq!(first.start, want.tick);
+    }
+
+    #[test]
+    fn a_tempo_ramp_exports_as_steps_that_keep_the_song_timing() {
+        let mut p = Project::demo();
+        p.tempo = TempoMap::from_points_lossy(&[
+            TempoPoint::linear(0, 90.0),
+            TempoPoint::step(2 * 3840, 150.0),
+        ]);
+        let file = parse(&to_bytes(&p, SmfScope::Song)).unwrap();
+        assert_eq!(file.tempo.len() as i64, 2 * 3840 / RAMP_STEP_TICKS + 1);
+        // Played back as steps, the file reaches every step (and the ramp's end) when the
+        // song does, within the rounding of microseconds per quarter.
+        let steps = TempoMap::from_points_lossy(
+            &file
+                .tempo
+                .iter()
+                .map(|&(at, bpm)| TempoPoint::step(at, bpm))
+                .collect::<Vec<_>>(),
+        );
+        for &(at, _) in &file.tempo {
+            let d = steps.tick_to_seconds(at as f64) - p.tempo.tick_to_seconds(at as f64);
+            assert!(d.abs() < 1e-4, "{at}: {d}");
+        }
     }
 
     #[test]

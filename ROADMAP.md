@@ -758,6 +758,26 @@ sound identical; the golden export test stays.
   hidden clips; a group insert only carries audio clips of its tracks (pattern clips play
   through their channels' inserts).
 
+### Prompt 31: Tempo ramps, marker actions, performance mode
+- Tempo ramps: a tempo point's `ramp` curve (hold, linear, smooth, bezier) leads to the next
+  point. Linear ramps convert ticks and seconds in closed form (a logarithm and its inverse);
+  curved ones as linear pieces every 1/32 beat. Metronome, notes, tempo-follow audio and MIDI
+  export (steps every 1/16 beat holding the average tempo) follow (D144, schema 10).
+- Tempo automation: clips on the new Song · Tempo target replace the tempo inside their span
+  (`Project::song_tempo`); the project tempo resumes after them.
+- Marker actions: loop to the next marker, stop, pause, skip to a marker, at the exact frame;
+  export ignores them.
+- Performance mode: the playlist as a grid of launchable clips, one playing clip per track,
+  launches quantized to the bar or beat (or off) from the mouse, keys 1 to 9 (scenes) or MIDI
+  channel 16, recorded back into a new arrangement at stop (D145).
+- Tests: tick-to-frame accuracy across linear ramps against the analytic formula and across
+  curves against numeric integration, clicks on ramp frames, tempo-follow audio on a tempo
+  clip, MIDI ramp timing, marker actions on their frames for any buffer size, launches on
+  the exact frame of their bar or beat for any buffer size.
+- Limits: a launch made less than ~80 ms before a launch point waits for the next one;
+  automation clips are not launchable (they keep following the timeline); tempo-follow audio
+  plays through the live stretch while performing.
+
 ---
 
 ## v1.0 scope
@@ -767,7 +787,7 @@ Optional for v1.0: Step 11 (CLAP), delivered.
 Out (post-v1 backlog):
 
 - VST3 hosting.
-- Tempo ramps (the tempo map currently has step changes only).
+- ~~Tempo ramps~~ (Prompt 31).
 - Out-of-process plugin sandbox (evaluated and deferred in Step 11, D74).
 - Additional built-in instruments (FM, wavetable, drum synth).
 - macOS: opening `.gloom` files from Finder (D95).

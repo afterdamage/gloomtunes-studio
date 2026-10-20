@@ -44,6 +44,7 @@ mod automate;
 mod bounce;
 mod browse;
 mod midi;
+mod perform;
 mod plugins;
 mod prefs;
 mod record;
@@ -187,6 +188,18 @@ pub struct GloomApp {
     bounce_job: Option<bounce::BounceJob>,
     /// Renders of stretched audio clips.
     stretch: stretch::StretchCache,
+    /// The tempo map last sent to the engine ([`Project::song_tempo`]).
+    song_tempo: gt_core::TempoMap,
+    /// Performance mode's launches (Prompt 31).
+    show: gt_core::Performance,
+    /// Record the performance into a new arrangement when playback stops.
+    perf_record: bool,
+    /// Where the performance is laid out to.
+    perf_horizon: i64,
+    /// The furthest the playhead got while performing.
+    perf_end: i64,
+    /// A performance is playing (it is recorded when playback stops).
+    perf_live: bool,
     /// A short message shown at the bottom right, and when it appeared.
     toast: Option<(String, Instant)>,
     /// The user confirmed quitting (or there was nothing to save).
@@ -380,6 +393,12 @@ impl GloomApp {
             export_job: None,
             bounce_job: None,
             stretch: stretch::StretchCache::new(),
+            song_tempo: gt_core::TempoMap::default(),
+            show: gt_core::Performance::default(),
+            perf_record: false,
+            perf_horizon: 0,
+            perf_end: 0,
+            perf_live: false,
             toast: None,
             quit_confirmed: false,
             window_title: String::new(),
@@ -506,13 +525,28 @@ impl GloomApp {
     /// Sends what plays: the current pattern (pattern mode) or the playlist (song mode). Audio
     /// clips whose sound is still loading join when it arrives.
     fn push_song(&mut self) {
+        // Tempo automation clips are part of the tempo map, so it goes first when it changed.
+        let tempo = self.project.song_tempo();
+        if tempo != self.song_tempo {
+            self.song_tempo = tempo.clone();
+            self.send(EngineCommand::SetTempoMap(Box::new(tempo)));
+        }
         let song = if self.transport.song_mode {
             self.request_clip_audio();
             self.request_stretches();
             let lib = &self.library;
             let cache = &self.stretch;
+            let perf;
+            let project = if self.playlist.performance {
+                perf = self
+                    .project
+                    .performance_project(&self.show, self.perf_horizon);
+                &perf
+            } else {
+                &self.project
+            };
             SongSnapshot::compile_song_with(
-                &self.project,
+                project,
                 |src| lib.get(src).map(|l| std::sync::Arc::clone(&l.data)),
                 |key| cache.get(key),
             )
@@ -537,8 +571,9 @@ impl GloomApp {
     /// Sends the tempo and time-signature maps, then the song (audio clip times depend on the
     /// tempo).
     fn push_timing(&mut self) {
+        self.song_tempo = self.project.song_tempo();
         self.send(EngineCommand::SetTempoMap(Box::new(
-            self.project.tempo.clone(),
+            self.song_tempo.clone(),
         )));
         self.send(EngineCommand::SetSignatures(Box::new(
             self.project.signatures.clone(),
@@ -1511,8 +1546,9 @@ impl GloomApp {
 
     /// Brings a freshly created engine up to date with the current settings.
     fn sync_new_engine(&mut self) {
+        self.song_tempo = self.project.song_tempo();
         self.send(EngineCommand::SetTempoMap(Box::new(
-            self.project.tempo.clone(),
+            self.song_tempo.clone(),
         )));
         self.send(EngineCommand::SetSignatures(Box::new(
             self.project.signatures.clone(),
@@ -1619,6 +1655,13 @@ impl GloomApp {
     /// whole song (from bar 1 to the end of the last clip, whole bars).
     fn loop_region(&self) -> LoopRegion {
         let t = &self.transport;
+        if self.playlist.performance {
+            // Launched clips play on until stopped.
+            return LoopRegion {
+                enabled: false,
+                ..LoopRegion::default()
+            };
+        }
         if t.loop_enabled || !t.song_mode {
             return LoopRegion {
                 start: t.loop_start,
@@ -1662,6 +1705,9 @@ impl GloomApp {
     }
 
     fn on_playlist(&mut self, action: PlaylistAction) {
+        if self.on_performance(&action) {
+            return;
+        }
         match action {
             PlaylistAction::Changed => {
                 self.push_song();
@@ -1694,6 +1740,12 @@ impl GloomApp {
                 self.push_song();
             }
             PlaylistAction::Bounce { kind, track, clips } => self.on_bounce(kind, track, clips),
+            // Taken by `on_performance`.
+            PlaylistAction::PerformanceMode(_)
+            | PlaylistAction::Launch { .. }
+            | PlaylistAction::LaunchScene(_)
+            | PlaylistAction::SetLaunchQuant(_)
+            | PlaylistAction::RecordPerformance(_) => {}
         }
     }
 
@@ -2586,7 +2638,7 @@ impl eframe::App for GloomApp {
         }
         self.meter.update(self.audio.take_peak(), dt);
         // The tempo and signature shown are the ones at the playhead.
-        self.transport.bpm = self.project.tempo.bpm_at(self.transport.position);
+        self.transport.bpm = self.song_tempo.bpm_at(self.transport.position);
         self.transport.time_sig = self.project.signatures.sig_at(self.transport.position);
         param_ui::set_marks(&ctx, std::sync::Arc::new(self.param_marks()));
         self.publish_live_values(&ctx);

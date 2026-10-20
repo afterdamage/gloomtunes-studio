@@ -10,6 +10,7 @@ mod input_panel;
 mod midi_panel;
 mod mixer;
 mod modulators;
+mod performance;
 mod piano_roll;
 mod player_panel;
 mod playlist;
@@ -39,6 +40,7 @@ pub use midi_panel::{
 };
 pub use mixer::{mixer_view, MixerRequest, MixerState, MixerView, StripMeter, STRIP_ICON_GLYPHS};
 pub use modulators::{modulators_panel, ModulatorsState};
+pub use performance::{grid as performance_rows, performance_grid, PerformanceView};
 pub use piano_roll::{
     group_color, key_name, piano_roll, stretch_notes, GhostChannel, Lane, LaneDraw, NoteProp,
     PianoRollAction, PianoRollState, PianoRollView, ScaleKind, Snap, Tool,

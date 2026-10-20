@@ -114,6 +114,11 @@ pub fn set_marks(ctx: &Context, marks: Arc<ParamMarks>) {
     ctx.data_mut(|d| d.insert_temp(marks_id(), marks));
 }
 
+/// Makes a request as a control's menu would, for controls without [`param_menu`] (the tempo).
+pub fn request(ctx: &Context, req: ParamRequest) {
+    ctx.data_mut(|d| d.insert_temp(request_id(), req));
+}
+
 /// Takes the request a control's menu made this frame, if any.
 pub fn take_request(ctx: &Context) -> Option<ParamRequest> {
     ctx.data_mut(|d| {

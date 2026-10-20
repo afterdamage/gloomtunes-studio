@@ -123,7 +123,7 @@ impl std::fmt::Debug for LiveStretch {
 /// Source frames per output frame of a clip that does not use the engine (resampling), or of
 /// one whose render is missing (an approximation: the speed at the clip's start).
 pub fn plain_speed(project: &Project, clip: &Clip, stretch: &ClipStretch) -> f64 {
-    stretch.speed(project.tempo.bpm_at(Tick(clip.start - clip.offset)))
+    stretch.speed(project.song_tempo().bpm_at(Tick(clip.start - clip.offset)))
 }
 
 /// The cache key of the render `clip` needs, if it uses the stretch engine (cheap: for
@@ -154,9 +154,13 @@ pub fn key(project: &Project, clip: &Clip, sample: &SampleData) -> Option<u64> {
             }
             // The render depends on where the origin is and on the tempo map.
             (clip.start - clip.offset).hash(&mut h);
-            for p in project.tempo.points() {
+            for p in project.song_tempo().points() {
                 p.at.0.hash(&mut h);
                 p.bpm.to_bits().hash(&mut h);
+                p.ramp.index().hash(&mut h);
+                if let gt_core::Curve::Bezier(x) = p.ramp {
+                    x.to_bits().hash(&mut h);
+                }
             }
         }
         StretchMode::Off => {}
@@ -174,7 +178,7 @@ pub fn job(project: &Project, clip: &Clip, sample: &SampleData) -> Option<Stretc
     let st = edit.stretch.sanitized();
     let rate = f64::from(sample.sample_rate.max(1));
     let src_frames = sample.frames() as f64;
-    let tempo = &project.tempo;
+    let tempo = &project.song_tempo();
     let origin_tick = (clip.start - clip.offset) as f64;
     let origin_s = tempo.tick_to_seconds(origin_tick);
     let (map, frames, semitones) = match st.mode {

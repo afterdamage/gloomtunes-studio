@@ -18,7 +18,7 @@ use gt_core::{TempoMap, Tick, TimeSigMap, PPQ};
 use gt_dsp::{Glide, NoteExpr};
 
 use crate::command::{LoopRegion, TransportState};
-use crate::song::{NoteKind, SongSnapshot};
+use crate::song::{Jump, JumpKind, NoteKind, SongSnapshot};
 
 /// Shortest loop accepted: a 1/16 note. Shorter regions disable looping.
 pub const MIN_LOOP_TICKS: i64 = PPQ / 4;
@@ -254,6 +254,9 @@ pub struct Transport {
     play_start: f64,
     /// Playback started or jumped: notes under way are chased at the next segment.
     chase: bool,
+    /// The frame playback last started, jumped or wrapped at: a marker action there does not
+    /// fire again (so play from a stop marker plays, and a skip can land on another marker).
+    jump_floor: Option<u64>,
 }
 
 impl Transport {
@@ -270,6 +273,7 @@ impl Transport {
             held: 0.0,
             play_start: 0.0,
             chase: false,
+            jump_floor: None,
         }
     }
 
@@ -324,6 +328,7 @@ impl Transport {
         self.state = TransportState::Playing;
         self.anchor(pos, now);
         self.chase = true;
+        self.jump_floor = Some(now);
     }
 
     /// Stops at frame `now`, holding the position.
@@ -353,6 +358,7 @@ impl Transport {
         if self.state == TransportState::Playing {
             self.anchor(pos, now);
             self.chase = true;
+            self.jump_floor = Some(now);
         }
     }
 
@@ -416,7 +422,17 @@ impl Transport {
                     wrap = true;
                 }
             }
-            let limit = if wrap { Some(self.looping.end.0) } else { None };
+            // A marker action before the loop end (or the quantum end) cuts the segment there.
+            let jump = song.and_then(|s| self.next_jump(&s.jumps, seg_start, seg_end));
+            if let Some((_, f)) = jump {
+                seg_end = f;
+                wrap = false;
+            }
+            let limit = match jump {
+                Some((j, _)) => Some(j.at),
+                None if wrap => Some(self.looping.end.0),
+                None => None,
+            };
             out.push_segment(PlaySegment {
                 offset: (seg_start - q_start) as u32,
                 frames: (seg_end - seg_start) as u32,
@@ -431,14 +447,34 @@ impl Transport {
                 }
             }
             self.collect(seg_start, seg_end, limit, q_start, song, out);
-            if wrap {
-                self.anchor(self.looping.start.0 as f64, seg_end);
+            let to = match jump.map(|(j, _)| j.kind) {
+                Some(JumpKind::To(t)) => Some(t),
+                None if wrap => Some(self.looping.start.0),
+                _ => None,
+            };
+            if let Some(t) = to {
+                self.anchor(t as f64, seg_end);
                 self.chase = true;
+                self.jump_floor = Some(seg_end);
                 out.push(ScheduledEvent {
                     offset: (seg_end - q_start) as u32,
-                    tick: self.looping.start,
+                    tick: Tick(t),
                     kind: EventKind::Wrap,
                 });
+            } else if let Some((j, _)) = jump {
+                // Stop or pause at the exact frame: held notes end there.
+                out.push(ScheduledEvent {
+                    offset: (seg_end - q_start) as u32,
+                    tick: Tick(j.at),
+                    kind: EventKind::Wrap,
+                });
+                if j.kind == JumpKind::Pause {
+                    self.held = j.at as f64;
+                    self.state = TransportState::Paused;
+                } else {
+                    self.stop();
+                }
+                break;
             }
             seg_start = seg_end;
         }
@@ -619,6 +655,24 @@ impl Transport {
         }
     }
 
+    /// The first marker action whose frame is in `[a, b)` and after the last jump, with its
+    /// frame.
+    fn next_jump(&self, jumps: &[Jump], a: u64, b: u64) -> Option<(Jump, u64)> {
+        // Candidates start a tick before the position at `a` (rounding), in tick order.
+        let from = self.tick_at_frame(a as f64).floor() as i64 - 1;
+        let i = jumps.partition_point(|j| j.at < from);
+        for j in &jumps[i..] {
+            let f = self.frame_of_tick(j.at as f64);
+            if f >= b as i64 {
+                break;
+            }
+            if f >= a as i64 && self.jump_floor.is_none_or(|fl| f > fl as i64) {
+                return Some((*j, f as u64));
+            }
+        }
+        None
+    }
+
     fn anchor(&mut self, tick: f64, frame: u64) {
         self.anchor_sample = frame;
         self.anchor_seconds = self.tempo.tick_to_seconds(tick);
@@ -716,10 +770,12 @@ mod tests {
             TempoPoint {
                 at: Tick(0),
                 bpm: 120.0,
+                ramp: gt_core::Curve::Hold,
             },
             TempoPoint {
                 at: Tick(8 * PPQ),
                 bpm: 90.0,
+                ramp: gt_core::Curve::Hold,
             },
         ])
         .unwrap();
@@ -1021,6 +1077,114 @@ mod tests {
             })
             .collect();
         assert_eq!(keys, vec![62, 61, 60], "newest first");
+    }
+
+    fn marker_song(markers: &[(i64, gt_core::MarkerAction)]) -> SongSnapshot {
+        let markers: Vec<gt_core::Marker> = markers
+            .iter()
+            .map(|&(at, action)| gt_core::Marker {
+                at,
+                name: String::new(),
+                action,
+            })
+            .collect();
+        SongSnapshot {
+            jumps: crate::song::marker_jumps(&markers),
+            ..SongSnapshot::default()
+        }
+    }
+
+    type At = Vec<(u64, i64)>;
+
+    /// (frame, tick) of beats and of wraps/jumps.
+    fn beats_and_wraps(ev: &[(u64, i64, EventKind)]) -> (At, At) {
+        let pick = |wrap: bool| {
+            ev.iter()
+                .filter(|e| matches!(e.2, EventKind::Wrap) == wrap)
+                .filter(|e| wrap || matches!(e.2, EventKind::Beat { .. }))
+                .map(|e| (e.0, e.1))
+                .collect()
+        };
+        (pick(false), pick(true))
+    }
+
+    #[test]
+    fn a_loop_marker_loops_to_the_next_marker_on_the_exact_frame() {
+        use gt_core::MarkerAction as A;
+        let sr = 48_000;
+        // 120 BPM: a beat is 24 000 frames. Loop bar 2 to bar 3.
+        let song = marker_song(&[(4 * PPQ, A::Loop), (8 * PPQ, A::None), (12 * PPQ, A::Stop)]);
+        for q in [100, 333, 4096] {
+            let mut t = Transport::new(sr, Box::new(TempoMap::constant(120.0)));
+            t.play(0);
+            let ev = run_song(&mut t, &song, sr, 9.0, q);
+            let (beats, wraps) = beats_and_wraps(&ev);
+            let want: Vec<(u64, i64)> = (0..3).map(|k| (192_000 + k * 96_000, 4 * PPQ)).collect();
+            assert_eq!(wraps, want, "q {q}");
+            // Every beat lands on its frame; the bar-3 beat never plays (the loop end wins).
+            assert!(beats.contains(&(192_000, 4 * PPQ)));
+            assert!(!beats.iter().any(|b| b.1 >= 8 * PPQ));
+            assert_eq!(t.state(), TransportState::Playing);
+        }
+    }
+
+    #[test]
+    fn stop_and_pause_markers_end_playback_on_their_frame() {
+        use gt_core::MarkerAction as A;
+        let sr = 48_000;
+        let mut t = Transport::new(sr, Box::new(TempoMap::constant(120.0)));
+        let song = marker_song(&[(2 * PPQ, A::Pause), (3 * PPQ, A::Stop)]);
+        t.play(0);
+        let ev = run_song(&mut t, &song, sr, 3.0, 333);
+        let (beats, wraps) = beats_and_wraps(&ev);
+        assert_eq!(beats, vec![(0, 0), (24_000, PPQ)]);
+        assert_eq!(wraps, vec![(48_000, 2 * PPQ)]);
+        assert_eq!(t.state(), TransportState::Paused);
+        assert_eq!(t.position_at(0), (2 * PPQ) as f64);
+        // Play again: it carries on from the pause marker (which does not fire twice), then
+        // the stop marker returns to where playback started.
+        let at = 200_000;
+        t.play(at);
+        let mut buf = EventBuf::default();
+        let mut got = Vec::new();
+        let mut f = at;
+        while f < at + 48_000 {
+            t.schedule(f, 333, Some(&song), &mut buf);
+            got.extend(
+                buf.as_slice()
+                    .iter()
+                    .map(|e| (f + u64::from(e.offset), e.tick.0, e.kind)),
+            );
+            f += 333;
+        }
+        let (beats, wraps) = beats_and_wraps(&got);
+        assert_eq!(beats, vec![(at, 2 * PPQ)]);
+        assert_eq!(wraps, vec![(at + 24_000, 3 * PPQ)]);
+        assert_eq!(t.state(), TransportState::Stopped);
+        assert_eq!(t.position_at(0), 0.0);
+    }
+
+    #[test]
+    fn a_skip_marker_jumps_to_its_target_marker() {
+        use gt_core::MarkerAction as A;
+        let sr = 44_100;
+        let mut t = Transport::new(sr, Box::new(TempoMap::constant(120.0)));
+        // At beat 2 skip to the marker at beat 6, which is a stop that must not fire on landing.
+        let song = marker_song(&[(PPQ, A::Skip(1)), (6 * PPQ, A::Stop)]);
+        t.play(0);
+        let ev = run_song(&mut t, &song, sr, 2.0, 100);
+        let (beats, wraps) = beats_and_wraps(&ev);
+        assert_eq!(wraps, vec![(22_050, 6 * PPQ)]);
+        assert_eq!(
+            beats,
+            vec![
+                (0, 0),
+                (22_050, 6 * PPQ),
+                (44_100, 7 * PPQ),
+                (66_150, 8 * PPQ)
+            ]
+        );
+        assert_eq!(t.state(), TransportState::Playing);
     }
 
     fn demo_song() -> SongSnapshot {

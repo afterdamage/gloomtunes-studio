@@ -130,6 +130,18 @@ and the app shows it that way. Function keys on a Mac laptop may need **fn** hel
   - The ruler: click the bars row to move the playhead, drag it to set the loop. Right-click to
     add a marker, tempo change or time-signature change; drag a flag to move it, double-click to
     edit it.
+  - A tempo change's **Ramp** (linear, smooth, bezier) glides the tempo to the next change
+    instead of stepping. Right-click the BPM box for **Create tempo automation clip**: while it
+    plays, its curve is the tempo.
+  - A marker's action (double-click it): **Loop to next** loops up to the next marker,
+    **Stop**, **Pause**, or **Skip to** another marker, at the exact sample, in song mode.
+    Exports play straight through.
+  - **Performance** (toolbar) turns the playlist into a launch grid: a row per track, a cell
+    per clip. Click a cell to launch it on the next bar or beat (**Launch on**); it loops until
+    another cell or the track's stop button is launched. Keys 1 to 9 launch a column on every
+    track; MIDI notes on channel 16 launch too (from C1, eight keys per track, the key after a
+    track's last cell stops it). With **Record performance** on, stopping playback turns what
+    was played into a new arrangement.
   - Wheel scrolls tracks, Shift+wheel scrolls time, Ctrl+wheel zooms, Alt+wheel changes track
     height.
 - **Channel rack** (tab or **F6**): click a step to toggle it; scroll over a lit step to change its velocity.

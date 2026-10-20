@@ -212,7 +212,7 @@ impl GloomApp {
     /// session under it are cut where it starts (or muted when they start at the same place).
     fn add_take(&mut self, take: recording::TakeDone) {
         let rate = f64::from(self.rate());
-        let tempo = &self.project.tempo;
+        let tempo = &self.project.song_tempo();
         let start_s = tempo.tick_to_seconds(take.tick as f64);
         let end = tempo
             .seconds_to_tick(start_s + take.frames as f64 / rate)

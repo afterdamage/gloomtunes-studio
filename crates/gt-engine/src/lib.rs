@@ -56,8 +56,8 @@ pub use mixer::{freeze_post_fx, Tap};
 pub use plugin::{PluginBox, PluginContext, PluginProcessor, MAX_PLUGINS};
 pub use processor::{AudioProcessor, PREVIEW_GAIN, TEST_TONE_DBFS, TEST_TONE_HZ};
 pub use song::{
-    synth_settings, AudioPlay, AutoLane, ChannelParams, ControlEvent, InstrumentKind, NoteKind,
-    NoteSpan, PatchValues, SongEvent, SongSnapshot,
+    synth_settings, AudioPlay, AutoLane, ChannelParams, ControlEvent, InstrumentKind, Jump,
+    JumpKind, NoteKind, NoteSpan, PatchValues, SongEvent, SongSnapshot,
 };
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};

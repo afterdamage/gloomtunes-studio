@@ -39,20 +39,24 @@
 //!   (`link`) and several arrangements (`arrangements`, `current_arrangement`). Older builds
 //!   would drop all but one arrangement, so the version is bumped. The upgrade from 8 changes
 //!   nothing: every new field is optional.
+//! - 10 (Prompt 31): tempo ramps (`ramp`, `tension` on tempo points), tempo automation clips
+//!   (`tempo` target) and marker actions (`action`). Older builds would play ramps as steps
+//!   and markers without their actions, so the version is bumped. The upgrade from 9 changes
+//!   nothing.
 
 use serde_json::Value;
 
 use crate::file::{FileError, FORMAT};
 
 /// The schema version this build writes.
-pub const CURRENT: u32 = 9;
+pub const CURRENT: u32 = 10;
 
 /// One upgrade: rewrites a tree of version `from` into version `from + 1`.
 pub type Migration = fn(&mut Value) -> Result<(), String>;
 
 /// Upgrades by version: entry `i` turns version `i + 1` into `i + 2`.
 pub const MIGRATIONS: &[Migration] = &[
-    v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5, v5_to_v6, v6_to_v7, v7_to_v8, v8_to_v9,
+    v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5, v5_to_v6, v6_to_v7, v7_to_v8, v8_to_v9, v9_to_v10,
 ];
 
 /// First send bus before version 8.
@@ -124,6 +128,10 @@ fn v7_to_v8(v: &mut Value) -> Result<(), String> {
 }
 
 fn v8_to_v9(_: &mut Value) -> Result<(), String> {
+    Ok(())
+}
+
+fn v9_to_v10(_: &mut Value) -> Result<(), String> {
     Ok(())
 }
 

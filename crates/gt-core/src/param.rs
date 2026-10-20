@@ -49,6 +49,8 @@ pub enum ParamUnit {
     Seconds,
     /// A plain number with two decimals (filter Q).
     Plain,
+    /// Tempo in BPM.
+    Bpm,
 }
 
 /// Description of one parameter.
@@ -137,6 +139,7 @@ impl ParamInfo {
             ParamUnit::Seconds if v < 10.0 => format!("{v:.2} s"),
             ParamUnit::Seconds => format!("{v:.1} s"),
             ParamUnit::Plain => format!("{v:.2}"),
+            ParamUnit::Bpm => format!("{v:.1} BPM"),
             ParamUnit::Choice => self
                 .choices
                 .get(v as usize)

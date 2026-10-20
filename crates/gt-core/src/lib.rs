@@ -22,6 +22,7 @@ pub mod pads;
 pub mod param;
 pub mod params;
 pub mod peaks;
+pub mod performance;
 pub mod player;
 pub mod playlist;
 pub mod plugin;
@@ -31,6 +32,7 @@ pub mod recording;
 pub mod sample;
 pub mod sampler;
 pub mod synth;
+mod tempo_clips;
 pub mod time;
 
 pub use arrangement::{Arrangement, MAX_ARRANGEMENTS};
@@ -51,10 +53,11 @@ pub use pads::{DrumKit, Pad, PadLayer};
 pub use param::{ParamCurve, ParamInfo, ParamUnit};
 pub use params::{ChannelParam, ParamId, StripParam, MASTER_VOLUME};
 pub use peaks::Peaks;
+pub use performance::{LaunchQuant, Performance};
 pub use player::{Macro, MacroTarget, Player};
 pub use playlist::{
     AudioEdit, AudioTake, AutoPoint, Automation, Clip, ClipId, ClipKind, ClipStretch, Curve, Fade,
-    FadeCurve, Frozen, Marker, Playlist, StretchMode, Track, TrackId, WarpMarker,
+    FadeCurve, Frozen, Marker, MarkerAction, Playlist, StretchMode, Track, TrackId, WarpMarker,
 };
 pub use plugin::{
     PluginFormat, PluginInstanceId, PluginKind, PluginOutput, PluginOwner, PluginParamInfo,

@@ -70,6 +70,8 @@ impl ParamDest {
         let slot = |c| project.channel_index(c).and_then(|i| u16::try_from(i).ok());
         let u = |x: usize| u8::try_from(x).ok();
         Some(match *id {
+            // Tempo automation is part of the tempo map, not a lane.
+            ParamId::Tempo => return None,
             ParamId::Channel { channel, param } => Self::Channel {
                 slot: slot(channel)?,
                 param,
