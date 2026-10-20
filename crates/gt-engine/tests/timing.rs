@@ -72,10 +72,12 @@ fn clicks_follow_a_tempo_change() {
         TempoPoint {
             at: Tick(0),
             bpm: 120.0,
+            ramp: gt_core::Curve::Hold,
         },
         TempoPoint {
             at: Tick(4 * PPQ),
             bpm: 100.0,
+            ramp: gt_core::Curve::Hold,
         },
     ])
     .unwrap();
@@ -100,6 +102,41 @@ fn clicks_follow_a_tempo_change() {
         .take_while(|&f| f < out.len())
         .collect();
     assert_eq!(got, want);
+}
+
+#[test]
+fn clicks_follow_a_linear_tempo_ramp_to_the_exact_frame() {
+    let sr = 48_000;
+    // 90 to 150 BPM over two bars, then held.
+    let map = TempoMap::new(&[
+        TempoPoint::linear(0, 90.0),
+        TempoPoint::step(8 * PPQ, 150.0),
+    ])
+    .unwrap();
+    let out = render(
+        sr,
+        8.0,
+        &[333, 64, 1024],
+        vec![
+            EngineCommand::SetTempoMap(Box::new(map)),
+            EngineCommand::Play,
+        ],
+    );
+    // Analytic: d(beats)/dt = bpm(beats)/60 with bpm = 90 + 7.5·beats, so
+    // t(b) = 60/7.5 · ln(1 + 7.5·b/90).
+    let t = |b: f64| 8.0 * (1.0 + 7.5 * b / 90.0).ln();
+    let want: Vec<usize> = (0..)
+        .map(|k| {
+            let s = if k <= 8 {
+                t(f64::from(k))
+            } else {
+                t(8.0) + f64::from(k - 8) * 0.4
+            };
+            frame(s, sr)
+        })
+        .take_while(|&f| f < out.len())
+        .collect();
+    assert_eq!(onsets(&out), want);
 }
 
 #[test]

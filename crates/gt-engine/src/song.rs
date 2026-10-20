@@ -182,6 +182,69 @@ pub struct SongSnapshot {
     pub controls: Vec<ControlEvent>,
     /// Every slot and controller that `controls` moves, sorted.
     pub control_slots: Vec<(u16, ControlKind)>,
+    /// Marker actions (song mode), sorted by tick, at most one per tick.
+    pub jumps: Vec<Jump>,
+}
+
+/// A marker action as the transport performs it, at the exact frame of its tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Jump {
+    /// Where playback reaches it.
+    pub at: i64,
+    /// What it does.
+    pub kind: JumpKind,
+}
+
+/// What a [`Jump`] does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JumpKind {
+    /// Playback continues from this tick (a skip, or a marker loop's way back).
+    To(i64),
+    /// Stops, back to where playback started.
+    Stop,
+    /// Pauses here.
+    Pause,
+}
+
+/// The jumps of a playlist's markers. A loop marker becomes a jump back to it at the next
+/// marker, which wins over that marker's own action.
+pub fn marker_jumps(markers: &[gt_core::Marker]) -> Vec<Jump> {
+    use gt_core::MarkerAction;
+    let mut loops = Vec::new();
+    let mut others = Vec::new();
+    for (i, m) in markers.iter().enumerate() {
+        match m.action {
+            MarkerAction::None => {}
+            MarkerAction::Loop => {
+                if let Some(n) = markers[i + 1..].iter().find(|n| n.at > m.at) {
+                    loops.push(Jump {
+                        at: n.at,
+                        kind: JumpKind::To(m.at),
+                    });
+                }
+            }
+            MarkerAction::Stop => others.push(Jump {
+                at: m.at,
+                kind: JumpKind::Stop,
+            }),
+            MarkerAction::Pause => others.push(Jump {
+                at: m.at,
+                kind: JumpKind::Pause,
+            }),
+            MarkerAction::Skip(j) => {
+                if let Some(t) = markers.get(j).filter(|t| t.at != m.at) {
+                    others.push(Jump {
+                        at: m.at,
+                        kind: JumpKind::To(t.at),
+                    });
+                }
+            }
+        }
+    }
+    loops.extend(others);
+    loops.sort_by_key(|j| j.at);
+    loops.dedup_by_key(|j| j.at);
+    loops
 }
 
 /// Sorts controller events and lists the slots and controllers they move.
@@ -353,7 +416,7 @@ impl SongSnapshot {
         stretched: impl Fn(u64) -> Option<Arc<SampleData>>,
     ) -> Self {
         let pl = &project.playlist;
-        let tempo = &project.tempo;
+        let tempo = &project.song_tempo();
         let mut events = Vec::new();
         let mut controls = Vec::new();
         let mut audio: Vec<AudioPlay> = Vec::new();
@@ -527,6 +590,7 @@ impl SongSnapshot {
             notes,
             controls,
             control_slots,
+            jumps: marker_jumps(&pl.markers),
         }
     }
 
@@ -1493,10 +1557,12 @@ mod tests {
             gt_core::TempoPoint {
                 at: gt_core::Tick(0),
                 bpm: 120.0,
+                ramp: gt_core::Curve::Hold,
             },
             gt_core::TempoPoint {
                 at: gt_core::Tick(1920),
                 bpm: 60.0,
+                ramp: gt_core::Curve::Hold,
             },
         ]);
         p.playlist.tracks[2].insert = 7;

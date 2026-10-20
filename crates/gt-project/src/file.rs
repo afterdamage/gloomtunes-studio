@@ -34,11 +34,11 @@ use gt_core::{
     Adsr, AudioEdit, AudioInput, AudioTake, AutoPoint, Automation, BuiltInSample, Channel,
     ChannelId, Clip, ClipId, ClipKind, ClipStretch, Curve, DrumKit, EffectSlot, Fade, FadeCurve,
     Frozen, Gap, Instrument, Interp, KeyZone, LfoRate, LfoShape, LfoTarget, LoopMode, Marker,
-    MidiControl, ModSourceKind, Modulator, ModulatorId, Note, Pad, PadLayer, PanLaw, ParamId,
-    Pattern, PatternId, Playlist, PluginFormat, PluginInstanceId, PluginKind, PluginParamInfo,
-    PluginRef, Project, SampleSource, SamplerFilter, SamplerFilterMode, SamplerLfo,
-    SamplerSettings, SigChange, StretchMode, TempoMap, TempoPoint, Tick, TimeSig, TimeSigMap,
-    Track, TrackId, WarpMarker, FX_SLOTS,
+    MarkerAction, MidiControl, ModSourceKind, Modulator, ModulatorId, Note, Pad, PadLayer, PanLaw,
+    ParamId, Pattern, PatternId, Playlist, PluginFormat, PluginInstanceId, PluginKind,
+    PluginParamInfo, PluginRef, Project, SampleSource, SamplerFilter, SamplerFilterMode,
+    SamplerLfo, SamplerSettings, SigChange, StretchMode, TempoMap, TempoPoint, Tick, TimeSig,
+    TimeSigMap, Track, TrackId, WarpMarker, FX_SLOTS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -499,6 +499,11 @@ struct MidiBindingDto {
 struct TempoDto {
     tick: i64,
     bpm: f64,
+    /// Ramp to the next point ("linear", "smooth", "bezier"; schema 10), absent for a step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ramp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tension: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1243,6 +1248,8 @@ struct PointDto {
 struct MarkerDto {
     at: i64,
     name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    action: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1457,6 +1464,7 @@ fn playlist_dto(
             .map(|m| MarkerDto {
                 at: m.at,
                 name: m.name.clone(),
+                action: m.action.key(),
             })
             .collect(),
     }
@@ -1468,6 +1476,11 @@ fn tempo_dto(tempo: &TempoMap) -> Vec<TempoDto> {
         .map(|t| TempoDto {
             tick: t.at.0,
             bpm: t.bpm,
+            ramp: (t.ramp != Curve::Hold).then(|| curve_key(t.ramp).to_owned()),
+            tension: match t.ramp {
+                Curve::Bezier(x) => Some(x),
+                _ => None,
+            },
         })
         .collect()
 }
@@ -1488,6 +1501,10 @@ fn tempo_from(d: &[TempoDto]) -> TempoMap {
         .map(|t| TempoPoint {
             at: Tick(t.tick),
             bpm: t.bpm,
+            ramp: t
+                .ramp
+                .as_deref()
+                .map_or(Curve::Hold, |k| curve_from_key(k, t.tension)),
         })
         .collect();
     if tempo.is_empty() {
@@ -1914,6 +1931,10 @@ fn playlist_from_dto(
         pl.markers.push(Marker {
             at: m.at,
             name: m.name,
+            action: m
+                .action
+                .as_deref()
+                .map_or(MarkerAction::None, MarkerAction::from_key),
         });
     }
     pl.set_id_counter(d.next_id);
@@ -3203,6 +3224,32 @@ mod tests {
         let v = to_value(&p, None, &HashMap::new());
         let back = from_value(v, None).unwrap().project;
         assert_eq!(back.info, p.info);
+    }
+
+    #[test]
+    fn tempo_ramps_and_marker_actions_round_trip() {
+        let mut p = Project::demo();
+        p.tempo = TempoMap::from_points_lossy(&[
+            TempoPoint::linear(0, 90.0),
+            TempoPoint {
+                at: Tick(4 * 3840),
+                bpm: 140.0,
+                ramp: Curve::Bezier(-0.4),
+            },
+            TempoPoint::step(8 * 3840, 120.0),
+        ]);
+        let a = p.playlist.add_marker(3840, "Drop");
+        let b = p.playlist.add_marker(7680, "Out");
+        p.playlist.markers[a].action = MarkerAction::Loop;
+        p.playlist.markers[b].action = MarkerAction::Skip(a);
+        let back = from_value(to_value(&p, None, &HashMap::new()), None)
+            .unwrap()
+            .project;
+        assert_eq!(back, p);
+        assert_eq!(
+            back.tempo.points().nth(1).unwrap().ramp,
+            Curve::Bezier(-0.4)
+        );
     }
 
     #[test]

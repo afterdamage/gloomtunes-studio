@@ -677,7 +677,7 @@ fn load_engine(
     send(
         h,
         p,
-        EngineCommand::SetTempoMap(Box::new(project.tempo.clone())),
+        EngineCommand::SetTempoMap(Box::new(project.song_tempo())),
     );
     send(
         h,
@@ -768,11 +768,13 @@ fn load_engine(
                 Some((j.key, Arc::new(j.render(src))))
             })
             .collect();
-    let song = SongSnapshot::compile_song_with(
+    let mut song = SongSnapshot::compile_song_with(
         project,
         |src| samples.get(src).map(Arc::clone),
         |key| renders.get(&key).map(Arc::clone),
     );
+    // An export renders the range straight through: marker actions are for playing live.
+    song.jumps.clear();
     send(h, p, EngineCommand::SetSong(Box::new(song)));
     send(
         h,
@@ -865,7 +867,7 @@ fn render_pass(
     send(h, p, EngineCommand::Locate(Tick(start)));
     send(h, p, EngineCommand::Play);
 
-    let tempo = &project.tempo;
+    let tempo = &project.song_tempo();
     let seconds = tempo.tick_to_seconds(end as f64) - tempo.tick_to_seconds(start as f64);
     let frames = (seconds * f64::from(rate)).round() as usize;
     let max_tail = if settings.tail {

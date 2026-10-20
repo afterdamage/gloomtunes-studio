@@ -53,6 +53,11 @@ impl GloomApp {
                         audio: &self.library,
                         inputs: &cx.inputs,
                         recording: self.record.live_take(),
+                        performance: gt_ui::views::PerformanceView {
+                            perf: &self.show,
+                            position: self.transport.position.0,
+                            recording: self.perf_record,
+                        },
                     },
                 ));
             }

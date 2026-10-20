@@ -27,9 +27,9 @@ use egui::{
 };
 use gt_core::playlist::TRACK_COLORS;
 use gt_core::{
-    AutoPoint, Automation, ClipId, ClipKind, ClipStretch, Curve, FadeCurve, ParamId, PatternId,
-    Peaks, Project, SampleSource, SigChange, StretchMode, StripKind, TempoMap, TempoPoint, Tick,
-    TimeSig, TimeSigMap, TrackId, FX_SLOTS, MASTER, PPQ,
+    AutoPoint, Automation, ClipId, ClipKind, ClipStretch, Curve, FadeCurve, MarkerAction, ParamId,
+    PatternId, Peaks, Project, SampleSource, SigChange, StretchMode, StripKind, TempoMap,
+    TempoPoint, Tick, TimeSig, TimeSigMap, TrackId, FX_SLOTS, MASTER, PPQ,
 };
 
 use crate::i18n::tr;
@@ -236,6 +236,8 @@ pub struct PlaylistState {
     pub selected_tracks: Vec<TrackId>,
     /// Tracks armed for audio recording (not saved with the project).
     pub armed: Vec<TrackId>,
+    /// Performance mode: the playlist shows the launch grid (Prompt 31).
+    pub performance: bool,
     drag: Option<Drag>,
     /// Loop region being dragged (preview).
     loop_preview: Option<(i64, i64)>,
@@ -258,6 +260,7 @@ impl Default for PlaylistState {
             selected_track: None,
             selected_tracks: Vec::new(),
             armed: Vec::new(),
+            performance: false,
             drag: None,
             loop_preview: None,
             popup: None,
@@ -295,6 +298,8 @@ pub struct PlaylistView<'a> {
     pub inputs: &'a [gt_core::AudioInput],
     /// The take being recorded: its start tick and the tracks recording.
     pub recording: Option<(i64, &'a [TrackId])>,
+    /// The performance, shown as a grid while [`PlaylistState::performance`] is on.
+    pub performance: super::PerformanceView<'a>,
 }
 
 /// Things the app must act on.
@@ -328,6 +333,21 @@ pub enum PlaylistAction {
         /// The selected clips on the track (none: the loop region, or the whole track).
         clips: Vec<ClipId>,
     },
+    /// Performance mode on or off (the state holds the new value).
+    PerformanceMode(bool),
+    /// Launch a clip on a track at the next launch point, or stop it (`None`).
+    Launch {
+        /// The row.
+        track: TrackId,
+        /// The cell.
+        clip: Option<ClipId>,
+    },
+    /// Launch column `n` on every track that has one (tracks without stop).
+    LaunchScene(usize),
+    /// Where launches wait for.
+    SetLaunchQuant(gt_core::performance::LaunchQuant),
+    /// Recording the performance on or off.
+    RecordPerformance(bool),
 }
 
 /// Offline renders of a track, from its header menu.
@@ -411,6 +431,10 @@ pub fn playlist(
         .retain(|id| project.playlist.clips.iter().any(|c| c.id == *id));
     toolbar(ui, theme, project, st, &view, &mut actions);
     ui.add_space(4.0);
+    if st.performance {
+        super::performance_grid(ui, theme, project, &view.performance, &mut actions);
+        return actions;
+    }
 
     let area = ui.available_rect_before_wrap();
     let area = Rect::from_min_size(area.min, vec2(area.width(), area.height().max(160.0)));
@@ -515,6 +539,16 @@ fn toolbar(
         if arrangement_menu(ui, project, st) {
             st.selected.clear();
             actions.push(PlaylistAction::ArrangementChanged);
+        }
+        if ui
+            .add(egui::Button::selectable(st.performance, tr("Performance")))
+            .on_hover_text(tr(
+                "Launch clips live from a grid, quantized to the bar or beat",
+            ))
+            .clicked()
+        {
+            st.performance = !st.performance;
+            actions.push(PlaylistAction::PerformanceMode(st.performance));
         }
         ui.separator();
         for (tool, label, tip) in [
@@ -1587,8 +1621,12 @@ fn flag_rects(geo: &Geo, ruler: Rect, project: &Project, ui: &Ui) -> Vec<(Flag, 
     let mut out = Vec::new();
     for (i, m) in project.playlist.markers.iter().enumerate() {
         let x = geo.x(m.at);
-        let r = Rect::from_min_size(pos2(x, ruler.top()), vec2(width(&m.name) + 8.0, ROW_H));
-        out.push((Flag::Marker(i), r, m.name.clone()));
+        let text = match m.action {
+            MarkerAction::None => m.name.clone(),
+            a => format!("{} · {}", m.name, tr(MarkerAction::NAMES[a.index()])),
+        };
+        let r = Rect::from_min_size(pos2(x, ruler.top()), vec2(width(&text) + 8.0, ROW_H));
+        out.push((Flag::Marker(i), r, text));
     }
     let row2 = ruler.top() + ROW_H;
     for (i, p) in project.tempo.points().enumerate() {
@@ -1751,7 +1789,7 @@ fn ruler_input(
                 }
                 if ui.button(tr("Delete marker")).clicked() {
                     if i < project.playlist.markers.len() {
-                        project.playlist.markers.remove(i);
+                        project.playlist.remove_marker(i);
                         actions.push(PlaylistAction::Changed);
                     }
                     ui.close();
@@ -1804,6 +1842,7 @@ fn ruler_input(
             pts.push(TempoPoint {
                 at: Tick(menu_tick),
                 bpm,
+                ramp: gt_core::Curve::Hold,
             });
             project.tempo = TempoMap::from_points_lossy(&pts);
             let i = project
@@ -1872,6 +1911,12 @@ fn show_popup(
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| match popup {
                     Popup::Marker(i) => {
+                        let names: Vec<String> = project
+                            .playlist
+                            .markers
+                            .iter()
+                            .map(|m| m.name.clone())
+                            .collect();
                         let Some(m) = project.playlist.markers.get_mut(i) else {
                             close = true;
                             return;
@@ -1884,6 +1929,32 @@ fn show_popup(
                         }
                         if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             close = true;
+                        }
+                        // What playback does here (song mode).
+                        let mut action = m.action;
+                        egui::ComboBox::from_id_salt("marker_action")
+                            .selected_text(tr(MarkerAction::NAMES[action.index()]))
+                            .show_ui(ui, |ui| {
+                                for (k, name) in MarkerAction::NAMES.iter().enumerate() {
+                                    if ui.selectable_label(action.index() == k, tr(name)).clicked()
+                                        && action.index() != k
+                                    {
+                                        action = MarkerAction::from_index(k);
+                                    }
+                                }
+                            });
+                        if let MarkerAction::Skip(to) = &mut action {
+                            egui::ComboBox::from_id_salt("marker_skip")
+                                .selected_text(names.get(*to).cloned().unwrap_or_default())
+                                .show_ui(ui, |ui| {
+                                    for (k, n) in names.iter().enumerate() {
+                                        ui.selectable_value(to, k, n);
+                                    }
+                                });
+                        }
+                        if action != m.action {
+                            m.action = action;
+                            changed = true;
                         }
                     }
                     Popup::Tempo(i) => {
@@ -1904,6 +1975,29 @@ fn show_popup(
                             .changed()
                         {
                             p.bpm = bpm;
+                            project.tempo = TempoMap::from_points_lossy(&pts);
+                            timing = true;
+                        }
+                        // How the tempo moves on to the next change: a step, or a ramp.
+                        ui.label(RichText::new(tr("Ramp")).color(theme.text_dim));
+                        let mut ramp = pts[i].ramp;
+                        for (k, name) in Curve::NAMES.iter().enumerate() {
+                            if ui.selectable_label(ramp.index() == k, *name).clicked()
+                                && ramp.index() != k
+                            {
+                                ramp = Curve::from_index(k);
+                            }
+                        }
+                        if let Curve::Bezier(t) = &mut ramp {
+                            ui.add(
+                                egui::DragValue::new(t)
+                                    .range(-1.0..=1.0)
+                                    .speed(0.01)
+                                    .fixed_decimals(2),
+                            );
+                        }
+                        if ramp != pts[i].ramp {
+                            pts[i].ramp = ramp;
                             project.tempo = TempoMap::from_points_lossy(&pts);
                             timing = true;
                         }
@@ -3410,6 +3504,11 @@ mod tests {
                     audio: &NoAudio,
                     inputs: &[],
                     recording: None,
+                    performance: super::super::PerformanceView {
+                        perf: &gt_core::performance::Performance::default(),
+                        position: 0,
+                        recording: false,
+                    },
                 },
             );
         });

@@ -258,6 +258,15 @@ pub fn transport_bar(
             m.bpm = bpm;
             actions.push(TransportAction::SetBpm(bpm));
         }
+        r.context_menu(|ui| {
+            if ui.button(tr("Create tempo automation clip")).clicked() {
+                crate::param_ui::request(
+                    ui.ctx(),
+                    crate::param_ui::ParamRequest::Automate(gt_core::ParamId::Tempo),
+                );
+                ui.close();
+            }
+        });
         if ui
             .small_button(tr("Tap"))
             .on_hover_text(tr(

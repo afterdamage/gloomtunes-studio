@@ -200,10 +200,12 @@ fn process_does_not_allocate() {
             TempoPoint {
                 at: Tick(0),
                 bpm: 128.0,
+                ramp: gt_core::Curve::Hold,
             },
             TempoPoint {
                 at: Tick(3840),
                 bpm: 97.0,
+                ramp: gt_core::Curve::Hold,
             },
         ]);
         let tracks: Vec<_> = song.playlist.tracks.iter().map(|t| t.id).collect();

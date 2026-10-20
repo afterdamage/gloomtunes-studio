@@ -353,6 +353,9 @@ impl AudioProcessor {
         self.quantum_l.fill(0.0);
         self.quantum_r.fill(0.0);
         self.mono.fill(0.0);
+        // A marker can stop or pause playback inside the quantum: what came before it still
+        // plays and records, and the state change is reported after rendering.
+        let before = self.transport.state();
         self.transport.schedule(
             self.frame_clock,
             Q as u32,
@@ -406,7 +409,7 @@ impl AudioProcessor {
         self.click.add_to(&mut self.mono[cursor..]);
         self.input
             .calibrate(&mut self.mono, self.sample_rate as f32);
-        let playing = self.transport.state() == TransportState::Playing;
+        let playing = before == TransportState::Playing;
         self.input.record(
             playing,
             self.scheduled.segments(),
@@ -437,6 +440,7 @@ impl AudioProcessor {
         self.quantum_r.copy_from_slice(&self.scratch_r);
         if self.tapped {
             // Offline render of one strip: nothing else joins the output.
+            self.after_transport_change(before);
             self.frame_clock += Q as u64;
             self.publish();
             return;
@@ -463,6 +467,7 @@ impl AudioProcessor {
             self.quantum_r[i] = (self.quantum_r[i] + m) * g;
         }
 
+        self.after_transport_change(before);
         self.frame_clock += Q as u64;
         self.publish();
     }

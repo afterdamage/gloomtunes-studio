@@ -96,7 +96,7 @@ fn play_from(
         sample_rate: SR,
         out_channels: 2,
     });
-    h.send(EngineCommand::SetTempoMap(Box::new(p.tempo.clone())))
+    h.send(EngineCommand::SetTempoMap(Box::new(p.song_tempo())))
         .unwrap();
     h.send(EngineCommand::SetSong(Box::new(song))).unwrap();
     h.send(EngineCommand::SetMetronome(false)).unwrap();
@@ -129,10 +129,12 @@ fn tempo_follow_puts_the_beats_on_the_project_beats() {
         TempoPoint {
             at: Tick(0),
             bpm: 120.0,
+            ramp: gt_core::Curve::Hold,
         },
         TempoPoint {
             at: Tick(4 * 960),
             bpm: 90.0,
+            ramp: gt_core::Curve::Hold,
         },
     ]);
     let (p, src) = project(follow(100.0), tempo.clone());
@@ -153,10 +155,40 @@ fn tempo_follow_puts_the_beats_on_the_project_beats() {
 }
 
 #[test]
+fn tempo_follow_rides_a_tempo_automation_ramp() {
+    // A tempo clip ramps 80 to 140 BPM over the loop's eight beats.
+    let (mut p, src) = project(follow(100.0), TempoMap::constant(120.0));
+    let n = |bpm: f32| gt_core::params::TEMPO_INFO.to_normalized(bpm);
+    let t = p.playlist.tracks[1].id;
+    p.playlist.add_clip(
+        t,
+        0,
+        8 * 960,
+        ClipKind::Automation(gt_core::Automation {
+            target: gt_core::ParamId::Tempo,
+            points: vec![
+                gt_core::AutoPoint::new(0, n(80.0)),
+                gt_core::AutoPoint::new(8 * 960, n(140.0)),
+            ],
+        }),
+    );
+    let tempo = p.song_tempo();
+    assert!(tempo.has_ramps());
+    let samples = HashMap::from([(src, loop_100())]);
+    let out = export(&p, &samples);
+    for b in 1..8 {
+        let at = (tempo.tick_to_seconds(f64::from(b) * 960.0) * f64::from(SR)) as usize;
+        let off = onset_near(&out, at, 2400);
+        assert!(off.abs() < 240, "beat {b} is {off} frames off");
+    }
+}
+
+#[test]
 fn the_export_matches_playback() {
     let tempo = TempoMap::from_points_lossy(&[TempoPoint {
         at: Tick(0),
         bpm: 128.0,
+        ramp: gt_core::Curve::Hold,
     }]);
     for stretch in [
         follow(100.0),
@@ -181,6 +213,7 @@ fn without_its_render_a_clip_stretches_live_with_the_same_result() {
     let tempo = TempoMap::from_points_lossy(&[TempoPoint {
         at: Tick(0),
         bpm: 128.0,
+        ramp: gt_core::Curve::Hold,
     }]);
     for stretch in [
         follow(100.0),
@@ -210,6 +243,7 @@ fn started_inside_the_clip_the_live_stretch_keeps_the_beats() {
     let tempo = TempoMap::from_points_lossy(&[TempoPoint {
         at: Tick(0),
         bpm: 120.0,
+        ramp: gt_core::Curve::Hold,
     }]);
     let (p, _) = project(follow(100.0), tempo);
     // From beat 2.5: beats 3..7 at 0.5 s spacing, the first 0.25 s in.
@@ -237,6 +271,7 @@ fn a_warp_marker_pulls_a_late_hit_onto_its_beat() {
     let tempo = TempoMap::from_points_lossy(&[TempoPoint {
         at: Tick(0),
         bpm: 120.0,
+        ramp: gt_core::Curve::Hold,
     }]);
     let late_s = (2 * beat + late) as f64 / f64::from(SR);
     for (warped, want_off) in [(false, 0.06 * 100.0 / 120.0), (true, 0.0)] {

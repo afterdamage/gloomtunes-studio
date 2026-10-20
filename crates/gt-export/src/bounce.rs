@@ -223,7 +223,7 @@ fn span(project: &Project, track: TrackId, clips: &[ClipId]) -> Option<(i64, i64
 /// [`trim_silence`].
 pub fn freeze_job(project: &Project, track: TrackId) -> Option<Bounce> {
     let (_, end) = span(project, track, &[])?;
-    let tempo = &project.tempo;
+    let tempo = &project.song_tempo();
     let end = tempo
         .seconds_to_tick(tempo.tick_to_seconds(end as f64) + FREEZE_TAIL_S)
         .ceil() as i64;
@@ -289,7 +289,7 @@ pub fn trim_silence(audio: &mut Vec<f32>) {
 
 /// Length in ticks of `frames` of audio at `rate` starting at tick `start` (rounded up).
 pub fn ticks_for(project: &Project, start: i64, frames: usize, rate: u32) -> i64 {
-    let tempo = &project.tempo;
+    let tempo = &project.song_tempo();
     let s = tempo.tick_to_seconds(start as f64) + frames as f64 / f64::from(rate.max(1));
     (tempo.seconds_to_tick(s).ceil() as i64 - start).max(1)
 }

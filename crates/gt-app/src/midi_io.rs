@@ -113,7 +113,14 @@ struct Shared {
     error: Mutex<Option<String>>,
     /// Port names in the order they were first seen: a port's number is its index.
     numbers: Mutex<Vec<String>>,
+    /// Performance mode: note-ons on [`LAUNCH_CHANNEL`] launch clips instead of playing.
+    launch_mode: AtomicBool,
+    /// Keys struck on the launch channel since the UI last looked.
+    launches: Mutex<Vec<u8>>,
 }
+
+/// The MIDI channel (0-based: channel 16) whose notes launch clips in performance mode.
+pub const LAUNCH_CHANNEL: u8 = 15;
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -136,6 +143,8 @@ impl MidiIo {
             activity: AtomicU32::new(0),
             error: Mutex::new(None),
             numbers: Mutex::new(Vec::new()),
+            launch_mode: AtomicBool::new(false),
+            launches: Mutex::new(Vec::new()),
         });
         let (tx, rx) = channel();
         let s = Arc::clone(&shared);
@@ -179,6 +188,16 @@ impl MidiIo {
         let mut v: Vec<String> = lock(&self.shared.disabled).iter().cloned().collect();
         v.sort();
         v
+    }
+
+    /// Turns launching from [`LAUNCH_CHANNEL`] on or off (performance mode).
+    pub fn set_launch_mode(&self, on: bool) {
+        self.shared.launch_mode.store(on, Ordering::Relaxed);
+    }
+
+    /// Keys struck on the launch channel since the last call.
+    pub fn take_launches(&self) -> Vec<u8> {
+        std::mem::take(&mut *lock(&self.shared.launches))
     }
 
     /// Controller messages received since the last call.
@@ -360,6 +379,14 @@ fn connect(
                     }
                 };
                 match decode(msg) {
+                    Some(MidiIn::Live(LiveKind::Note(n), LAUNCH_CHANNEL))
+                        if shared.launch_mode.load(Ordering::Relaxed) =>
+                    {
+                        if n.is_on() {
+                            lock(&shared.launches).push(n.key);
+                            ctx.request_repaint();
+                        }
+                    }
                     Some(MidiIn::Live(kind, channel)) => {
                         if let LiveKind::Note(n) = kind {
                             state.held[usize::from(channel)][usize::from(n.key)] = n.is_on();

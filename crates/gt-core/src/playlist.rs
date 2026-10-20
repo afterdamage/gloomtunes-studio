@@ -652,6 +652,75 @@ pub struct Marker {
     pub at: i64,
     /// Label.
     pub name: String,
+    /// What playback does when it reaches the marker (song mode).
+    pub action: MarkerAction,
+}
+
+/// What happens when song playback reaches a marker (Prompt 31, D144).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MarkerAction {
+    /// Nothing: a label.
+    #[default]
+    None,
+    /// Loops from this marker to the next one until playback is moved or stopped.
+    Loop,
+    /// Stops, back to where playback started.
+    Stop,
+    /// Pauses at the marker.
+    Pause,
+    /// Jumps to the marker with this index.
+    Skip(usize),
+}
+
+impl MarkerAction {
+    /// Display names, by [`MarkerAction::index`].
+    pub const NAMES: [&'static str; 5] = ["None", "Loop to next", "Stop", "Pause", "Skip to"];
+
+    /// Position in [`MarkerAction::NAMES`].
+    pub fn index(self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Loop => 1,
+            Self::Stop => 2,
+            Self::Pause => 3,
+            Self::Skip(_) => 4,
+        }
+    }
+
+    /// The action at `i` in [`MarkerAction::NAMES`] (a skip goes to marker 0).
+    pub fn from_index(i: usize) -> Self {
+        match i {
+            1 => Self::Loop,
+            2 => Self::Stop,
+            3 => Self::Pause,
+            4 => Self::Skip(0),
+            _ => Self::None,
+        }
+    }
+
+    /// File key: "loop", "stop", "pause", "skip:N"; `None` has none.
+    pub fn key(self) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::Loop => Some("loop".into()),
+            Self::Stop => Some("stop".into()),
+            Self::Pause => Some("pause".into()),
+            Self::Skip(i) => Some(format!("skip:{i}")),
+        }
+    }
+
+    /// Parses [`MarkerAction::key`]; anything unknown is `None`.
+    pub fn from_key(k: &str) -> Self {
+        match k {
+            "loop" => Self::Loop,
+            "stop" => Self::Stop,
+            "pause" => Self::Pause,
+            _ => k
+                .strip_prefix("skip:")
+                .and_then(|n| n.parse().ok())
+                .map_or(Self::None, Self::Skip),
+        }
+    }
 }
 
 /// Tracks, clips and markers.
@@ -1184,14 +1253,48 @@ impl Playlist {
             Marker {
                 at,
                 name: name.to_owned(),
+                action: MarkerAction::None,
             },
         );
+        self.remap_skips(|j| Some(if j >= i { j + 1 } else { j }));
         i
     }
 
-    /// Re-sorts markers after their positions were edited.
+    /// Removes marker `i`; skips to it become plain markers and skips past it follow.
+    pub fn remove_marker(&mut self, i: usize) {
+        if i < self.markers.len() {
+            self.markers.remove(i);
+            self.remap_skips(|j| match j.cmp(&i) {
+                std::cmp::Ordering::Less => Some(j),
+                std::cmp::Ordering::Equal => None,
+                std::cmp::Ordering::Greater => Some(j - 1),
+            });
+        }
+    }
+
+    /// Re-sorts markers after their positions were edited; skips keep their targets.
     pub fn sort_markers(&mut self) {
-        self.markers.sort_by_key(|m| m.at);
+        let mut order: Vec<usize> = (0..self.markers.len()).collect();
+        order.sort_by_key(|&i| (self.markers[i].at, i));
+        let mut new_of = vec![0; order.len()];
+        for (new, &old) in order.iter().enumerate() {
+            new_of[old] = new;
+        }
+        let old = std::mem::take(&mut self.markers);
+        let mut slots: Vec<Option<Marker>> = old.into_iter().map(Some).collect();
+        self.markers = order.iter().filter_map(|&i| slots[i].take()).collect();
+        self.remap_skips(|j| new_of.get(j).copied());
+    }
+
+    fn remap_skips(&mut self, f: impl Fn(usize) -> Option<usize>) {
+        let n = self.markers.len();
+        for m in &mut self.markers {
+            if let MarkerAction::Skip(j) = m.action {
+                m.action = f(j)
+                    .filter(|&k| k < n)
+                    .map_or(MarkerAction::None, MarkerAction::Skip);
+            }
+        }
     }
 
     /// Clips whose pattern no longer exists are dropped, clip lengths and offsets are put in

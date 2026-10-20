@@ -69,10 +69,12 @@ fn audio_clip_starts_on_its_exact_frame_across_a_tempo_change() {
         TempoPoint {
             at: Tick(0),
             bpm: 120.0,
+            ramp: gt_core::Curve::Hold,
         },
         TempoPoint {
             at: Tick(960),
             bpm: 60.0,
+            ramp: gt_core::Curve::Hold,
         },
     ]);
     audio_clip(&mut p, 1920, 3840, 0);
