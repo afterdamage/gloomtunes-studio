@@ -823,6 +823,20 @@ files and scripting; (3) the out-of-process plugin sandbox.
   choice by port.
 - Limits (PR 2): no feedback to controller LEDs or motor faders; scripts run on the UI thread
   (once per message, at most 200 000 operations).
+- PR 3 (D150, revisits D74): **out-of-process plugins**, opt in per plugin (**Own process** in
+  the browser, saved in `plugins/sandboxed.json`). The app starts itself as a bridge child
+  (`--plugin-bridge`) that loads the plugin; control goes over its pipes as JSON lines,
+  audio, context and events through a shared memory file with a lock-free handshake (a futex
+  on Linux). A late block stays dry, a dead child bypasses the plugin, and the app starts a
+  new child with the last state and restarts the instance (three times). The test gain
+  plugin gets a **Crash** switch that aborts its process. Tests: the shared block on both
+  sides, a thousand blocks through a child, a crash that leaves the test process running and
+  a new child with the saved state, the host bypassing a crashed sandboxed effect and
+  loading it back in process.
+- Limits (PR 3): bridged plugins have no extra outputs, MIDI out, factory presets or
+  per-note start values (MPE expressions do pass); outside Linux the child polls (yielding
+  while blocks come, sleeping 1 ms after 50 ms of silence), so it costs CPU and the first
+  block after silence can be late; editors open as the child's own windows.
 
 ---
 

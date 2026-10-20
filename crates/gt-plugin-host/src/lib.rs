@@ -11,15 +11,16 @@
 //! * [`Guard`]: an in-flight marker around risky calls into plugin code; a crash there
 //!   quarantines the plugin file at the next start.
 //!
-//! Plugins run in the app's process. Running them in a separate process was evaluated and
-//! deferred (ARCHITECTURE.md D74); the guard, the bypass and the scan process are the safety
-//! net instead.
+//! Plugins run in the app's process unless the user marks one to run in its own process
+//! ([`bridge`], D150), where a crash stops only that process; for the rest the guard, the
+//! bypass and the scan process are the safety net (D74).
 
 #![deny(unsafe_code)]
 
 #[cfg(target_os = "macos")]
 mod au;
 mod backend;
+pub mod bridge;
 pub mod catalog;
 mod guard;
 mod host;
@@ -32,6 +33,7 @@ mod tests;
 mod vst3;
 mod window;
 
+pub use bridge::{bridge_child_main, BRIDGE_SWITCH};
 pub use catalog::{Catalog, CatalogFile, PluginInfo, SCAN_SWITCH};
 pub use guard::{CrashReport, Guard};
 pub use host::Waker;

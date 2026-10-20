@@ -1,7 +1,8 @@
 //! Two small CLAP plugins for testing GloomTunes Studio's plugin host (Step 11).
 //!
 //! * **GT Test Gain** (`studio.gloomtunes.test-gain`): a stereo gain effect with a "Misbehave"
-//!   switch that makes it output NaN or report an error, so the host's bypass can be tested.
+//!   switch that makes it output NaN or report an error, so the host's bypass can be tested,
+//!   and a "Crash" switch that aborts the process (for the out-of-process sandbox).
 //!   On Linux it has a small X11 editor (click to set the gain) driven by a host timer.
 //! * **GT Test Tone** (`studio.gloomtunes.test-tone`): an 8-voice sine/square instrument. It
 //!   reports the last key played through a read-only parameter, which exercises the plugin to

@@ -388,6 +388,8 @@ pub struct PluginEntry {
     pub kind: PluginKind,
     /// The plugin's description and file, for the tooltip.
     pub details: String,
+    /// It runs in a process of its own (D150).
+    pub sandboxed: bool,
 }
 
 /// What the plugin browser shows.
@@ -434,6 +436,8 @@ pub enum PluginBrowserAction {
     RemoveFolder(usize),
     /// Let quarantined file `i` load again.
     Release(usize),
+    /// Run plugin `i` in a process of its own, or not.
+    SetSandboxed(usize, bool),
 }
 
 /// The plugin browser (shown in a window by the app).
@@ -515,7 +519,7 @@ pub fn plugin_browser(
                 );
             }
             egui::Grid::new("gt_plugin_rows")
-                .num_columns(4)
+                .num_columns(5)
                 .striped(true)
                 .spacing(vec2(8.0, 3.0))
                 .show(ui, |ui| {
@@ -542,6 +546,18 @@ pub fn plugin_browser(
                             ),
                         };
                         ui.label(RichText::new(kind).small().color(theme.text_dim));
+                        let mut own = p.sandboxed;
+                        if ui
+                            .checkbox(&mut own, tr("Own process"))
+                            .on_hover_text(tr(
+                                "Run this plugin in a process of its own: if it crashes, only \
+                                 it stops (it is started again), not the app. Costs some CPU \
+                                 and has no extra outputs, MIDI out or presets.",
+                            ))
+                            .changed()
+                        {
+                            actions.push(PluginBrowserAction::SetSandboxed(i, own));
+                        }
                         let can = p.kind == PluginKind::Instrument || view.effect_target.is_some();
                         if ui
                             .add_enabled(can, egui::Button::new(tr("Add")))

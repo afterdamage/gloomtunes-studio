@@ -16,13 +16,13 @@ use crate::processor::ParamOut;
 use crate::{PluginHost, PluginStatus};
 
 const RATE: u32 = 48_000;
-const FILE: &str = "/test/gt_test_plugin.clap";
+pub(crate) const FILE: &str = "/test/gt_test_plugin.clap";
 
-fn entry() -> PluginEntry {
+pub(crate) fn entry() -> PluginEntry {
     PluginEntry::load_from_clack::<TestEntry>(c"").unwrap()
 }
 
-fn info(id: &str) -> PluginInfo {
+pub(crate) fn info(id: &str) -> PluginInfo {
     list_entry(&entry(), Path::new(FILE))
         .into_iter()
         .find(|p| p.id == id)
@@ -52,7 +52,7 @@ fn the_test_plugins_are_listed_with_their_kind() {
 fn an_effect_processes_with_its_parameters_and_misbehaviour_is_reported() {
     let mut p = loaded(GAIN_ID);
     let (params, values) = p.read_params();
-    assert_eq!(params.len(), 2);
+    assert_eq!(params.len(), 3);
     assert_eq!(params[0].name, "Gain");
     assert_eq!(values[0], 0.5, "gain 1 of 0..2");
     assert_eq!(params[1].name, "Test / Misbehave");
@@ -131,7 +131,7 @@ fn state_saves_and_restores_into_a_new_instance() {
     );
 }
 
-fn host() -> PluginHost {
+pub(crate) fn host() -> PluginHost {
     let dir = std::env::temp_dir().join(format!(
         "gt-host-{}-{:?}",
         std::process::id(),

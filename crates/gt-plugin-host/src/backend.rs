@@ -116,6 +116,10 @@ pub(crate) trait Instance {
     fn take_edits(&mut self) -> Vec<(usize, f32)> {
         Vec::new()
     }
+    /// Something the user should hear about (a sandboxed plugin's process crashed).
+    fn take_notice(&mut self) -> Option<String> {
+        None
+    }
 
     // Editors.
     fn has_editor(&self) -> bool;
