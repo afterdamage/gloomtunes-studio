@@ -209,6 +209,8 @@ enum Popup {
     Sig(usize),
     /// Gain, reverse, fade shapes and takes of an audio clip.
     Clip(ClipId),
+    /// A clip's source: select its clips, make it unique, replace it (Prompt 30).
+    Source(ClipId),
 }
 
 /// View and editing state of the playlist that is not part of the document.
@@ -230,6 +232,8 @@ pub struct PlaylistState {
     pub selected: Vec<ClipId>,
     /// Track that new automation clips and dropped audio prefer.
     pub selected_track: Option<TrackId>,
+    /// Tracks picked in the headers (Ctrl+click adds), for grouping.
+    pub selected_tracks: Vec<TrackId>,
     /// Tracks armed for audio recording (not saved with the project).
     pub armed: Vec<TrackId>,
     drag: Option<Drag>,
@@ -252,6 +256,7 @@ impl Default for PlaylistState {
             tool: PlaylistTool::Draw,
             selected: Vec::new(),
             selected_track: None,
+            selected_tracks: Vec::new(),
             armed: Vec::new(),
             drag: None,
             loop_preview: None,
@@ -299,6 +304,8 @@ pub enum PlaylistAction {
     Changed,
     /// The tempo or time-signature map changed (the document too).
     TimingChanged,
+    /// Another arrangement became current, or the list changed (Prompt 30).
+    ArrangementChanged,
     /// Move the playhead.
     Locate(i64),
     /// Set and enable the loop region.
@@ -336,8 +343,10 @@ pub enum BounceKind {
     Unfreeze,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Geo {
+    /// Tracks shown, top to bottom (those in a collapsed folder are hidden).
+    rows: std::rc::Rc<[TrackId]>,
     grid: Rect,
     px_per_tick: f32,
     scroll_tick: f64,
@@ -346,6 +355,14 @@ struct Geo {
 }
 
 impl Geo {
+    fn row_of(&self, id: TrackId) -> Option<usize> {
+        self.rows.iter().position(|&r| r == id)
+    }
+    fn track_at(&self, row: i32) -> Option<TrackId> {
+        usize::try_from(row)
+            .ok()
+            .and_then(|r| self.rows.get(r).copied())
+    }
     fn x(&self, tick: i64) -> f32 {
         self.xf(tick as f64)
     }
@@ -412,11 +429,18 @@ pub fn playlist(
     if hovered {
         handle_wheel(ui, st, grid);
     }
-    let tracks = project.playlist.tracks.len();
+    let rows: std::rc::Rc<[TrackId]> = project
+        .playlist
+        .visible_rows()
+        .into_iter()
+        .map(|i| project.playlist.tracks[i].id)
+        .collect();
+    let tracks = rows.len();
     let max_y = (tracks as f32 * st.track_h - grid.height() + st.track_h).max(0.0);
     st.scroll_y = st.scroll_y.clamp(0.0, max_y);
     st.scroll_tick = st.scroll_tick.max(-(PPQ as f64));
     let geo = Geo {
+        rows,
         grid,
         px_per_tick: st.px_per_beat / PPQ as f32,
         scroll_tick: st.scroll_tick,
@@ -426,7 +450,7 @@ pub fn playlist(
 
     #[cfg(test)]
     {
-        st.last_geo = Some(geo);
+        st.last_geo = Some(geo.clone());
     }
     let grid_resp = ui.interact(grid, ui.id().with("pl_grid"), Sense::click_and_drag());
     let ruler_resp = ui.interact(ruler, ui.id().with("pl_ruler"), Sense::click_and_drag());
@@ -488,6 +512,11 @@ fn toolbar(
 ) {
     let dim = |s: &str| RichText::new(s).color(theme.text_dim);
     ui.horizontal(|ui| {
+        if arrangement_menu(ui, project, st) {
+            st.selected.clear();
+            actions.push(PlaylistAction::ArrangementChanged);
+        }
+        ui.separator();
         for (tool, label, tip) in [
             (
                 PlaylistTool::Draw,
@@ -561,6 +590,98 @@ fn toolbar(
             st.selected.len()
         )));
     });
+}
+
+/// The arrangement switcher with new, duplicate, rename and delete. True when the current
+/// arrangement changed (the app sends the new song and tempo map).
+fn arrangement_menu(ui: &mut Ui, project: &mut Project, st: &mut PlaylistState) -> bool {
+    let before = project.current_arrangement;
+    let count = project.arrangement_count();
+    let mut switch = None;
+    let mut edited = false;
+    let mut swapped = false;
+    let current = project.arrangements[before].name.clone();
+    egui::ComboBox::from_id_salt("pl_arrangement")
+        .width(110.0)
+        .selected_text(current)
+        .show_ui(ui, |ui| {
+            for (i, name) in project.arrangement_names().enumerate() {
+                if ui.selectable_label(i == before, name).clicked() {
+                    switch = Some(i);
+                }
+            }
+        })
+        .response
+        .on_hover_text(tr(
+            "Arrangement: each has its own clips, markers and tempo; patterns are shared",
+        ));
+    ui.menu_button("...", |ui| {
+        ui.horizontal(|ui| {
+            ui.label(tr("Name"));
+            let mut name = project.arrangements[before].name.clone();
+            if ui
+                .add(egui::TextEdit::singleline(&mut name).desired_width(120.0))
+                .changed()
+            {
+                project.rename_arrangement(before, &name);
+                edited = true;
+            }
+        });
+        if ui
+            .add_enabled(
+                count < gt_core::MAX_ARRANGEMENTS,
+                egui::Button::new(tr("New arrangement")),
+            )
+            .clicked()
+        {
+            swapped |= project.add_arrangement().is_some();
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                count < gt_core::MAX_ARRANGEMENTS,
+                egui::Button::new(tr("Duplicate arrangement")),
+            )
+            .clicked()
+        {
+            swapped |= project.duplicate_arrangement(before).is_some();
+            ui.close();
+        }
+        if ui
+            .add_enabled(count > 1, egui::Button::new(tr("Delete arrangement")))
+            .clicked()
+        {
+            swapped |= project.remove_arrangement(before);
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .add_enabled(before > 0, egui::Button::new(tr("Move left")))
+            .clicked()
+        {
+            project.move_arrangement(before, before - 1);
+            edited = true;
+        }
+        if ui
+            .add_enabled(before + 1 < count, egui::Button::new(tr("Move right")))
+            .clicked()
+        {
+            project.move_arrangement(before, before + 1);
+            edited = true;
+        }
+    })
+    .response
+    .on_hover_text(tr("New, duplicate, rename or delete arrangements"));
+    if let Some(i) = switch {
+        swapped |= project.switch_arrangement(i);
+    }
+    if swapped {
+        // The view's scroll and selection belong to the other arrangement.
+        st.cancel();
+        st.selected_tracks.clear();
+        st.selected_track = None;
+    }
+    swapped || edited
 }
 
 /// Every parameter, by owner: channels (with their synth knobs) and the mixer strips worth
@@ -715,14 +836,10 @@ enum Zone {
     Warp(usize),
 }
 
-fn track_row(project: &Project, id: TrackId) -> Option<usize> {
-    project.playlist.track_index(id)
-}
-
 fn hit_clip(geo: &Geo, project: &Project, p: Pos2) -> Option<(ClipId, Zone)> {
     let pl = &project.playlist;
     pl.clips.iter().rev().find_map(|c| {
-        let row = track_row(project, c.track)?;
+        let row = geo.row_of(c.track)?;
         let r = geo.clip_rect(row, c.start, c.end());
         if !r.contains(p) {
             return None;
@@ -888,11 +1005,8 @@ fn grid_input(
         if let Some(p) = gesture_origin(ui, resp) {
             let tick = geo.tick(p.x);
             let row = geo.row(p.y);
-            if let Some(t) = usize::try_from(row)
-                .ok()
-                .and_then(|r| project.playlist.tracks.get(r))
-            {
-                st.selected_track = Some(t.id);
+            if let Some(t) = geo.track_at(row) {
+                st.selected_track = Some(t);
             }
             let hit = hit_clip(geo, project, p);
             match (st.tool, hit) {
@@ -964,7 +1078,9 @@ fn grid_input(
                         }
                         st.selected.push(id);
                     }
-                    st.drag = Some(start_clip_drag(project, st, id, zone, tick, row, shift));
+                    st.drag = Some(start_clip_drag(
+                        geo, project, st, id, zone, tick, row, shift,
+                    ));
                 }
                 (PlaylistTool::Select, None) => {
                     st.drag = Some(Drag::Box {
@@ -979,11 +1095,7 @@ fn grid_input(
                     });
                 }
                 (PlaylistTool::Draw, None) => {
-                    if let Some(track) = usize::try_from(row)
-                        .ok()
-                        .and_then(|r| project.playlist.tracks.get(r))
-                        .map(|t| t.id)
-                    {
+                    if let Some(track) = geo.track_at(row) {
                         let pid = project.current_pattern;
                         let len = project.current_pattern().length_ticks();
                         let start = snap.floor(tick, &project.signatures);
@@ -993,6 +1105,7 @@ fn grid_input(
                                 .add_clip(track, start, len, ClipKind::Pattern(pid));
                         st.selected = vec![id];
                         st.drag = Some(start_clip_drag(
+                            geo,
                             project,
                             st,
                             id,
@@ -1042,16 +1155,21 @@ fn grid_input(
                 }
             }
             if let Some((id, Zone::Body)) = hit {
-                // Right-click on the name strip of an audio clip: its gain, fades and takes.
-                let label = project.playlist.clip(id).is_some_and(|c| {
-                    matches!(&c.kind, ClipKind::Audio { .. })
-                        && track_row(project, c.track).is_some_and(|row| {
-                            p.y <= geo.clip_rect(row, c.start, c.end()).top() + LABEL_H
-                        })
+                // Right-click on the name strip: an audio clip's gain, fades and takes, or the
+                // source menu of a pattern or automation clip.
+                let label = project.playlist.clip(id).and_then(|c| {
+                    let row = geo.row_of(c.track)?;
+                    (p.y <= geo.clip_rect(row, c.start, c.end()).top() + LABEL_H).then_some(
+                        if matches!(&c.kind, ClipKind::Audio { .. }) {
+                            Popup::Clip(id)
+                        } else {
+                            Popup::Source(id)
+                        },
+                    )
                 });
-                if label {
+                if let Some(popup) = label {
                     st.drag = None;
-                    st.popup = Some((Popup::Clip(id), p, 0));
+                    st.popup = Some((popup, p, 0));
                 }
             }
             if let Some((id, Zone::Point(i))) = hit {
@@ -1100,7 +1218,7 @@ fn grid_input(
                     st.selected.clear();
                 }
                 for c in &project.playlist.clips {
-                    if let Some(row) = track_row(project, c.track) {
+                    if let Some(row) = geo.row_of(c.track) {
                         if geo.clip_rect(row, c.start, c.end()).intersects(r)
                             && !st.selected.contains(&c.id)
                         {
@@ -1120,7 +1238,9 @@ fn grid_input(
     changed
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_clip_drag(
+    geo: &Geo,
     project: &Project,
     st: &PlaylistState,
     anchor: ClipId,
@@ -1154,7 +1274,7 @@ fn start_clip_drag(
             anchor,
             originals: sel
                 .iter()
-                .filter_map(|c| Some((c.id, c.start, track_row(project, c.track)?)))
+                .filter_map(|c| Some((c.id, c.start, geo.row_of(c.track)?)))
                 .collect(),
         },
     }
@@ -1182,13 +1302,13 @@ fn drag_update(
             // Snap the anchor's new start; everything moves by the same amount.
             let want = a_start + (tick - grab_tick);
             let delta = snap.round(want, &sigs) - a_start;
-            let tracks = project.playlist.tracks.len() as i32;
+            let tracks = geo.rows.len() as i32;
             let min_row = originals.iter().map(|o| o.2 as i32).min().unwrap_or(0);
             let max_row = originals.iter().map(|o| o.2 as i32).max().unwrap_or(0);
             let drow = (geo.row(p.y) - grab_row).clamp(-min_row, tracks - 1 - max_row);
             let mut changed = false;
             for (id, start, row) in originals {
-                let track = project.playlist.tracks[(row as i32 + drow) as usize].id;
+                let track = geo.rows[(row as i32 + drow) as usize];
                 if let Some(c) = project.playlist.clip_mut(id) {
                     let ns = start + delta;
                     if c.start != ns || c.track != track {
@@ -1360,8 +1480,7 @@ fn drop_audio(
 ) -> Option<SampleSource> {
     let src = resp.dnd_release_payload::<SampleSource>()?;
     let p = ui.input(|i| i.pointer.interact_pos())?;
-    let row = usize::try_from(geo.row(p.y)).ok()?;
-    let track = project.playlist.tracks.get(row)?.id;
+    let track = geo.track_at(geo.row(p.y))?;
     let start = snap_of(ui, st)
         .floor(geo.tick(p.x), &project.signatures)
         .max(0);
@@ -1743,6 +1862,9 @@ fn show_popup(
     let mut timing = false;
     let mut changed = false;
     let mut close = false;
+    let selection = st.selected.clone();
+    let mut select = None;
+    let mut next = None;
     let area = egui::Area::new(ui.id().with("pl_popup"))
         .order(egui::Order::Foreground)
         .fixed_pos(pos)
@@ -1938,6 +2060,114 @@ fn show_popup(
                             changed = true;
                             close = true;
                         }
+                        if ui
+                            .button(tr("Source..."))
+                            .on_hover_text(tr("Select its clips or replace its audio"))
+                            .clicked()
+                        {
+                            next = Some(Popup::Source(id));
+                        }
+                    }
+                    Popup::Source(id) => {
+                        let Some(c) = project.playlist.clip(id) else {
+                            close = true;
+                            return;
+                        };
+                        let (kind, linked) = (c.kind.clone(), c.link != 0);
+                        // The selection when this clip is in it, else the clip alone.
+                        let ids = if selection.contains(&id) {
+                            selection.clone()
+                        } else {
+                            vec![id]
+                        };
+                        ui.vertical(|ui| {
+                            let name = match &kind {
+                                ClipKind::Pattern(p) => project
+                                    .pattern(*p)
+                                    .map_or_else(String::new, |p| p.name.clone()),
+                                ClipKind::Audio { source, .. } => source.display_name(),
+                                ClipKind::Automation(a) => a.target.name(project),
+                            };
+                            ui.label(RichText::new(name).color(theme.text_dim));
+                            if ui.button(tr("Select all clips of this source")).clicked() {
+                                select = Some(project.playlist.clips_of_source(id));
+                                close = true;
+                            }
+                            let can_unique = matches!(kind, ClipKind::Pattern(_))
+                                || matches!(kind, ClipKind::Automation(_)) && linked;
+                            if ui
+                                .add_enabled(can_unique, egui::Button::new(tr("Make unique")))
+                                .on_hover_text(tr(
+                                    "Give the clip its own copy, so editing it leaves the others",
+                                ))
+                                .clicked()
+                            {
+                                project.make_unique(&ids);
+                                changed = true;
+                                close = true;
+                            }
+                            match &kind {
+                                ClipKind::Pattern(cur) => {
+                                    let pats: Vec<(gt_core::PatternId, String)> = project
+                                        .patterns
+                                        .iter()
+                                        .map(|p| (p.id, p.name.clone()))
+                                        .collect();
+                                    ui.menu_button(tr("Replace with pattern"), |ui| {
+                                        for (pid, name) in pats {
+                                            if ui
+                                                .add_enabled(pid != *cur, egui::Button::new(name))
+                                                .clicked()
+                                            {
+                                                changed |= project.playlist.replace_source(
+                                                    &ids,
+                                                    Some(pid),
+                                                    None,
+                                                ) > 0;
+                                                ui.close();
+                                            }
+                                        }
+                                    });
+                                }
+                                ClipKind::Audio { source: cur, .. } => {
+                                    let mut srcs: Vec<SampleSource> = project
+                                        .playlists()
+                                        .flat_map(|pl| &pl.clips)
+                                        .filter_map(|c| match &c.kind {
+                                            ClipKind::Audio { source, .. } => Some(source.clone()),
+                                            _ => None,
+                                        })
+                                        .chain(
+                                            project
+                                                .channels
+                                                .iter()
+                                                .flat_map(|c| c.samples().cloned()),
+                                        )
+                                        .collect();
+                                    srcs.sort_by_key(SampleSource::display_name);
+                                    srcs.dedup();
+                                    ui.menu_button(tr("Replace with audio"), |ui| {
+                                        for s in srcs {
+                                            if ui
+                                                .add_enabled(
+                                                    s != *cur,
+                                                    egui::Button::new(s.display_name()),
+                                                )
+                                                .clicked()
+                                            {
+                                                changed |= project.playlist.replace_source(
+                                                    &ids,
+                                                    None,
+                                                    Some(&s),
+                                                ) > 0;
+                                                ui.close();
+                                            }
+                                        }
+                                    });
+                                }
+                                ClipKind::Automation(_) => {}
+                            }
+                        });
                     }
                     Popup::Sig(i) => {
                         let mut ch: Vec<SigChange> = project.signatures.changes().collect();
@@ -1978,7 +2208,14 @@ fn show_popup(
                 .is_some_and(|p| !area.response.rect.contains(p))
     });
     let combo_open = egui::Popup::is_any_open(ui.ctx());
-    if close || ui.input(|i| i.key_pressed(egui::Key::Escape)) || outside && age > 1 && !combo_open
+    if let Some(sel) = select {
+        st.selected = sel;
+    }
+    if let Some(p) = next {
+        st.popup = Some((p, pos, 0));
+    } else if close
+        || ui.input(|i| i.key_pressed(egui::Key::Escape))
+        || outside && age > 1 && !combo_open
     {
         st.popup = None;
     } else {
@@ -2007,7 +2244,7 @@ fn paint(
     // Track rows.
     let pl = &project.playlist;
     let gp = ui.painter_at(grid);
-    for (row, t) in pl.tracks.iter().enumerate() {
+    for (row, t) in geo.rows.iter().filter_map(|&id| pl.track(id)).enumerate() {
         let top = geo.row_top(row);
         if top > grid.bottom() || top + geo.track_h < grid.top() {
             continue;
@@ -2077,7 +2314,7 @@ fn paint(
 
     // Clips.
     for c in &pl.clips {
-        let Some(row) = track_row(project, c.track) else {
+        let Some(row) = geo.row_of(c.track) else {
             continue;
         };
         if c.end() < t0 || c.start > t1 {
@@ -2087,7 +2324,9 @@ fn paint(
         if r.bottom() < grid.top() || r.top() > grid.bottom() {
             continue;
         }
-        let track = &pl.tracks[row];
+        let Some(track) = pl.track(c.track) else {
+            continue;
+        };
         let selected = st.selected.contains(&c.id);
         let audible = !c.muted && pl.is_track_audible(c.track);
         let base = match &c.kind {
@@ -2231,7 +2470,7 @@ fn paint(
             .filter(|q| grid.contains(*q))
         {
             if let Ok(row) = usize::try_from(geo.row(pos.y)) {
-                if row < pl.tracks.len() {
+                if row < geo.rows.len() {
                     let top = geo.row_top(row);
                     let x = geo.x(st.snap.floor(geo.tick(pos.x), sigs).max(0));
                     gp.rect_stroke(
@@ -2695,6 +2934,15 @@ fn paint_curve(
 /// Track headers: colour, name, mute, solo and the strip audio clips play into. Returns true
 /// if a track changed.
 #[allow(clippy::too_many_arguments)]
+/// A folder edit picked in a track header's menu.
+enum HeaderOp {
+    Group(Vec<TrackId>),
+    Ungroup(TrackId),
+    Move(TrackId, Option<TrackId>),
+    Route(TrackId),
+}
+
+#[allow(clippy::too_many_arguments)]
 fn track_headers(
     ui: &mut Ui,
     theme: &GloomTheme,
@@ -2713,7 +2961,18 @@ fn track_headers(
     hui.painter().rect_filled(headers, 0.0, theme.bg_panel);
     let mut remove = None;
     let mut insert_at = None;
+    let mut op = None;
+    st.selected_tracks
+        .retain(|id| project.playlist.tracks.iter().any(|t| t.id == *id));
     let n = project.playlist.tracks.len();
+    let folders: Vec<(TrackId, String)> = project
+        .playlist
+        .tracks
+        .iter()
+        .filter(|t| t.folder)
+        .map(|t| (t.id, t.name.clone()))
+        .collect();
+    let ctrl = hui.input(|i| i.modifiers.command);
     let inserts = project.mixer.inserts();
     let strip_names: Vec<String> = project
         .mixer
@@ -2721,21 +2980,42 @@ fn track_headers(
         .iter()
         .map(|s| s.name.clone())
         .collect();
-    for row in 0..n {
+    for (row, &tid) in geo.rows.iter().enumerate() {
         let top = geo.row_top(row);
         if top > headers.bottom() || top + geo.track_h < headers.top() {
             continue;
         }
+        let Some(ti) = project.playlist.track_index(tid) else {
+            continue;
+        };
+        let depth = project.playlist.depth(tid);
+        let indent = 8.0 * depth.min(4) as f32;
+        let parent = project.playlist.tracks[ti].parent;
+        // Folders it may move into: not itself or one inside it.
+        let targets: Vec<(TrackId, String)> = folders
+            .iter()
+            .filter(|(f, _)| *f != tid && !project.playlist.is_in(*f, tid) && Some(*f) != parent)
+            .cloned()
+            .collect();
         let r = Rect::from_min_max(
             pos2(headers.left(), top),
             pos2(headers.right() - 2.0, top + geo.track_h),
         );
         let resp = hui.interact(r, hui.id().with(("pl_head", row)), Sense::click());
         if resp.clicked() {
-            st.selected_track = Some(project.playlist.tracks[row].id);
+            st.selected_track = Some(tid);
+            if ctrl {
+                if let Some(k) = st.selected_tracks.iter().position(|&x| x == tid) {
+                    st.selected_tracks.remove(k);
+                } else {
+                    st.selected_tracks.push(tid);
+                }
+            } else {
+                st.selected_tracks = vec![tid];
+            }
         }
-        let t = &mut project.playlist.tracks[row];
-        let sel = st.selected_track == Some(t.id);
+        let t = &mut project.playlist.tracks[ti];
+        let sel = st.selected_track == Some(t.id) || st.selected_tracks.contains(&t.id);
         hui.painter().rect_filled(
             r.shrink2(vec2(0.0, 0.5)),
             0.0,
@@ -2745,8 +3025,26 @@ fn track_headers(
                 theme.bg_widget
             },
         );
-        let swatch = Rect::from_min_size(r.min + vec2(2.0, 2.0), vec2(5.0, r.height() - 4.0));
+        let swatch =
+            Rect::from_min_size(r.min + vec2(2.0 + indent, 2.0), vec2(5.0, r.height() - 4.0));
         hui.painter().rect_filled(swatch, 1.0, color(t.color));
+        let mut name_x = 10.0 + indent;
+        if t.folder {
+            // Folder: a toggle that shows or hides its tracks.
+            let b = Rect::from_min_size(pos2(r.left() + name_x, r.top() + 3.0), vec2(14.0, 16.0));
+            let label = if t.collapsed { ">" } else { "v" };
+            if hui
+                .put(
+                    b,
+                    egui::Button::new(RichText::new(label).small()).frame(false),
+                )
+                .on_hover_text(tr("Show or hide the tracks in this folder"))
+                .clicked()
+            {
+                t.collapsed = !t.collapsed;
+            }
+            name_x += 15.0;
+        }
         if t.frozen.is_some() {
             // Frozen: the swatch is hollow and the clips play from the render.
             hui.painter()
@@ -2759,7 +3057,10 @@ fn track_headers(
                 theme.accent,
             );
         }
-        let line1 = Rect::from_min_size(r.min + vec2(10.0, 3.0), vec2(r.width() - 76.0, 16.0));
+        let line1 = Rect::from_min_size(
+            r.min + vec2(name_x, 3.0),
+            vec2((r.width() - 66.0 - name_x).max(20.0), 16.0),
+        );
         if hui
             .put(
                 line1,
@@ -2780,11 +3081,19 @@ fn track_headers(
                 .on_hover_text(tip)
                 .clicked()
         };
-        if btn(&mut hui, 42.0, t.mute, "M", "Mute track", theme.warn) {
+        let (mute_tip, solo_tip) = if t.folder {
+            (
+                "Mute the folder and its tracks",
+                "Solo the folder and its tracks",
+            )
+        } else {
+            ("Mute track", "Solo track")
+        };
+        if btn(&mut hui, 42.0, t.mute, "M", mute_tip, theme.warn) {
             t.mute = !t.mute;
             changed = true;
         }
-        if btn(&mut hui, 22.0, t.solo, "S", "Solo track", theme.accent) {
+        if btn(&mut hui, 22.0, t.solo, "S", solo_tip, theme.accent) {
             t.solo = !t.solo;
             changed = true;
         }
@@ -2808,8 +3117,10 @@ fn track_headers(
             }
         }
         if r.height() >= 40.0 {
-            let line2 =
-                Rect::from_min_size(pos2(r.left() + 10.0, r.top() + 21.0), vec2(90.0, 16.0));
+            let line2 = Rect::from_min_size(
+                pos2(r.left() + 10.0 + indent, r.top() + 21.0),
+                vec2(90.0, 16.0),
+            );
             let mut ins = t.insert as i64;
             let resp = hui
                 .put(
@@ -2855,6 +3166,11 @@ fn track_headers(
         let id = t.id;
         let mut col = t.color;
         let frozen = t.frozen.is_some();
+        let folder = t.folder;
+        let mut group: Vec<TrackId> = st.selected_tracks.clone();
+        if !group.contains(&id) {
+            group = vec![id];
+        }
         let selected: Vec<ClipId> = project
             .playlist
             .clips
@@ -2920,8 +3236,56 @@ fn track_headers(
                 ui.close();
             }
             ui.separator();
+            let label = if group.len() > 1 {
+                "Group selected tracks in a folder"
+            } else {
+                "Put in a new folder"
+            };
+            if ui
+                .button(tr(label))
+                .on_hover_text(tr("Ctrl+click track names to pick several"))
+                .clicked()
+            {
+                op = Some(HeaderOp::Group(group.clone()));
+                ui.close();
+            }
+            if !targets.is_empty() {
+                ui.menu_button(tr("Move into folder"), |ui| {
+                    for (f, name) in &targets {
+                        if ui.button(name).clicked() {
+                            op = Some(HeaderOp::Move(id, Some(*f)));
+                            ui.close();
+                        }
+                    }
+                });
+            }
+            if parent.is_some() && ui.button(tr("Move out of the folder")).clicked() {
+                op = Some(HeaderOp::Move(id, None));
+                ui.close();
+            }
+            if folder {
+                if ui
+                    .button(tr("Route folder to a group insert"))
+                    .on_hover_text(tr(
+                        "Audio of its tracks and their inserts goes through one mixer insert",
+                    ))
+                    .clicked()
+                {
+                    op = Some(HeaderOp::Route(id));
+                    ui.close();
+                }
+                if ui
+                    .button(tr("Ungroup"))
+                    .on_hover_text(tr("Its tracks move up a level; an empty folder is removed"))
+                    .clicked()
+                {
+                    op = Some(HeaderOp::Ungroup(id));
+                    ui.close();
+                }
+            }
+            ui.separator();
             if ui.button(tr("Insert track above")).clicked() {
-                insert_at = Some(row);
+                insert_at = Some(ti);
                 ui.close();
             }
             if n > 1 && ui.button(tr("Delete track and its clips")).clicked() {
@@ -2936,10 +3300,30 @@ fn track_headers(
                 clips: selected,
             });
         }
-        if col != project.playlist.tracks[row].color {
-            project.playlist.tracks[row].color = col;
+        if col != project.playlist.tracks[ti].color {
+            if folder {
+                // A folder's colour goes to every track in it.
+                project.playlist.set_group_color(id, col);
+            } else {
+                project.playlist.tracks[ti].color = col;
+            }
             changed = true;
         }
+    }
+    match op {
+        Some(HeaderOp::Group(ids)) => {
+            if let Some(f) = project.playlist.group_tracks(&ids) {
+                st.selected_tracks = vec![f];
+                changed = true;
+            }
+        }
+        Some(HeaderOp::Ungroup(f)) => {
+            project.playlist.ungroup(f);
+            changed = true;
+        }
+        Some(HeaderOp::Move(id, to)) => changed |= project.playlist.set_parent(id, to),
+        Some(HeaderOp::Route(f)) => changed |= project.route_group(f).is_some(),
+        None => {}
     }
     if let Some(id) = remove {
         project.playlist.remove_track(id);
@@ -2948,7 +3332,9 @@ fn track_headers(
     if let Some(row) = insert_at {
         let id = project.playlist.add_track();
         if let Some(i) = project.playlist.track_index(id) {
-            let t = project.playlist.tracks.remove(i);
+            let mut t = project.playlist.tracks.remove(i);
+            // A track inserted inside a folder belongs to it.
+            t.parent = project.playlist.tracks[row].parent;
             project.playlist.tracks.insert(row, t);
         }
         changed = true;
@@ -3076,7 +3462,7 @@ mod tests {
             ..Default::default()
         };
         frame(&ctx, &mut p, &mut st, vec![]);
-        let g = st.last_geo.unwrap();
+        let g = st.last_geo.clone().unwrap();
         // The Break clip: track 3, bars 7-8.
         let id = p
             .playlist
@@ -3116,7 +3502,7 @@ mod tests {
             ..Default::default()
         };
         frame(&ctx, &mut p, &mut st, vec![]);
-        let g = st.last_geo.unwrap();
+        let g = st.last_geo.clone().unwrap();
         let (id, y) = beat_clip(&p, &g);
         // Bars 3-6 end at tick 6*3840; pull the edge back one bar.
         let edge = pos2(g.x(6 * 3840) - 2.0, y);
@@ -3146,7 +3532,7 @@ mod tests {
         let mut p = Project::demo();
         let mut st = PlaylistState::default();
         frame(&ctx, &mut p, &mut st, vec![]);
-        let g = st.last_geo.unwrap();
+        let g = st.last_geo.clone().unwrap();
         let y = g.grid.top() - ROW_H / 2.0;
         let mut actions = Vec::new();
         for ev in drag(pos2(g.x(2 * 3840 + 100), y), pos2(g.x(4 * 3840 - 100), y)) {
@@ -3169,7 +3555,7 @@ mod tests {
         let before = p.playlist.clips.len();
         // Lay out one frame, then click on track 6 (empty) in the middle of bar 3.
         frame(&ctx, &mut p, &mut st, vec![]);
-        let g = st.last_geo.unwrap();
+        let g = st.last_geo.clone().unwrap();
         let at = pos2(g.x(2 * 3840 + 1920), g.row_top(5) + g.track_h / 2.0);
         let mut actions = Vec::new();
         for ev in click(at) {
@@ -3218,7 +3604,7 @@ mod tests {
             ..Default::default()
         };
         frame(&ctx, &mut p, &mut st, vec![]);
-        let g = st.last_geo.unwrap();
+        let g = st.last_geo.clone().unwrap();
         let (id, at) = bass_filter_segment(&p, &g);
         let points = |p: &Project| match &p.playlist.clip(id).unwrap().kind {
             ClipKind::Automation(a) => a.points.len(),
@@ -3243,7 +3629,7 @@ mod tests {
         let mut p = Project::demo();
         let mut st = PlaylistState::default();
         frame(&ctx, &mut p, &mut st, vec![]);
-        let g = st.last_geo.unwrap();
+        let g = st.last_geo.clone().unwrap();
         let (id, at) = bass_filter_segment(&p, &g);
         let n = p.playlist.clips.len();
         let press = |pressed| egui::Event::PointerButton {
@@ -3303,7 +3689,7 @@ mod tests {
             ..Default::default()
         };
         frame(&ctx, &mut p, &mut st, vec![]);
-        let g = st.last_geo.unwrap();
+        let g = st.last_geo.clone().unwrap();
         let r = g.clip_rect(0, 0, 8 * 960);
         let handle = pos2(g.xf(2.1 * 960.0), r.bottom() - POINT_R);
         for ev in drag(handle, pos2(g.xf(3.05 * 960.0), handle.y)) {

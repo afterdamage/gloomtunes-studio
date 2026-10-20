@@ -119,6 +119,14 @@ and the app shows it that way. Function keys on a Mac laptop may need **fn** hel
     between them to bend it.
   - Track names are editable; M and S mute and solo a track; right-click a header for colours,
     insert and delete. **+ Track** adds one; there is no limit.
+  - Folders: right-click a header and pick **Put in a new folder** (Ctrl+click names first to
+    group several). A folder's M and S mute and solo everything in it, its arrow collapses it,
+    and **Route folder to a group insert** sends its tracks' audio through one insert.
+  - The arrangement box at the left of the toolbar switches arrangements; its **...** menu
+    makes, duplicates, renames, moves and deletes them. Patterns are shared; clips, markers and
+    tempo belong to each arrangement.
+  - Right-click a clip's name strip for its source: select all clips of it, **Make unique**, or
+    replace the pattern or audio in place.
   - The ruler: click the bars row to move the playhead, drag it to set the loop. Right-click to
     add a marker, tempo change or time-signature change; drag a flag to move it, double-click to
     edit it.

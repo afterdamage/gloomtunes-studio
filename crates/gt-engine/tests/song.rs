@@ -198,3 +198,56 @@ fn song_mode_notes_do_not_repeat_and_loop_wraps_replay_them() {
         .collect();
     assert_eq!(hits, vec![2 * SR as usize, 6 * SR as usize]);
 }
+
+/// Prompt 30: switching arrangements while playing. The playhead keeps its tick, the new
+/// arrangement's tempo map takes over from there, its clips play where it puts them, and what
+/// the old one was playing fades out instead of stopping dead.
+#[test]
+fn switching_arrangements_while_playing_follows_the_new_one() {
+    let dc = Arc::new(SampleData::mono(SR, vec![0.5; 4 * SR as usize]));
+    let mut p = Project::empty();
+    // Arrangement 1, 120 BPM: a long DC clip from the start.
+    audio_clip(&mut p, 0, 4 * 3840, 0);
+    // Arrangement 2, 60 BPM: one clip at tick 1920 (beat 2).
+    p.add_arrangement().unwrap();
+    p.tempo = TempoMap::constant(60.0);
+    audio_clip(&mut p, 1920, 960, 0);
+    p.switch_arrangement(0);
+
+    let (mut h, mut pr) = engine();
+    let send_arrangement = |h: &mut EngineHandle, p: &Project| {
+        let song = SongSnapshot::compile_song(p, |_| Some(Arc::clone(&dc)));
+        h.send(EngineCommand::SetTempoMap(Box::new(p.tempo.clone())))
+            .unwrap();
+        h.send(EngineCommand::SetSong(Box::new(song))).unwrap();
+    };
+    send_arrangement(&mut h, &p);
+    h.send(EngineCommand::SetMetronome(false)).unwrap();
+    h.send(EngineCommand::Play).unwrap();
+    let block = 2 * 480;
+    let mut out = vec![0.0; 2 * 3 * SR as usize];
+    let switch = SR as usize / 4;
+    for (k, chunk) in out.chunks_mut(block).enumerate() {
+        if k * block / 2 == switch {
+            // 0.25 s in: tick 480. The UI swaps the document and sends the new song.
+            assert!(p.switch_arrangement(1));
+            send_arrangement(&mut h, &p);
+        }
+        pr.process(chunk);
+    }
+    let out = left(&out);
+    assert_eq!(out[switch - 10], 0.5, "arrangement 1 was playing");
+    // Arrangement 1's audio fades out, without a step bigger than a short fade allows.
+    let step = out[switch - 10..switch + 2000]
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0.0, f32::max);
+    assert!(step < 0.5 / 50.0, "click at the switch: {step}");
+    assert!(out[switch + 2000..switch + SR as usize]
+        .iter()
+        .all(|&x| x == 0.0));
+    // Tick 480 to 1920 is 1.5 beats at arrangement 2's 60 BPM: 1.5 s after the switch.
+    let at = switch + (1.5 * f64::from(SR)) as usize;
+    assert!(out[at - 200..at].iter().all(|&x| x == 0.0));
+    assert_eq!(out[at + 100], 0.5, "arrangement 2's clip, on its own tempo");
+}

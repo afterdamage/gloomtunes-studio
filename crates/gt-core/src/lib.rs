@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod arrangement;
 pub mod autorec;
 pub mod demos;
 pub mod drum_synth;
@@ -32,6 +33,7 @@ pub mod sampler;
 pub mod synth;
 pub mod time;
 
+pub use arrangement::{Arrangement, MAX_ARRANGEMENTS};
 pub use autorec::{record_automation, record_pattern_automation, thin, THIN_TOLERANCE};
 pub use drum_synth::{DrumModel, DrumVoice};
 pub use effects::{EffectKind, EffectSlot};

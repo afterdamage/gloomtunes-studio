@@ -59,6 +59,13 @@ pub struct Track {
     pub input: Option<AudioInput>,
     /// While frozen, the track plays this render instead of its clips (D105).
     pub frozen: Option<Frozen>,
+    /// A folder track groups the tracks whose `parent` it is (Prompt 30): its mute, solo and
+    /// insert apply to them, and collapsing it hides them.
+    pub folder: bool,
+    /// A collapsed folder hides its tracks (they still play).
+    pub collapsed: bool,
+    /// The folder this track is in.
+    pub parent: Option<TrackId>,
 }
 
 /// A frozen track's render: the track's clips through its insert's effects, from `start`.
@@ -269,6 +276,9 @@ pub struct Clip {
     pub offset: i64,
     /// A muted clip is drawn but not played.
     pub muted: bool,
+    /// Automation clips with the same nonzero link share one source: an edit to one is
+    /// copied to the others ([`Playlist::sync_links`]). Pattern clips share their pattern.
+    pub link: u32,
     /// Source.
     pub kind: ClipKind,
 }
@@ -663,14 +673,19 @@ impl Default for Playlist {
 }
 
 impl Playlist {
-    /// A playlist with [`DEFAULT_TRACKS`] empty tracks.
-    pub fn new() -> Self {
-        let mut p = Self {
+    /// A playlist with no tracks.
+    pub fn empty() -> Self {
+        Self {
             tracks: Vec::new(),
             clips: Vec::new(),
             markers: Vec::new(),
             next_id: 1,
-        };
+        }
+    }
+
+    /// A playlist with [`DEFAULT_TRACKS`] empty tracks.
+    pub fn new() -> Self {
+        let mut p = Self::empty();
         for _ in 0..DEFAULT_TRACKS {
             p.add_track();
         }
@@ -717,14 +732,219 @@ impl Playlist {
             insert: MASTER,
             input: None,
             frozen: None,
+            folder: false,
+            collapsed: false,
+            parent: None,
         });
         id
     }
 
-    /// Removes a track and its clips.
+    /// Removes a track and its clips. The tracks of a removed folder move to its parent.
     pub fn remove_track(&mut self, id: TrackId) {
+        let parent = self.track(id).and_then(|t| t.parent);
         self.tracks.retain(|t| t.id != id);
         self.clips.retain(|c| c.track != id);
+        for t in &mut self.tracks {
+            if t.parent == Some(id) {
+                t.parent = parent;
+            }
+        }
+    }
+
+    /// The folders `id` is in, innermost first.
+    pub fn ancestors(&self, id: TrackId) -> impl Iterator<Item = &Track> + '_ {
+        let mut at = self.track(id).and_then(|t| t.parent);
+        // A broken file could hold a loop; never walk further than there are tracks.
+        let mut left = self.tracks.len();
+        std::iter::from_fn(move || {
+            left = left.checked_sub(1)?;
+            let t = self.track(at?)?;
+            at = t.parent;
+            Some(t)
+        })
+    }
+
+    /// True if `id` is `folder` or inside it, at any depth.
+    pub fn is_in(&self, id: TrackId, folder: TrackId) -> bool {
+        id == folder || self.ancestors(id).any(|t| t.id == folder)
+    }
+
+    /// How many folders `id` is in.
+    pub fn depth(&self, id: TrackId) -> usize {
+        self.ancestors(id).count()
+    }
+
+    /// The tracks inside `folder` at any depth, top to bottom.
+    pub fn descendants(&self, folder: TrackId) -> Vec<TrackId> {
+        self.tracks
+            .iter()
+            .filter(|t| t.id != folder && self.is_in(t.id, folder))
+            .map(|t| t.id)
+            .collect()
+    }
+
+    /// Indices of the tracks shown, top to bottom: those in a collapsed folder are hidden.
+    pub fn visible_rows(&self) -> Vec<usize> {
+        (0..self.tracks.len())
+            .filter(|&i| !self.ancestors(self.tracks[i].id).any(|f| f.collapsed))
+            .collect()
+    }
+
+    /// Puts `members` in a new folder track "Group N" placed where the first of them was; they
+    /// follow it in their order. A folder inside another one stays there (nesting). Returns
+    /// the folder, or `None` when `members` names no track.
+    pub fn group_tracks(&mut self, members: &[TrackId]) -> Option<TrackId> {
+        let mut rows: Vec<usize> = members
+            .iter()
+            .filter_map(|&m| self.track_index(m))
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        let first = *rows.first()?;
+        let parent = self.tracks[first].parent;
+        let name = (1..)
+            .map(|k| format!("Group {k}"))
+            .find(|s| self.tracks.iter().all(|t| &t.name != s))
+            .unwrap_or_default();
+        let folder = self.add_track();
+        let mut f = self.tracks.pop().expect("just added");
+        f.name = name;
+        f.folder = true;
+        f.parent = parent;
+        f.color = self.tracks[first].color;
+        let mut moved: Vec<Track> = rows.iter().rev().map(|&i| self.tracks.remove(i)).collect();
+        moved.reverse();
+        let ids: Vec<TrackId> = moved.iter().map(|t| t.id).collect();
+        for t in &mut moved {
+            // A member's own folder (the selection could mix levels) stays its parent, unless
+            // that folder is moving too.
+            if t.parent == parent || t.parent.is_some_and(|p| !ids.contains(&p)) {
+                t.parent = Some(folder);
+            }
+        }
+        // Tracks below a moved folder follow it, so the folder stays above its tracks.
+        let mut at = first.min(self.tracks.len());
+        self.tracks.insert(at, f);
+        for t in moved {
+            at += 1;
+            self.tracks.insert(at, t);
+        }
+        self.keep_folders_above_their_tracks();
+        Some(folder)
+    }
+
+    /// Dissolves folder `id`: its tracks move to its parent. The folder track is removed when
+    /// it holds no clips, and otherwise becomes an ordinary track.
+    pub fn ungroup(&mut self, id: TrackId) {
+        let Some(f) = self.track(id).filter(|t| t.folder).cloned() else {
+            return;
+        };
+        for t in &mut self.tracks {
+            if t.parent == Some(id) {
+                t.parent = f.parent;
+            }
+        }
+        if self.clips.iter().any(|c| c.track == id) {
+            if let Some(t) = self.track_mut(id) {
+                t.folder = false;
+                t.collapsed = false;
+            }
+        } else {
+            self.tracks.retain(|t| t.id != id);
+        }
+    }
+
+    /// Moves track `id` into folder `parent` (or out of every folder with `None`), right
+    /// after the folder's tracks. False when `parent` is not a folder or is inside `id`.
+    pub fn set_parent(&mut self, id: TrackId, parent: Option<TrackId>) -> bool {
+        if self.track(id).is_none() {
+            return false;
+        }
+        if let Some(f) = parent {
+            if !self.track(f).is_some_and(|t| t.folder) || self.is_in(f, id) {
+                return false;
+            }
+        }
+        if let Some(t) = self.track_mut(id) {
+            t.parent = parent;
+        }
+        // Place it (and what it holds) at the end of its new folder.
+        if let Some(i) = self.track_index(id) {
+            let t = self.tracks.remove(i);
+            let end = match parent {
+                Some(f) => self
+                    .tracks
+                    .iter()
+                    .rposition(|x| self.is_in(x.id, f))
+                    .map_or(self.tracks.len(), |k| k + 1),
+                None => self.tracks.len(),
+            };
+            self.tracks.insert(end, t);
+        }
+        self.keep_folders_above_their_tracks();
+        true
+    }
+
+    /// Gives folder `id` and every track in it colour `color`.
+    pub fn set_group_color(&mut self, id: TrackId, color: [u8; 3]) {
+        let inside: Vec<TrackId> = self
+            .tracks
+            .iter()
+            .filter(|t| self.is_in(t.id, id))
+            .map(|t| t.id)
+            .collect();
+        for t in &mut self.tracks {
+            if inside.contains(&t.id) {
+                t.color = color;
+            }
+        }
+    }
+
+    /// The mixer strip a track's audio plays into: its own insert, or when that is the master,
+    /// the insert of the nearest folder around it that has one.
+    pub fn track_insert(&self, id: TrackId) -> usize {
+        let Some(t) = self.track(id) else {
+            return MASTER;
+        };
+        if t.insert != MASTER {
+            return t.insert;
+        }
+        self.ancestors(id)
+            .map(|f| f.insert)
+            .find(|&i| i != MASTER)
+            .unwrap_or(MASTER)
+    }
+
+    /// Moves every folder's tracks right below it (in their order), so the list draws as a
+    /// tree.
+    fn keep_folders_above_their_tracks(&mut self) {
+        let mut out: Vec<Track> = Vec::with_capacity(self.tracks.len());
+        let roots: Vec<TrackId> = self
+            .tracks
+            .iter()
+            .filter(|t| t.parent.is_none())
+            .map(|t| t.id)
+            .collect();
+        fn place(pl: &Playlist, id: TrackId, out: &mut Vec<Track>) {
+            if out.iter().any(|t| t.id == id) {
+                return;
+            }
+            let Some(t) = pl.track(id) else { return };
+            out.push(t.clone());
+            for c in pl.tracks.iter().filter(|c| c.parent == Some(id)) {
+                place(pl, c.id, out);
+            }
+        }
+        for r in roots {
+            place(self, r, &mut out);
+        }
+        // Anything unreachable (a loop in a broken file) keeps its place at the end.
+        for t in &self.tracks {
+            if !out.iter().any(|o| o.id == t.id) {
+                out.push(t.clone());
+            }
+        }
+        self.tracks = out;
     }
 
     /// Index of a track, top to bottom.
@@ -742,12 +962,14 @@ impl Playlist {
         self.tracks.iter().find(|t| t.id == id)
     }
 
-    /// True if clips on `id` play: the track exists, is not muted, and no other track is
-    /// soloed (unless it is soloed too).
+    /// True if clips on `id` play: the track exists, neither it nor a folder it is in is
+    /// muted, and when any track or folder is soloed, it or a folder it is in is soloed too.
     pub fn is_track_audible(&self, id: TrackId) -> bool {
         let any_solo = self.tracks.iter().any(|t| t.solo);
-        self.track(id)
-            .is_some_and(|t| !t.mute && (!any_solo || t.solo))
+        self.track(id).is_some_and(|t| {
+            let up = || std::iter::once(t).chain(self.ancestors(id));
+            !up().any(|x| x.mute) && (!any_solo || up().any(|x| x.solo))
+        })
     }
 
     /// Adds a clip and returns its id. Length is at least 1 tick, offset at least 0.
@@ -760,9 +982,104 @@ impl Playlist {
             length: length.max(1),
             offset: 0,
             muted: false,
+            link: 0,
             kind,
         });
         id
+    }
+
+    /// A link id no clip uses.
+    pub fn new_link(&self) -> u32 {
+        self.clips.iter().map(|c| c.link).max().unwrap_or(0) + 1
+    }
+
+    /// The clips that play the same source as `id`: its pattern, its audio file, or the
+    /// automation clips linked to it (only itself when it is not linked).
+    pub fn clips_of_source(&self, id: ClipId) -> Vec<ClipId> {
+        let Some(c) = self.clip(id) else {
+            return Vec::new();
+        };
+        self.clips
+            .iter()
+            .filter(|o| match (&c.kind, &o.kind) {
+                (ClipKind::Pattern(a), ClipKind::Pattern(b)) => a == b,
+                (ClipKind::Audio { source: a, .. }, ClipKind::Audio { source: b, .. }) => a == b,
+                (ClipKind::Automation(_), ClipKind::Automation(_)) => {
+                    o.id == c.id || (c.link != 0 && o.link == c.link)
+                }
+                _ => false,
+            })
+            .map(|o| o.id)
+            .collect()
+    }
+
+    /// Copies each edited linked automation clip to the other clips of its link: a clip whose
+    /// automation differs from the one with its id in `before` is the edited one (the first,
+    /// if several were). Returns how many clips were updated.
+    pub fn sync_links(&mut self, before: &Playlist) -> usize {
+        let mut edited: Vec<(u32, Automation)> = Vec::new();
+        for c in &self.clips {
+            let ClipKind::Automation(a) = &c.kind else {
+                continue;
+            };
+            if c.link == 0 || edited.iter().any(|(l, _)| *l == c.link) {
+                continue;
+            }
+            let old = before.clip(c.id).map(|o| &o.kind);
+            if old != Some(&c.kind) && old.is_some() {
+                edited.push((c.link, a.clone()));
+            }
+        }
+        let mut n = 0;
+        for c in &mut self.clips {
+            let Some((_, a)) = edited.iter().find(|(l, _)| *l == c.link && c.link != 0) else {
+                continue;
+            };
+            if let ClipKind::Automation(own) = &mut c.kind {
+                if own != a {
+                    own.clone_from(a);
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// Points pattern clips `ids` at pattern `to` and audio clips at `source` (whichever
+    /// applies), keeping their position, length and slip offset. Returns how many changed.
+    pub fn replace_source(
+        &mut self,
+        ids: &[ClipId],
+        pattern: Option<PatternId>,
+        audio: Option<&SampleSource>,
+    ) -> usize {
+        let mut n = 0;
+        for c in self.clips.iter_mut().filter(|c| ids.contains(&c.id)) {
+            match (&mut c.kind, pattern, audio) {
+                (ClipKind::Pattern(p), Some(to), _) if *p != to => {
+                    *p = to;
+                    n += 1;
+                }
+                (
+                    ClipKind::Audio {
+                        source,
+                        gaps,
+                        takes,
+                        ..
+                    },
+                    _,
+                    Some(to),
+                ) if source != to => {
+                    to.clone_into(source);
+                    // Gaps and takes belonged to the old recording.
+                    gaps.clear();
+                    takes.clear();
+                    n += 1;
+                }
+                _ => {}
+            }
+        }
+        n
     }
 
     /// The clip with this id.
@@ -823,13 +1140,30 @@ impl Playlist {
         if grid > 0 {
             span = (span + grid - 1).div_euclid(grid) * grid;
         }
+        let mut fresh = self.new_link();
+        let mut linked = Vec::new();
+        for c in &chosen {
+            // A copy of an automation clip shares its source with the original.
+            if matches!(c.kind, ClipKind::Automation(_)) && c.link == 0 {
+                if let Some(o) = self.clip_mut(c.id) {
+                    o.link = fresh;
+                    linked.push((c.id, fresh));
+                    fresh += 1;
+                }
+            }
+        }
         chosen
             .into_iter()
             .map(|c| {
                 let id = ClipId(self.next_id());
+                let link = linked
+                    .iter()
+                    .find(|(o, _)| *o == c.id)
+                    .map_or(c.link, |&(_, l)| l);
                 self.clips.push(Clip {
                     id,
                     start: c.start + span,
+                    link,
                     ..c
                 });
                 id
@@ -915,6 +1249,35 @@ impl Playlist {
                         g.at_s.is_finite() && g.len_s.is_finite() && g.at_s >= 0.0 && g.len_s >= 0.0
                     });
                 }
+            }
+        }
+        // Folders: a parent must be a folder track, and no folder may be inside itself.
+        let folders: Vec<TrackId> = self
+            .tracks
+            .iter()
+            .filter(|t| t.folder)
+            .map(|t| t.id)
+            .collect();
+        for t in &mut self.tracks {
+            if t.parent.is_some_and(|p| p == t.id || !folders.contains(&p)) {
+                t.parent = None;
+            }
+            if !t.folder {
+                t.collapsed = false;
+            }
+        }
+        for i in 0..self.tracks.len() {
+            let id = self.tracks[i].id;
+            if self.tracks[i].parent.is_some() && self.ancestors(id).any(|a| a.id == id) {
+                self.tracks[i].parent = None;
+            }
+        }
+        if self.tracks.iter().any(|t| t.parent.is_some()) {
+            self.keep_folders_above_their_tracks();
+        }
+        for c in &mut self.clips {
+            if !matches!(c.kind, ClipKind::Automation(_)) {
+                c.link = 0;
             }
         }
         for t in &mut self.tracks {
@@ -1016,6 +1379,67 @@ mod tests {
         p.tracks[1].mute = true;
         assert!(!p.is_track_audible(b));
         assert!(!p.is_track_audible(TrackId(999)));
+    }
+
+    #[test]
+    fn folders_mute_solo_hide_and_route_their_tracks() {
+        let mut p = Playlist::new();
+        let ids: Vec<TrackId> = p.tracks.iter().map(|t| t.id).collect();
+        // Tracks 3 and 5 go into a folder placed where track 3 was; 5 follows it.
+        let g = p.group_tracks(&[ids[5], ids[3]]).unwrap();
+        let order: Vec<TrackId> = p.tracks.iter().map(|t| t.id).collect();
+        assert_eq!(&order[3..6], &[g, ids[3], ids[5]]);
+        assert_eq!(p.track(g).unwrap().name, "Group 1");
+        // A folder inside the folder.
+        let inner = p.group_tracks(&[ids[5]]).unwrap();
+        assert_eq!(p.track(inner).unwrap().parent, Some(g));
+        assert_eq!(p.depth(ids[5]), 2);
+        assert_eq!(p.descendants(g), vec![ids[3], inner, ids[5]]);
+        let audible =
+            |p: &Playlist| -> Vec<bool> { ids.iter().map(|&t| p.is_track_audible(t)).collect() };
+        assert!(audible(&p).iter().all(|&a| a));
+        // Muting the folder mutes everything in it, at any depth, and nothing else.
+        p.track_mut(g).unwrap().mute = true;
+        let a = audible(&p);
+        assert!(!a[3] && !a[5] && a[0] && a[4]);
+        p.track_mut(g).unwrap().mute = false;
+        // Soloing the inner folder plays only what is in it.
+        p.track_mut(inner).unwrap().solo = true;
+        let a = audible(&p);
+        assert!(a[5] && !a[3] && !a[0]);
+        // Soloing a track inside a muted folder does not unmute it.
+        p.track_mut(g).unwrap().mute = true;
+        assert!(!p.is_track_audible(ids[5]));
+        p.track_mut(g).unwrap().mute = false;
+        p.track_mut(inner).unwrap().solo = false;
+        // Collapsing hides the tracks (they still play) and colours spread to the group.
+        p.track_mut(g).unwrap().collapsed = true;
+        let rows = p.visible_rows();
+        assert_eq!(rows.len(), DEFAULT_TRACKS + 2 - 3);
+        assert!(p.is_track_audible(ids[5]));
+        p.set_group_color(g, [1, 2, 3]);
+        assert_eq!(p.track(ids[5]).unwrap().color, [1, 2, 3]);
+        assert_ne!(p.track(ids[0]).unwrap().color, [1, 2, 3]);
+        // A track playing into the master plays into its folder's insert.
+        p.track_mut(g).unwrap().insert = 7;
+        assert_eq!(p.track_insert(ids[5]), 7);
+        p.track_mut(ids[5]).unwrap().insert = 2;
+        assert_eq!(p.track_insert(ids[5]), 2);
+        assert_eq!(p.track_insert(ids[0]), MASTER);
+        // Ungrouping an empty folder removes it; its tracks move up a level.
+        p.ungroup(inner);
+        assert!(p.track(inner).is_none());
+        assert_eq!(p.track(ids[5]).unwrap().parent, Some(g));
+        p.remove_track(g);
+        assert_eq!(p.track(ids[3]).unwrap().parent, None);
+        // A loop from a broken file is cut.
+        p.tracks[0].folder = true;
+        p.tracks[1].folder = true;
+        p.tracks[0].parent = Some(p.tracks[1].id);
+        p.tracks[1].parent = Some(p.tracks[0].id);
+        p.sanitize(|_| true);
+        assert!(p.tracks.iter().filter(|t| t.parent.is_some()).count() <= 1);
+        assert!(p.ancestors(p.tracks[0].id).count() <= 1);
     }
 
     #[test]

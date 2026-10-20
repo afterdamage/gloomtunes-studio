@@ -15,7 +15,7 @@ use crate::input::InputEngine;
 use crate::live::{clock_ns, LiveEvent, LiveKind, LiveRoutes, KEYBOARD, ROUTE_PORTS};
 use crate::mixer::MixerEngine;
 use crate::plugin::{PluginContext, PluginTable};
-use crate::song::{ChannelParams, SongSnapshot};
+use crate::song::{AudioPlay, ChannelParams, SongSnapshot};
 use crate::transport::{EventBuf, EventKind, ScheduledEvent, Transport};
 use crate::{EngineConfig, Telemetry, FADE_SECONDS, RENDER_QUANTUM, SCOPE_LEN};
 
@@ -95,6 +95,9 @@ pub struct AudioProcessor {
     scratch_r: [f32; Q],
 
     song: Option<Box<SongSnapshot>>,
+    /// The song replaced while playing, its audio clips fading out (Prompt 30): the song,
+    /// its song time where it continues, and frames of the fade done.
+    outgoing: Option<(Box<SongSnapshot>, f64, usize)>,
     /// Song tick where the last control step ended (NaN when stopped).
     control_tick: f64,
     /// Song time where audio clips continue next quantum (anything else is a jump).
@@ -204,6 +207,7 @@ impl AudioProcessor {
             live_r: [0.0; Q],
             scratch_r: [0.0; Q],
             song: None,
+            outgoing: None,
             control_tick: f64::NAN,
             clip_resume_s: f64::NEG_INFINITY,
             clip_jump_s: f64::NEG_INFINITY,
@@ -791,13 +795,48 @@ impl AudioProcessor {
         if self.scheduled.segments().is_empty() {
             self.clip_resume_s = f64::NEG_INFINITY;
         }
+        let sr = self.sample_rate;
+        let fade = (CLIP_FADE_S * sr).ceil() as usize;
+        if let Some((old, at_s, done)) = self.outgoing.as_mut() {
+            // Played on from where it was, at its own song time, fading out linearly.
+            let n = Q.min(fade - *done);
+            let start = *done;
+            let gain = |i: usize| 1.0 - (start + i) as f32 / fade as f32;
+            let seg = AudioSegment {
+                a: *at_s,
+                n,
+                offset: 0,
+                jump: f64::NEG_INFINITY,
+            };
+            for clip in &mut old.audio {
+                mix_clip(
+                    clip,
+                    &seg,
+                    sr,
+                    gain,
+                    &mut self.mixer,
+                    &mut self.live_l,
+                    &mut self.live_r,
+                );
+            }
+            *at_s += n as f64 / sr;
+            *done += n;
+        }
+        if self
+            .outgoing
+            .as_ref()
+            .is_some_and(|o| o.2 >= fade && self.garbage.slots() > 0)
+        {
+            if let Some((old, _, _)) = self.outgoing.take() {
+                self.retire(Garbage::Song(old));
+            }
+        }
         let Some(song) = self.song.as_deref_mut() else {
             return;
         };
         if song.audio.is_empty() {
             return;
         }
-        let sr = self.sample_rate;
         for seg in self.scheduled.segments() {
             let a = seg.seconds;
             let n = (seg.frames as usize).min(Q - (seg.offset as usize).min(Q));
@@ -808,91 +847,25 @@ impl AudioProcessor {
                 self.clip_jump_s = a;
             }
             self.clip_resume_s = b;
-            let jump = self.clip_jump_s;
+            let seg = AudioSegment {
+                a,
+                n,
+                offset: seg.offset as usize,
+                jump: self.clip_jump_s,
+            };
             for clip in &mut song.audio {
                 if clip.start_s >= b {
                     break;
                 }
-                if clip.end_s <= a {
-                    continue;
-                }
-                let i0 = ((clip.start_s - a) * sr).ceil().max(0.0) as usize;
-                let i1 = (((clip.end_s - a) * sr).ceil().max(0.0) as usize).min(n);
-                let rate = f64::from(clip.sample.sample_rate.max(1));
-                let (src_l, src_r) = (clip.sample.left(), clip.sample.right());
-                let len = src_l.len().min(src_r.len());
-                let declick_jump = clip.start_s < jump;
-                let (dl, dr) = if clip.frozen {
-                    self.mixer.frozen_mut(usize::from(clip.route))
-                } else {
-                    self.mixer.direct_mut(usize::from(clip.route))
-                };
-                // A clip stretching live renders its frames for this segment in one go.
-                let mut live_at = None;
-                if let Some(live) = clip.live.as_mut() {
-                    let first = (i0..i1).find(|&i| a + i as f64 / sr >= clip.origin_s);
-                    if let Some(first) = first {
-                        let at = ((a + first as f64 / sr - clip.origin_s) * rate).round() as usize;
-                        let m = (i1 - first).min(live.frames.saturating_sub(at));
-                        live.fill(
-                            &clip.sample,
-                            at,
-                            &mut self.live_l[..m],
-                            &mut self.live_r[..m],
-                        );
-                        live_at = Some((first, first + m));
-                    } else {
-                        continue;
-                    }
-                }
-                for i in i0..i1.min(n) {
-                    let t = a + i as f64 / sr;
-                    let (vl, vr) = if let Some((first, end)) = live_at {
-                        if i < first {
-                            continue;
-                        }
-                        if i >= end {
-                            break;
-                        }
-                        (self.live_l[i - first], self.live_r[i - first])
-                    } else {
-                        let mut pos = (t - clip.origin_s) * rate * clip.speed;
-                        if pos < 0.0 {
-                            continue;
-                        }
-                        if clip.reverse {
-                            pos = (len as f64 - 1.0) - pos;
-                            if pos < 0.0 {
-                                break;
-                            }
-                        }
-                        let k = pos as usize;
-                        if k >= len {
-                            break;
-                        }
-                        let frac = (pos - k as f64) as f32;
-                        let k1 = (k + 1).min(len - 1);
-                        (
-                            src_l[k] + (src_l[k1] - src_l[k]) * frac,
-                            src_r[k] + (src_r[k1] - src_r[k]) * frac,
-                        )
-                    };
-                    let mut edge = 1.0_f64;
-                    if clip.fade_in {
-                        edge = edge.min((t - clip.start_s) / CLIP_FADE_S);
-                    }
-                    if clip.fade_out {
-                        edge = edge.min((clip.end_s - t) / CLIP_FADE_S);
-                    }
-                    if declick_jump {
-                        edge = edge.min((t - jump) / CLIP_FADE_S);
-                    }
-                    let edge = edge.clamp(0.0, 1.0) * clip.fade_gain(t);
-                    let g = clip.gain * edge as f32;
-                    let o = seg.offset as usize + i;
-                    dl[o] += vl * g;
-                    dr[o] += vr * g;
-                }
+                mix_clip(
+                    clip,
+                    &seg,
+                    sr,
+                    |_| 1.0,
+                    &mut self.mixer,
+                    &mut self.live_l,
+                    &mut self.live_r,
+                );
             }
         }
     }
@@ -1152,7 +1125,16 @@ impl AudioProcessor {
                 // them (in this same quantum, while playing).
                 self.clear_controls();
                 if let Some(old) = self.song.replace(song) {
-                    self.retire(Garbage::Song(old));
+                    // While playing, the old song's audio fades out over the de-click time
+                    // and the new song's clips already under way fade in (a crossfade, so an
+                    // unchanged clip plays on unchanged). One song fades at a time.
+                    let playing = self.clip_resume_s.is_finite();
+                    if playing && self.outgoing.is_none() && !old.audio.is_empty() {
+                        self.outgoing = Some((old, self.clip_resume_s, 0));
+                    } else {
+                        self.retire(Garbage::Song(old));
+                    }
+                    self.clip_resume_s = f64::NEG_INFINITY;
                 }
                 self.link_lanes();
                 forget_values(&self.telemetry.lane_values);
@@ -1715,6 +1697,107 @@ fn apply_param(
 fn forget_values(cells: &[crate::AtomicF32]) {
     for c in cells {
         c.store(f32::NAN, Ordering::Relaxed);
+    }
+}
+
+/// A stretch of continuous playback in one quantum: song time `a` at quantum frame `offset`,
+/// `n` frames, and the song time of the last jump (for the de-click fade-in).
+struct AudioSegment {
+    a: f64,
+    n: usize,
+    offset: usize,
+    jump: f64,
+}
+
+/// Adds one audio clip's frames in `seg` to its strip, times `gain(frame)`.
+fn mix_clip(
+    clip: &mut AudioPlay,
+    seg: &AudioSegment,
+    sr: f64,
+    gain: impl Fn(usize) -> f32,
+    mixer: &mut MixerEngine,
+    live_l: &mut [f32; Q],
+    live_r: &mut [f32; Q],
+) {
+    let (a, n, jump) = (seg.a, seg.n, seg.jump);
+    let b = a + n as f64 / sr;
+    if clip.start_s >= b {
+        return;
+    }
+    if clip.end_s <= a {
+        return;
+    }
+    let i0 = ((clip.start_s - a) * sr).ceil().max(0.0) as usize;
+    let i1 = (((clip.end_s - a) * sr).ceil().max(0.0) as usize).min(n);
+    let rate = f64::from(clip.sample.sample_rate.max(1));
+    let (src_l, src_r) = (clip.sample.left(), clip.sample.right());
+    let len = src_l.len().min(src_r.len());
+    let declick_jump = clip.start_s < jump;
+    let (dl, dr) = if clip.frozen {
+        mixer.frozen_mut(usize::from(clip.route))
+    } else {
+        mixer.direct_mut(usize::from(clip.route))
+    };
+    // A clip stretching live renders its frames for this segment in one go.
+    let mut live_at = None;
+    if let Some(live) = clip.live.as_mut() {
+        let first = (i0..i1).find(|&i| a + i as f64 / sr >= clip.origin_s);
+        if let Some(first) = first {
+            let at = ((a + first as f64 / sr - clip.origin_s) * rate).round() as usize;
+            let m = (i1 - first).min(live.frames.saturating_sub(at));
+            live.fill(&clip.sample, at, &mut live_l[..m], &mut live_r[..m]);
+            live_at = Some((first, first + m));
+        } else {
+            return;
+        }
+    }
+    for i in i0..i1.min(n) {
+        let t = a + i as f64 / sr;
+        let (vl, vr) = if let Some((first, end)) = live_at {
+            if i < first {
+                continue;
+            }
+            if i >= end {
+                break;
+            }
+            (live_l[i - first], live_r[i - first])
+        } else {
+            let mut pos = (t - clip.origin_s) * rate * clip.speed;
+            if pos < 0.0 {
+                continue;
+            }
+            if clip.reverse {
+                pos = (len as f64 - 1.0) - pos;
+                if pos < 0.0 {
+                    break;
+                }
+            }
+            let k = pos as usize;
+            if k >= len {
+                break;
+            }
+            let frac = (pos - k as f64) as f32;
+            let k1 = (k + 1).min(len - 1);
+            (
+                src_l[k] + (src_l[k1] - src_l[k]) * frac,
+                src_r[k] + (src_r[k1] - src_r[k]) * frac,
+            )
+        };
+        let mut edge = 1.0_f64;
+        if clip.fade_in {
+            edge = edge.min((t - clip.start_s) / CLIP_FADE_S);
+        }
+        if clip.fade_out {
+            edge = edge.min((clip.end_s - t) / CLIP_FADE_S);
+        }
+        if declick_jump {
+            edge = edge.min((t - jump) / CLIP_FADE_S);
+        }
+        let edge = edge.clamp(0.0, 1.0) * clip.fade_gain(t);
+        let g = clip.gain * edge as f32 * gain(i);
+        let o = seg.offset + i;
+        dl[o] += vl * g;
+        dr[o] += vr * g;
     }
 }
 

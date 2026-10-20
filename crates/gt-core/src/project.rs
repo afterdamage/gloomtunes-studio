@@ -668,12 +668,17 @@ pub struct Project {
     pub swing: f32,
     /// Master, inserts and send buses.
     pub mixer: Mixer,
-    /// Tracks, clips and markers of the arrangement.
+    /// Tracks, clips and markers of the current arrangement.
     pub playlist: Playlist,
-    /// Tempo over the timeline.
+    /// Tempo over the timeline of the current arrangement.
     pub tempo: TempoMap,
-    /// Time signatures over the timeline.
+    /// Time signatures over the timeline of the current arrangement.
     pub signatures: TimeSigMap,
+    /// Every arrangement, in switcher order (never empty). The current one's content is in
+    /// `playlist`, `tempo` and `signatures`; its entry keeps only its name (D143).
+    pub arrangements: Vec<crate::Arrangement>,
+    /// Index of the current arrangement in `arrangements`.
+    pub current_arrangement: usize,
     /// LFOs and envelope followers on parameters, at most [`MAX_MODULATORS`].
     pub modulators: Vec<Modulator>,
     /// MIDI controllers bound to parameters (MIDI learn).
@@ -723,6 +728,8 @@ impl Project {
             playlist: Playlist::new(),
             tempo: TempoMap::default(),
             signatures: TimeSigMap::default(),
+            arrangements: vec![crate::Arrangement::named("Arrangement 1")],
+            current_arrangement: 0,
             modulators: Vec::new(),
             midi_map: Vec::new(),
             midi_routes: Vec::new(),
@@ -1111,9 +1118,12 @@ impl Project {
         self.swing = fin(self.swing, 0.0, 1.0, 0.0);
         let patterns: Vec<PatternId> = self.patterns.iter().map(|p| p.id).collect();
         self.playlist.sanitize(|id| patterns.contains(&id));
-        for t in &mut self.playlist.tracks {
-            if t.insert > inserts {
-                t.insert = MASTER;
+        self.sanitize_arrangements(|id| patterns.contains(&id));
+        for pl in self.playlists_mut() {
+            for t in &mut pl.tracks {
+                if t.insert > inserts {
+                    t.insert = MASTER;
+                }
             }
         }
         // Modulators: unique ids, valid targets kept even if they no longer resolve (a deleted
@@ -1294,6 +1304,51 @@ impl Project {
         true
     }
 
+    /// Routes folder track `folder` to a group insert (Prompt 30): the folder's own insert if
+    /// it has one, else the first insert nothing uses (or a new one), linked to the folder.
+    /// Audio of the folder's tracks that play into the master goes there
+    /// ([`Playlist::track_insert`]), and the folder's tracks' own inserts that output to the
+    /// master now output to it. Returns the insert, or `None` when `folder` is not a folder
+    /// or no insert is free.
+    pub fn route_group(&mut self, folder: crate::TrackId) -> Option<usize> {
+        let f = self.playlist.track(folder).filter(|t| t.folder)?;
+        let insert = if f.insert != MASTER {
+            f.insert
+        } else {
+            let used = |i: usize| {
+                self.channels.iter().any(|c| c.insert == i)
+                    || self
+                        .playlists()
+                        .any(|pl| pl.tracks.iter().any(|t| t.insert == i))
+                    || self.mixer.strips.iter().enumerate().any(|(k, s)| {
+                        (k != MASTER && s.output == i) || s.sends.iter().any(|x| x.to == i)
+                    })
+            };
+            let free = (1..=self.mixer.inserts()).find(|&i| {
+                let s = &self.mixer.strips[i];
+                !used(i)
+                    && s.name == StripKind::of(i).default_name()
+                    && s.slots.iter().all(Option::is_none)
+            });
+            match free {
+                Some(i) => i,
+                None => self.add_insert()?,
+            }
+        };
+        self.link_track(insert, folder);
+        for id in self.playlist.descendants(folder) {
+            let own = self.playlist.track(id).map_or(MASTER, |t| t.insert);
+            if own != MASTER
+                && own != insert
+                && self.mixer.strips[own].output == MASTER
+                && self.mixer.can_route(own, insert)
+            {
+                self.mixer.strips[own].output = insert;
+            }
+        }
+        Some(insert)
+    }
+
     /// The playlist tracks linked to (playing into) mixer strip `strip`.
     pub fn tracks_of_strip(&self, strip: usize) -> impl Iterator<Item = &crate::Track> {
         self.playlist
@@ -1406,9 +1461,6 @@ impl Project {
                 }
             }
         }
-        for t in &mut self.playlist.tracks {
-            t.insert = to(t.insert);
-        }
         let keep = |a: &mut crate::Automation| match a.target.remap_strips(strip) {
             Some(t) => {
                 a.target = t;
@@ -1416,10 +1468,15 @@ impl Project {
             }
             None => false,
         };
-        self.playlist.clips.retain_mut(|c| match &mut c.kind {
-            ClipKind::Automation(a) => keep(a),
-            _ => true,
-        });
+        for pl in self.playlists_mut() {
+            for t in &mut pl.tracks {
+                t.insert = to(t.insert);
+            }
+            pl.clips.retain_mut(|c| match &mut c.kind {
+                ClipKind::Automation(a) => keep(a),
+                _ => true,
+            });
+        }
         for p in &mut self.patterns {
             p.automation.retain_mut(keep);
         }
@@ -1796,6 +1853,30 @@ mod tests {
         assert!(!p.remove_insert(MASTER));
         p.sanitize();
         assert!(p.mixer.processing_order().is_some());
+    }
+
+    #[test]
+    fn a_folder_routes_to_a_free_group_insert() {
+        let mut p = Project::demo();
+        let ids: Vec<crate::TrackId> = p.playlist.tracks.iter().map(|t| t.id).collect();
+        // Track 1 has its own insert (output to the master), track 2 plays into the master.
+        let own = p.add_insert().unwrap();
+        p.playlist.track_mut(ids[1]).unwrap().insert = own;
+        let g = p.playlist.group_tracks(&ids[1..3]).unwrap();
+        assert_eq!(p.route_group(ids[0]), None, "not a folder");
+        let bus = p.route_group(g).unwrap();
+        assert!(bus != own && bus != MASTER);
+        assert_eq!(p.mixer.strips[bus].name, "Group 1");
+        assert_eq!(p.mixer.strips[own].output, bus);
+        assert_eq!(p.playlist.track_insert(ids[2]), bus);
+        assert_eq!(p.playlist.track_insert(ids[1]), own);
+        // Asking again keeps the same insert.
+        assert_eq!(p.route_group(g), Some(bus));
+        // Removing an insert renumbers the tracks of every arrangement.
+        p.duplicate_arrangement(0);
+        assert!(p.remove_insert(1));
+        let other = p.arrangement(0).unwrap();
+        assert_eq!(other.playlist.track(g).unwrap().insert, bus - 1);
     }
 
     #[test]
