@@ -37,6 +37,12 @@ fn main() -> eframe::Result {
             .unwrap_or_default();
         std::process::exit(gt_plugin_host::catalog::scan_child_main(&file));
     }
+    // Started by the plugin host to run one plugin in a process of its own (D150).
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(gt_plugin_host::BRIDGE_SWITCH))
+    {
+        std::process::exit(gt_plugin_host::bridge_child_main());
+    }
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let settings = settings::Settings::load(&settings::Settings::path());

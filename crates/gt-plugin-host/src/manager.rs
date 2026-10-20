@@ -8,7 +8,7 @@
 //! plugins' main-thread requests (callbacks, timers, file descriptors, restarts) and their
 //! editor windows.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
@@ -18,6 +18,7 @@ use gt_core::{ParamId, PluginInstanceId, PluginKind, PluginRef, Project};
 use gt_engine::{EngineCommand, EngineHandle, PluginBox, MAX_PLUGINS};
 
 use crate::backend::{Entry, Instance};
+use crate::bridge::{BridgeCommand, BridgeInstance};
 use crate::catalog::{self, Catalog, PluginInfo};
 use crate::guard::{CrashReport, Guard};
 use crate::host::{Signals, Waker};
@@ -106,6 +107,11 @@ pub struct PluginHost {
     states: VecDeque<(PluginInstanceId, Arc<[u8]>)>,
     sample_rate: Option<u32>,
     notices: Vec<String>,
+    /// Plugin ids that run in a process of their own (D150), and how to start one.
+    sandboxed: BTreeSet<String>,
+    bridge: BridgeCommand,
+    /// Plugin ids whose instances load again (sandboxing switched).
+    reload: Vec<String>,
 }
 
 impl PluginHost {
@@ -118,8 +124,15 @@ impl PluginHost {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
+        let sandboxed = std::fs::read(dir.join("sandboxed.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
         let host = Self {
             dir: dir.to_owned(),
+            bridge: BridgeCommand::app(exe.clone()),
+            sandboxed,
+            reload: Vec::new(),
             exe,
             waker,
             guard,
@@ -258,6 +271,37 @@ impl PluginHost {
         std::mem::take(&mut self.notices)
     }
 
+    // ---- Sandboxing (D150) ----
+
+    /// True if plugin `id` runs in a process of its own.
+    pub fn is_sandboxed(&self, id: &str) -> bool {
+        self.sandboxed.contains(id)
+    }
+
+    /// Runs plugin `id` in a process of its own (or back in the app's); its instances load
+    /// again at the next sync, with their state. Saved.
+    pub fn set_sandboxed(&mut self, id: &str, on: bool) {
+        let changed = if on {
+            self.sandboxed.insert(id.to_owned())
+        } else {
+            self.sandboxed.remove(id)
+        };
+        if !changed {
+            return;
+        }
+        self.reload.push(id.to_owned());
+        let _ = std::fs::create_dir_all(&self.dir);
+        if let Ok(json) = serde_json::to_vec_pretty(&self.sandboxed) {
+            let _ = std::fs::write(self.dir.join("sandboxed.json"), json);
+        }
+    }
+
+    /// Starts bridge children with `cmd` (tests run themselves as the child).
+    #[cfg(test)]
+    pub(crate) fn set_bridge(&mut self, cmd: BridgeCommand) {
+        self.bridge = cmd;
+    }
+
     // ---- Instances ----
 
     /// Uses an already loaded entry for `path` (tests load the test plugin in process).
@@ -284,6 +328,11 @@ impl PluginHost {
 
     fn create(&mut self, info: &PluginInfo) -> Result<Box<dyn Instance>, String> {
         let signals = Signals::new(Arc::clone(&self.waker));
+        if self.sandboxed.contains(&info.id) {
+            // Nothing of the plugin is loaded here, so a quarantined file may run this way.
+            return BridgeInstance::spawn(&self.bridge, info, signals)
+                .map(|b| Box::new(b) as Box<dyn Instance>);
+        }
         self.entry(info)?;
         let entry = &self.entries[&info.path];
         self.guard.run(&info.path, &info.name, "creating", || {
@@ -469,6 +518,18 @@ impl PluginHost {
                 l.failed = false;
             }
             self.sample_rate = rate;
+        }
+
+        // Instances whose sandboxing changed load again (their state is kept by `retire`).
+        let reload = std::mem::take(&mut self.reload);
+        let again: Vec<PluginInstanceId> = self
+            .live
+            .iter()
+            .filter(|(_, l)| reload.contains(&l.plugin.info().id))
+            .map(|(&id, _)| id)
+            .collect();
+        for id in again {
+            self.retire(id, engine.as_deref_mut());
         }
 
         // Retire instances the project no longer has.
@@ -827,6 +888,9 @@ impl PluginHost {
         let now = Instant::now();
         for l in self.live.values_mut() {
             l.plugin.main_thread_work(now);
+            if let Some(n) = l.plugin.take_notice() {
+                self.notices.push(n);
+            }
         }
     }
 

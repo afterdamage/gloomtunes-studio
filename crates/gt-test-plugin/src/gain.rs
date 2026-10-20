@@ -19,6 +19,8 @@ use crate::AtomicF32;
 pub const PARAM_GAIN: u32 = 1;
 /// Misbehave: 0 off, 1 output NaN, 2 report an error.
 pub const PARAM_MISBEHAVE: u32 = 2;
+/// Crash: on, the next block aborts the process (for the out-of-process sandbox, D150).
+pub const PARAM_CRASH: u32 = 3;
 
 /// The plugin type.
 pub struct GainPlugin;
@@ -44,6 +46,7 @@ impl Plugin for GainPlugin {
 pub struct GainShared {
     pub(crate) gain: AtomicF32,
     misbehave: AtomicU32,
+    crash: AtomicBool,
     /// The editor changed the gain; the next block tells the host.
     pub(crate) edited: AtomicBool,
 }
@@ -53,6 +56,7 @@ impl GainShared {
         Self {
             gain: AtomicF32::new(1.0),
             misbehave: AtomicU32::new(0),
+            crash: AtomicBool::new(false),
             edited: AtomicBool::new(false),
         }
     }
@@ -64,6 +68,7 @@ impl GainShared {
                 Some(PARAM_MISBEHAVE) => self
                     .misbehave
                     .store(e.value().round().clamp(0.0, 2.0) as u32, Ordering::Relaxed),
+                Some(PARAM_CRASH) => self.crash.store(e.value() >= 0.5, Ordering::Relaxed),
                 _ => {}
             }
         }
@@ -149,6 +154,9 @@ impl<'a> PluginAudioProcessor<'a, GainShared, GainMainThread<'a>> for GainProces
                 self.shared.handle(e);
             }
             let range = batch.sample_bounds();
+            if self.shared.crash.load(Ordering::Relaxed) {
+                std::process::abort();
+            }
             let misbehave = self.shared.misbehave.load(Ordering::Relaxed);
             if misbehave == 2 {
                 return Err(PluginError::Message("asked to fail"));
@@ -197,7 +205,7 @@ impl PluginAudioPortsImpl for GainMainThread<'_> {
 
 impl PluginMainThreadParams for GainMainThread<'_> {
     fn count(&self) -> u32 {
-        2
+        3
     }
 
     fn get_info(&self, index: u32, info: &mut ParamInfoWriter) {
@@ -223,6 +231,16 @@ impl PluginMainThreadParams for GainMainThread<'_> {
                 max_value: 2.0,
                 default_value: 0.0,
             }),
+            2 => info.set(&ParamInfo {
+                id: ClapId::new(PARAM_CRASH),
+                flags: flags | ParamInfoFlags::IS_STEPPED,
+                cookie: Default::default(),
+                name: b"Crash",
+                module: b"Test",
+                min_value: 0.0,
+                max_value: 1.0,
+                default_value: 0.0,
+            }),
             _ => {}
         }
     }
@@ -231,6 +249,9 @@ impl PluginMainThreadParams for GainMainThread<'_> {
         match id.get() {
             PARAM_GAIN => Some(f64::from(self.shared.gain.get())),
             PARAM_MISBEHAVE => Some(f64::from(self.shared.misbehave.load(Ordering::Relaxed))),
+            PARAM_CRASH => Some(f64::from(u8::from(
+                self.shared.crash.load(Ordering::Relaxed),
+            ))),
             _ => None,
         }
     }
@@ -247,6 +268,7 @@ impl PluginMainThreadParams for GainMainThread<'_> {
                 let names = ["Off", "NaN", "Error"];
                 write!(writer, "{}", names[(value.round() as usize).min(2)])
             }
+            PARAM_CRASH => write!(writer, "{}", if value >= 0.5 { "On" } else { "Off" }),
             _ => Err(std::fmt::Error),
         }
     }

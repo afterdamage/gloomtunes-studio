@@ -314,6 +314,11 @@ and the app shows it that way. Function keys on a Mac laptop may need **fn** hel
     the app closes while loading a plugin or opening its editor, that file is switched off at
     the next start until you choose **Allow again** under **Problems** in the browser. After a
     crash, **Recover without plugins** opens the autosave with its plugins off; retry each one.
+  - Tick **Own process** next to a plugin in the browser to run it in a process of its own:
+    if it crashes, only that process stops, the plugin is bypassed for a moment and started
+    again with its last saved state (three times at most), and the app keeps playing. Its
+    instances reload when you switch it. Such a plugin has no extra outputs, MIDI out or
+    factory presets, and costs some extra CPU.
   - Plugin settings are saved inside the project; a plugin missing on another computer keeps
     its settings and shows "Not loaded".
 - **Undo** and **Redo** (top right, Ctrl+Z and Ctrl+Shift+Z or Ctrl+Y) cover notes, steps,

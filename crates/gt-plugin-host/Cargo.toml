@@ -23,6 +23,7 @@ serde.workspace = true
 serde_json.workspace = true
 vst3.workspace = true
 libloading.workspace = true
+memmap2.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

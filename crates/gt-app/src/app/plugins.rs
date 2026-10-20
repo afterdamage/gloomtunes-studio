@@ -107,6 +107,7 @@ impl GloomApp {
         let entries: Vec<PluginEntry> = infos
             .iter()
             .map(|p| PluginEntry {
+                sandboxed: self.plugins.is_sandboxed(&p.id),
                 name: p.name.clone(),
                 vendor: match p.format {
                     gt_core::PluginFormat::Clap => p.vendor.clone(),
@@ -193,6 +194,11 @@ impl GloomApp {
                     if i < all.len() {
                         all.remove(i);
                         self.plugins.set_folders(all);
+                    }
+                }
+                PluginBrowserAction::SetSandboxed(i, on) => {
+                    if let Some(info) = infos.get(i) {
+                        self.plugins.set_sandboxed(&info.id, on);
                     }
                 }
                 PluginBrowserAction::Release(i) => {
