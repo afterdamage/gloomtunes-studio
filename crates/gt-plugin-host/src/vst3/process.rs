@@ -707,6 +707,30 @@ impl PluginProcessor for Vst3Processor {
         self.in_events.push(e);
     }
 
+    fn note_expression(&mut self, offset: u32, key: u8, kind: gt_engine::NoteExprKind, v: f32) {
+        use gt_engine::NoteExprKind as K;
+        use NoteExpressionTypeIDs_::*;
+        if !self.setup.note_input {
+            return;
+        }
+        // VST3 tuning is normalized over ±120 semitones.
+        let (id, value) = match kind {
+            K::Pressure => return self.key_pressure(offset, key, v),
+            K::Tuning => (kTuningTypeID, 0.5 + f64::from(v) / 240.0),
+            K::Timbre => (kBrightnessTypeID, f64::from(v)),
+        };
+        let mut ev = Self::event(
+            offset,
+            Event_::EventTypes_::kNoteExpressionValueEvent as u32,
+        );
+        ev.__field0.noteExpressionValue = NoteExpressionValueEvent {
+            typeId: id as NoteExpressionTypeID,
+            noteId: i32::from(key & 0x7F),
+            value: value.clamp(0.0, 1.0),
+        };
+        self.in_events.push(ev);
+    }
+
     fn set_param(&mut self, index: u32, value: f32) {
         if let Some(&id) = self.ids.get(index as usize) {
             self.in_changes.add(id, 0, f64::from(value.clamp(0.0, 1.0)));

@@ -44,6 +44,7 @@ mod automate;
 mod bounce;
 mod browse;
 mod edit_audio;
+mod hardware;
 mod midi;
 mod perform;
 mod plugins;
@@ -212,6 +213,12 @@ pub struct GloomApp {
     /// Live notes from MIDI devices and the typing keyboard, to the engine.
     live: gt_engine::LiveInput,
     midi: crate::midi_io::MidiIo,
+    /// The starting per-note values (MPE) of live notes being recorded, by slot and key.
+    note_expr: std::collections::HashMap<(u16, u8), gt_engine::NoteExpr>,
+    /// MIDI output ports (MIDI out channels, clock, time code).
+    midi_out: crate::midi_out_io::MidiOutIo,
+    /// Clock and time code out, following an external clock (Prompt 33).
+    sync: hardware::SyncState,
     keyboard: crate::live::TypingKeyboard,
     recorder: crate::live::Recorder,
     /// The take under way.
@@ -408,6 +415,9 @@ impl GloomApp {
             window_title: String::new(),
             live: live.clone(),
             midi: crate::midi_io::MidiIo::start(live, ctx.clone()),
+            midi_out: crate::midi_out_io::MidiOutIo::start(),
+            note_expr: std::collections::HashMap::new(),
+            sync: hardware::SyncState::from_prefs(&settings.midi),
             keyboard: crate::live::TypingKeyboard::default(),
             recorder: crate::live::Recorder::default(),
             take: None,
@@ -421,6 +431,11 @@ impl GloomApp {
                 mode: gt_ui::views::RecordMode::from_key(&settings.midi.record_mode),
                 passes: gt_ui::views::LoopPasses::from_key(&settings.midi.loop_passes),
                 automation: gt_ui::views::AutoMode::from_key(&settings.midi.automation_mode),
+                mtc_rate: gt_core::MtcRate::ALL
+                    .into_iter()
+                    .find(|r| r.fps() == settings.midi.mtc_fps)
+                    .unwrap_or_default(),
+                clock_in: settings.midi.clock_in_port.clone(),
                 ..MidiPanelModel::default()
             },
             sent_live_slot: None,
@@ -440,6 +455,10 @@ impl GloomApp {
         for port in &app.settings.midi.disabled_ports {
             app.midi.set_enabled(port, false);
         }
+        for port in &app.settings.midi.mpe_ports {
+            app.midi.set_mpe(port, true);
+        }
+        app.apply_sync();
         if let Some((path, plugin, action)) = &crash.quarantined {
             app.toast(format!(
                 "{plugin} was switched off: GloomTunes closed while {action} it ({}). \
@@ -517,6 +536,13 @@ impl GloomApp {
     }
 
     fn push_all_params(&mut self) {
+        self.midi_out.set_slots(
+            self.project
+                .channels
+                .iter()
+                .map(|c| c.midi_out().map(|m| m.port.clone()).unwrap_or_default())
+                .collect(),
+        );
         for i in 0..self.project.channels.len() {
             let p = ChannelParams::from_project(&self.project, i);
             self.send(EngineCommand::SetChannelParams {
@@ -532,8 +558,8 @@ impl GloomApp {
         // Tempo automation clips are part of the tempo map, so it goes first when it changed.
         let tempo = self.project.song_tempo();
         if tempo != self.song_tempo {
-            self.song_tempo = tempo.clone();
-            self.send(EngineCommand::SetTempoMap(Box::new(tempo)));
+            self.song_tempo = tempo;
+            self.send(EngineCommand::SetTempoMap(Box::new(self.engine_tempo())));
         }
         let song = if self.transport.song_mode {
             self.request_clip_audio();
@@ -576,9 +602,7 @@ impl GloomApp {
     /// tempo).
     fn push_timing(&mut self) {
         self.song_tempo = self.project.song_tempo();
-        self.send(EngineCommand::SetTempoMap(Box::new(
-            self.song_tempo.clone(),
-        )));
+        self.send(EngineCommand::SetTempoMap(Box::new(self.engine_tempo())));
         self.send(EngineCommand::SetSignatures(Box::new(
             self.project.signatures.clone(),
         )));
@@ -1551,9 +1575,7 @@ impl GloomApp {
     /// Brings a freshly created engine up to date with the current settings.
     fn sync_new_engine(&mut self) {
         self.song_tempo = self.project.song_tempo();
-        self.send(EngineCommand::SetTempoMap(Box::new(
-            self.song_tempo.clone(),
-        )));
+        self.send(EngineCommand::SetTempoMap(Box::new(self.engine_tempo())));
         self.send(EngineCommand::SetSignatures(Box::new(
             self.project.signatures.clone(),
         )));
@@ -1565,6 +1587,12 @@ impl GloomApp {
         if let Some(p) = self.audio.engine_mut().and_then(|e| e.take_live_producer()) {
             self.live.connect(p);
         }
+        if let Some(q) = self.audio.engine_mut().and_then(|e| e.take_midi_out()) {
+            self.midi_out.connect(q);
+        }
+        self.send(EngineCommand::SetMidiSync(
+            self.sync.engine_settings(self.midi_model.mtc_rate),
+        ));
         self.sent_live_slot = None;
         self.sent_routes = None;
         self.record.sent_routes = None;
@@ -2797,6 +2825,7 @@ impl eframe::App for GloomApp {
         let rack_swing = self.project.swing;
         let groups = gt_ui::views::rack_groups(&self.project);
         self.drum_state.inserts = self.project.mixer.inserts();
+        let midi_out_ports = self.midi_out_ports();
         let layerable: Vec<(gt_core::ChannelId, String)> = self
             .project
             .channels
@@ -2846,6 +2875,16 @@ impl eframe::App for GloomApp {
                             let out = sampler_panel(ui, &theme, &mut ch.name, s, view);
                             sampler_out = out;
                             (out.changed, Vec::new())
+                        }
+                        Instrument::MidiOut(m) => {
+                            let changed = gt_ui::views::midi_out_panel(
+                                ui,
+                                &theme,
+                                &mut ch.name,
+                                m,
+                                &midi_out_ports,
+                            );
+                            (changed, Vec::new())
                         }
                         Instrument::Layer(l) => {
                             let own = ch.id;

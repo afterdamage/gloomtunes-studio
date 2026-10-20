@@ -13,6 +13,8 @@ mod layout;
 mod library;
 mod live;
 mod midi_io;
+mod midi_out_io;
+mod mpe;
 mod recording;
 mod settings;
 

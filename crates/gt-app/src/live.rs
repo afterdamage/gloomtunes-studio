@@ -347,7 +347,7 @@ pub fn capture(
             LiveKind::ModWheel(v) => (ControlKind::ModWheel, v),
             LiveKind::Pressure(v) => (ControlKind::Pressure, v),
             LiveKind::Cc { cc, value } => (ControlKind::of_cc(cc), value),
-            LiveKind::KeyPressure { .. } => continue,
+            LiveKind::KeyPressure { .. } | LiveKind::NoteExpr { .. } => continue,
         };
         // Controllers moved before the first note set the value it starts with.
         add_control(

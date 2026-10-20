@@ -432,6 +432,21 @@ impl PluginProcessor for ClapProcessor {
         }
     }
 
+    fn note_expression(&mut self, offset: u32, key: u8, kind: gt_engine::NoteExprKind, v: f32) {
+        use gt_engine::NoteExprKind as K;
+        let (kind, value) = match kind {
+            K::Pressure => return self.key_pressure(offset, key, v),
+            K::Tuning => (NoteExpressionType::Tuning, f64::from(v)),
+            K::Timbre => (NoteExpressionType::Brightness, f64::from(v.clamp(0.0, 1.0))),
+        };
+        let Some((port, false)) = self.layout.note_port else {
+            return;
+        };
+        let offset = offset.min(RENDER_QUANTUM as u32 - 1);
+        let pckn = Pckn::new(port, 0u16, u16::from(key & 0x7F), Match::All);
+        self.push(&NoteExpressionEvent::new(offset, pckn, kind, value));
+    }
+
     fn set_param(&mut self, index: u32, value: f32) {
         let Some(&p) = self.params.get(index as usize) else {
             return;

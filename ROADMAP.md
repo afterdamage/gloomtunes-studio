@@ -792,6 +792,28 @@ sound identical; the golden export test stays.
 - Limits: undo keeps whole copies (long files use a lot of memory); the editor works at the
   engine's sample rate; melody mode is monophonic; drum mode knows three classes.
 
+### Prompt 33: Hardware integration and plugin sandbox
+Split into three PRs: (1) MIDI out channels, clock, time code and MPE; (2) controller mapping
+files and scripting; (3) the out-of-process plugin sandbox.
+- PR 1 (D148): **MIDI out** channels send notes, recorded controllers, live playing, bank and
+  program to a port and channel, each message stamped with the time its frame is heard
+  (device output latency and mixer PDC added, the device's own latency taken off) and sent
+  by a MIDI out thread. MIDI clock out (24 PPQ at exact song positions, start, stop, song
+  position and continue around jumps) and MTC out (quarter frames, full frame after jumps).
+  Following an external clock: least-squares tempo over two beats, start/stop/continue/song
+  position, phase lock by nudging the tempo up to 2 %. MPE input (lower zone): member channel
+  bend, pressure and CC 74 become per-note tuning, pressure and timbre on the voice (Gloom
+  Synth, CLAP and VST3 note expressions) and the note's starting fine pitch and mod X.
+  Schema 11.
+- Tests: clock pulses exactly 1000 frames apart at 120 BPM, stop/position/continue at a
+  wrap, MTC pieces and full frame, send times with latency and lead, a ±1 ms jittery clock
+  within 0.5 BPM, tempo changes followed in two beats, phase lock within 2 ticks, MPE
+  routing, a MIDI out channel's timing end to end, MPE values reaching the voice.
+- Limits: clock and time code only while playing; following an external clock plays at a
+  constant tempo (the song's tempo map is ignored meanwhile); MPE upper zone and MPE
+  configuration messages are not read; the sampler ignores per-note tuning; hardware MIDI is
+  untested in CI (no MIDI devices there).
+
 ---
 
 ## v1.0 scope

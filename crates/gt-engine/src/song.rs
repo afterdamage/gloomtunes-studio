@@ -911,6 +911,8 @@ pub enum InstrumentKind {
     Plugin,
     /// A layer: plays other channels (uses `layer`), no sound of its own.
     Layer,
+    /// A MIDI out channel (uses `hw`): its notes go to a MIDI port, no sound of its own.
+    MidiOut,
 }
 
 /// Most children of a layer channel.
@@ -1079,6 +1081,8 @@ pub struct ChannelParams {
     pub keys: KeyParams,
     /// Children of a layer channel.
     pub layer: LayerParams,
+    /// What a MIDI out channel sends.
+    pub hw: crate::MidiOutParams,
 }
 
 impl Default for ChannelParams {
@@ -1103,6 +1107,7 @@ impl Default for ChannelParams {
             choke: 0,
             keys: KeyParams::default(),
             layer: LayerParams::default(),
+            hw: crate::MidiOutParams::default(),
         }
     }
 }
@@ -1140,6 +1145,18 @@ impl ChannelParams {
             // Pads play through the sampler's voices with a key map of their own; the
             // channel's sampler settings stay at their defaults (one-shot, open filter).
             Instrument::Drums(_) => {}
+            Instrument::MidiOut(m) => {
+                p.kind = InstrumentKind::MidiOut;
+                p.hw = crate::MidiOutParams {
+                    channel: m.channel.min(15),
+                    program: m.program,
+                    bank: m.bank,
+                    lead_ns: (m
+                        .latency_ms
+                        .clamp(0.0, gt_core::MidiOutSettings::MAX_LATENCY_MS)
+                        * 1e6) as u64,
+                };
+            }
             Instrument::Layer(l) => {
                 p.kind = InstrumentKind::Layer;
                 p.layer.mode = l.mode;

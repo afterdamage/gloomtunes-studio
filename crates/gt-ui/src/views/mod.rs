@@ -8,6 +8,7 @@ mod channel_rack;
 mod channel_settings;
 mod drum_pads;
 mod input_panel;
+mod midi_out_panel;
 mod midi_panel;
 mod mixer;
 mod modulators;
@@ -36,9 +37,10 @@ pub use drum_pads::{drum_pads, DrumPadOut, DrumPadState};
 pub use input_panel::{
     input_menu, input_panel, offered_inputs, InputAction, InputPanelModel, PairMode,
 };
+pub use midi_out_panel::midi_out_panel;
 pub use midi_panel::{
-    midi_panel, AutoMode, LoopPasses, MidiAction, MidiPanelModel, MidiPortRow, MidiRouteRow,
-    RecordMode,
+    midi_panel, AutoMode, LoopPasses, MidiAction, MidiOutRow, MidiPanelModel, MidiPortRow,
+    MidiRouteRow, RecordMode,
 };
 pub use mixer::{mixer_view, MixerRequest, MixerState, MixerView, StripMeter, STRIP_ICON_GLYPHS};
 pub use modulators::{modulators_panel, ModulatorsState};

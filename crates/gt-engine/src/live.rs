@@ -92,6 +92,27 @@ pub enum LiveKind {
         /// Pressure.
         value: f32,
     },
+    /// A per-note expression on one key (MPE, Prompt 33). Sent before the key goes down, it
+    /// becomes the note's starting value.
+    NoteExpr {
+        /// MIDI key.
+        key: u8,
+        /// Which expression.
+        kind: NoteExprKind,
+        /// Semitones for tuning, 0 to 1 otherwise.
+        value: f32,
+    },
+}
+
+/// The per-note expressions an MPE controller sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteExprKind {
+    /// Pitch, in semitones from the key (the member channel's pitch bend).
+    Tuning,
+    /// Pressure, 0 to 1 (the member channel's aftertouch).
+    Pressure,
+    /// Timbre, 0 to 1 (CC 74 on the member channel).
+    Timbre,
 }
 
 /// What a recorded controller value does, as a live event.
@@ -263,6 +284,15 @@ fn pack(e: &LiveEvent) -> u64 {
         LiveKind::Pressure(v) => (5, 0, v),
         LiveKind::KeyPressure { key, value } => (6, key, value),
         LiveKind::Cc { cc, value } => (7, cc, value),
+        LiveKind::NoteExpr { key, kind, value } => (
+            match kind {
+                NoteExprKind::Tuning => 8,
+                NoteExprKind::Pressure => 9,
+                NoteExprKind::Timbre => 10,
+            },
+            key,
+            value,
+        ),
     };
     tag | u64::from(e.port) << 8
         | u64::from(e.channel) << 16
@@ -284,6 +314,15 @@ fn unpack(d: u64) -> Option<LiveEvent> {
         5 => LiveKind::Pressure(value),
         6 => LiveKind::KeyPressure { key, value },
         7 => LiveKind::Cc { cc: key, value },
+        8..=10 => LiveKind::NoteExpr {
+            key,
+            kind: match d & 0xFF {
+                8 => NoteExprKind::Tuning,
+                9 => NoteExprKind::Pressure,
+                _ => NoteExprKind::Timbre,
+            },
+            value,
+        },
         _ => return None,
     };
     Some(LiveEvent {

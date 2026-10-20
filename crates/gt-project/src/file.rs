@@ -605,6 +605,19 @@ enum InstrumentDto {
         #[serde(default)]
         macros: Vec<MacroDto>,
     },
+    /// A MIDI out channel (Prompt 33): the port by name and what to send.
+    MidiOut {
+        #[serde(default)]
+        port: String,
+        #[serde(default)]
+        channel: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        program: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bank: Option<u16>,
+        #[serde(default)]
+        latency_ms: f32,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1626,6 +1639,13 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                     .to_owned(),
                     split: l.split,
                 },
+                Instrument::MidiOut(m) => InstrumentDto::MidiOut {
+                    port: m.port.clone(),
+                    channel: m.channel,
+                    program: m.program,
+                    bank: m.bank,
+                    latency_ms: m.latency_ms,
+                },
                 Instrument::Player(pl) => InstrumentDto::Player {
                     pack: dir.and_then(|d| relative_path(d, &pl.pack)),
                     pack_absolute: Some(pl.pack.to_string_lossy().into_owned()),
@@ -2183,6 +2203,19 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                     _ => gt_core::LayerMode::All,
                 },
                 split,
+            }),
+            InstrumentDto::MidiOut {
+                port,
+                channel,
+                program,
+                bank,
+                latency_ms,
+            } => Instrument::MidiOut(gt_core::MidiOutSettings {
+                port,
+                channel,
+                program,
+                bank,
+                latency_ms,
             }),
             InstrumentDto::Player {
                 pack,
@@ -3132,6 +3165,23 @@ mod tests {
         pad.adsr.sustain = 0.0;
         pad.choke = 2;
         pad.output = Some(4);
+        let want = p.channels[i].instrument.clone();
+        let v = to_value(&p, None, &HashMap::new());
+        let back = from_value(v, None).unwrap().project;
+        assert_eq!(back.channels[i].instrument, want);
+    }
+
+    #[test]
+    fn midi_out_channels_round_trip() {
+        let mut p = Project::demo();
+        let id = p.add_midi_out_channel("Hardware").unwrap();
+        let i = p.channel_index(id).unwrap();
+        let m = p.channels[i].midi_out_mut().unwrap();
+        m.port = "USB MIDI 1".into();
+        m.channel = 9;
+        m.program = Some(17);
+        m.bank = Some(300);
+        m.latency_ms = 4.5;
         let want = p.channels[i].instrument.clone();
         let v = to_value(&p, None, &HashMap::new());
         let back = from_value(v, None).unwrap().project;

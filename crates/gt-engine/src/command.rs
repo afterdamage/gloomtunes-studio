@@ -53,6 +53,8 @@ pub enum EngineCommand {
     SetSignatures(Box<TimeSigMap>),
     /// Metronome clicks while playing.
     SetMetronome(bool),
+    /// MIDI clock and time code out (Prompt 33).
+    SetMidiSync(crate::MidiSyncSettings),
     /// The 440 Hz device test tone from Step 1.
     SetTestTone(bool),
     /// Fade the whole output to silence (before closing the device). Telemetry `silent` turns
@@ -271,6 +273,8 @@ pub enum EngineEvent {
         tick: f64,
         /// The transport was playing.
         playing: bool,
+        /// Per-note values it started with (MPE tuning and timbre).
+        expr: gt_dsp::NoteExpr,
     },
     /// A live controller moved on a channel slot while the transport was playing.
     LiveControl {

@@ -166,6 +166,15 @@ pub struct MidiPrefs {
     pub loop_passes: String,
     /// "latch", "touch" or "write".
     pub automation_mode: String,
+    /// Input ports that are MPE controllers.
+    pub mpe_ports: Vec<String>,
+    /// Output ports that get MIDI clock, and time code.
+    pub clock_out_ports: Vec<String>,
+    pub mtc_out_ports: Vec<String>,
+    /// Time code frames per second (24, 25 or 30).
+    pub mtc_fps: u32,
+    /// Input port whose clock the transport follows.
+    pub clock_in_port: Option<String>,
 }
 
 impl Default for MidiPrefs {
@@ -180,6 +189,11 @@ impl Default for MidiPrefs {
             record_mode: m.mode.key().to_owned(),
             loop_passes: m.passes.key().to_owned(),
             automation_mode: m.automation.key().to_owned(),
+            mpe_ports: Vec::new(),
+            clock_out_ports: Vec::new(),
+            mtc_out_ports: Vec::new(),
+            mtc_fps: m.mtc_rate.fps(),
+            clock_in_port: None,
         }
     }
 }

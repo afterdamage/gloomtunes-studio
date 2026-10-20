@@ -10,14 +10,19 @@
 //!
 //! Each port gets a number the first time it is seen, kept while the app runs, so a route set
 //! for a port still applies after it is unplugged and plugged back in.
+//!
+//! Prompt 33: a port marked as an MPE controller has its member channels turned into notes
+//! with per-note expression ([`crate::mpe`]), and the port picked as the clock source has its
+//! MIDI clock queued, with arrival times, for [`gt_core::ClockFollower`].
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use gt_core::ClockMessage;
 use gt_engine::{LiveEvent, LiveInput, LiveKind, LiveNote};
 use midir::{Ignore, MidiInput, MidiInputConnection};
 
@@ -117,6 +122,34 @@ struct Shared {
     launch_mode: AtomicBool,
     /// Keys struck on the launch channel since the UI last looked.
     launches: Mutex<Vec<u8>>,
+    /// Ports marked as MPE controllers, by name, and as bits by port number.
+    mpe_names: Mutex<HashSet<String>>,
+    mpe: AtomicU64,
+    /// The clock source by name, and its port number (`u32::MAX`: none).
+    clock_name: Mutex<Option<String>>,
+    clock_source: AtomicU32,
+    /// Clock messages from the source since the UI last looked, with arrival times.
+    clock: Mutex<Vec<(ClockMessage, u64)>>,
+}
+
+impl Shared {
+    /// Recomputes the MPE bits and the clock source number from their names.
+    fn renumber(&self) {
+        let numbers = lock(&self.numbers);
+        let of = |n: &str| numbers.iter().position(|x| x == n);
+        let mut bits = 0u64;
+        for n in lock(&self.mpe_names).iter() {
+            if let Some(i) = of(n).filter(|&i| i < 64) {
+                bits |= 1 << i;
+            }
+        }
+        self.mpe.store(bits, Ordering::Relaxed);
+        let clock = lock(&self.clock_name)
+            .as_deref()
+            .and_then(of)
+            .map_or(u32::MAX, |i| i as u32);
+        self.clock_source.store(clock, Ordering::Relaxed);
+    }
 }
 
 /// The MIDI channel (0-based: channel 16) whose notes launch clips in performance mode.
@@ -145,6 +178,11 @@ impl MidiIo {
             numbers: Mutex::new(Vec::new()),
             launch_mode: AtomicBool::new(false),
             launches: Mutex::new(Vec::new()),
+            mpe_names: Mutex::new(HashSet::new()),
+            mpe: AtomicU64::new(0),
+            clock_name: Mutex::new(None),
+            clock_source: AtomicU32::new(u32::MAX),
+            clock: Mutex::new(Vec::new()),
         });
         let (tx, rx) = channel();
         let s = Arc::clone(&shared);
@@ -188,6 +226,38 @@ impl MidiIo {
         let mut v: Vec<String> = lock(&self.shared.disabled).iter().cloned().collect();
         v.sort();
         v
+    }
+
+    /// Marks an input port as an MPE controller (or not), by name.
+    pub fn set_mpe(&self, name: &str, on: bool) {
+        {
+            let mut m = lock(&self.shared.mpe_names);
+            if on {
+                m.insert(name.to_owned());
+            } else {
+                m.remove(name);
+            }
+        }
+        self.shared.renumber();
+    }
+
+    /// The ports marked as MPE controllers (sorted, for the settings file).
+    pub fn mpe_ports(&self) -> Vec<String> {
+        let mut v: Vec<String> = lock(&self.shared.mpe_names).iter().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// Follows the clock of input port `name`, or none.
+    pub fn set_clock_source(&self, name: Option<&str>) {
+        *lock(&self.shared.clock_name) = name.map(str::to_owned);
+        lock(&self.shared.clock).clear();
+        self.shared.renumber();
+    }
+
+    /// Clock messages from the source since the last call, with arrival times.
+    pub fn take_clock(&self) -> Vec<(ClockMessage, u64)> {
+        std::mem::take(&mut *lock(&self.shared.clock))
     }
 
     /// Turns launching from [`LAUNCH_CHANNEL`] on or off (performance mode).
@@ -235,6 +305,9 @@ impl Drop for MidiIo {
 struct PortState {
     number: u8,
     held: [[bool; 128]; 16],
+    mpe: crate::mpe::MpeState,
+    /// Clock pulses since the UI was last woken for them.
+    pulses: u32,
 }
 
 impl PortState {
@@ -242,6 +315,8 @@ impl PortState {
         Self {
             number,
             held: [[false; 128]; 16],
+            mpe: crate::mpe::MpeState::default(),
+            pulses: 0,
         }
     }
 }
@@ -303,6 +378,7 @@ fn scan_loop(shared: &Arc<Shared>, live: &LiveInput, tx: &Sender<MidiCc>, ctx: &
                     })
                 };
                 let number = u8::try_from(number).unwrap_or(u8::MAX - 1);
+                shared.renumber();
                 match connect(port, number, shared, live, tx, ctx) {
                     Ok(c) => {
                         log::info!("MIDI input opened: {name}");
@@ -349,6 +425,9 @@ fn release_held(live: &LiveInput, state: &mut PortState, channel: Option<u8>) {
             c as u8,
         ));
     }
+    if channel.is_none() {
+        state.mpe.clear();
+    }
 }
 
 fn connect(
@@ -360,15 +439,50 @@ fn connect(
     ctx: &egui::Context,
 ) -> Result<MidiInputConnection<PortState>, String> {
     let mut input = MidiInput::new(CLIENT_NAME).map_err(|e| e.to_string())?;
-    // SysEx, clock and active sensing are of no use here.
-    input.ignore(Ignore::All);
+    // SysEx and active sensing are of no use here; the clock is, from the clock source.
+    input.ignore(Ignore::SysexAndActiveSense);
     let (live, tx, ctx, shared) = (live.clone(), tx.clone(), ctx.clone(), Arc::clone(shared));
     input
         .connect(
             port,
             &format!("{CLIENT_NAME} in"),
             move |_stamp, msg, state: &mut PortState| {
+                if let Some(c) = ClockMessage::decode(msg) {
+                    if shared.clock_source.load(Ordering::Relaxed) == u32::from(state.number) {
+                        lock(&shared.clock).push((c, gt_engine::clock_ns()));
+                        state.pulses += 1;
+                        // Start and stop at once; the tempo can wait a few pulses.
+                        if c != ClockMessage::Pulse || state.pulses >= 6 {
+                            state.pulses = 0;
+                            ctx.request_repaint();
+                        }
+                    }
+                    return;
+                }
+                if msg.first().is_some_and(|&s| s >= 0xF0) {
+                    return;
+                }
                 shared.activity.fetch_add(1, Ordering::Relaxed);
+                let mut remapped = [0u8; 3];
+                let mut msg = msg;
+                if state.number < 64 && shared.mpe.load(Ordering::Relaxed) >> state.number & 1 == 1
+                {
+                    let (number, held) = (state.number, &mut state.held[0]);
+                    let used = state.mpe.handle(msg, &mut |kind| {
+                        if let LiveKind::Note(n) = kind {
+                            held[usize::from(n.key)] = n.is_on();
+                        }
+                        live.send(LiveEvent::from_port(kind, number, crate::mpe::MASTER));
+                    });
+                    if used {
+                        return;
+                    }
+                    // Anything else from a member channel acts on the master channel.
+                    let n = msg.len().min(3);
+                    remapped[..n].copy_from_slice(&msg[..n]);
+                    remapped[0] &= 0xF0;
+                    msg = &remapped[..n];
+                }
                 let to_ui = |cc: MidiCc| {
                     let cc = MidiCc {
                         at_ns: gt_engine::clock_ns(),

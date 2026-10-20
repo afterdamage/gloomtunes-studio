@@ -79,6 +79,14 @@ pub trait PluginProcessor: Send {
     fn midi(&mut self, _offset: u32, _msg: [u8; 3]) {}
     /// Queues polyphonic aftertouch on `key`, 0 to 1.
     fn key_pressure(&mut self, _offset: u32, _key: u8, _value: f32) {}
+    /// Queues an MPE expression on a held `key` (semitones for tuning, 0 to 1 otherwise).
+    /// Plugins without note expressions get pressure as polyphonic aftertouch and nothing
+    /// else.
+    fn note_expression(&mut self, offset: u32, key: u8, kind: crate::NoteExprKind, value: f32) {
+        if kind == crate::NoteExprKind::Pressure {
+            self.key_pressure(offset, key, value);
+        }
+    }
     /// Queues a parameter change: `index` in the plugin's parameter list, value normalized.
     fn set_param(&mut self, index: u32, value: f32);
     /// Clears tails and voices (the transport started from stop, or a retry after a failure).
@@ -227,6 +235,19 @@ impl PluginTable {
     pub(crate) fn key_pressure(&mut self, index: Option<u8>, offset: u32, key: u8, value: f32) {
         if let Some(e) = self.live(index) {
             e.plugin.processor.key_pressure(offset, key, value);
+        }
+    }
+
+    pub(crate) fn note_expression(
+        &mut self,
+        index: Option<u8>,
+        offset: u32,
+        key: u8,
+        kind: crate::NoteExprKind,
+        value: f32,
+    ) {
+        if let Some(e) = self.live(index) {
+            e.plugin.processor.note_expression(offset, key, kind, value);
         }
     }
 

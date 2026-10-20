@@ -15,6 +15,7 @@ pub mod autorec;
 pub mod demos;
 pub mod drum_synth;
 pub mod effects;
+pub mod hardware;
 pub mod midi;
 pub mod mixer;
 pub mod modulation;
@@ -40,6 +41,7 @@ pub use arrangement::{Arrangement, MAX_ARRANGEMENTS};
 pub use autorec::{record_automation, record_pattern_automation, thin, THIN_TOLERANCE};
 pub use drum_synth::{DrumModel, DrumVoice};
 pub use effects::{EffectKind, EffectSlot};
+pub use hardware::{ClockFollower, ClockMessage, MidiOutSettings, MtcRate, SyncAction};
 pub use midi::{
     ControlKind, ControlPoint, MidiBinding, MidiRoute, MAX_LEARN_CC, MAX_MIDI_BINDINGS,
 };
