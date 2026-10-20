@@ -43,6 +43,7 @@ struct TablesKey {
 mod automate;
 mod bounce;
 mod browse;
+mod controllers;
 mod edit_audio;
 mod hardware;
 mod midi;
@@ -219,6 +220,8 @@ pub struct GloomApp {
     midi_out: crate::midi_out_io::MidiOutIo,
     /// Clock and time code out, following an external clock (Prompt 33).
     sync: hardware::SyncState,
+    /// Controller mappings and scripts (D149).
+    controllers: controllers::Controllers,
     keyboard: crate::live::TypingKeyboard,
     recorder: crate::live::Recorder,
     /// The take under way.
@@ -418,6 +421,7 @@ impl GloomApp {
             midi_out: crate::midi_out_io::MidiOutIo::start(),
             note_expr: std::collections::HashMap::new(),
             sync: hardware::SyncState::from_prefs(&settings.midi),
+            controllers: controllers::Controllers::load(settings.midi.controller_maps.clone()),
             keyboard: crate::live::TypingKeyboard::default(),
             recorder: crate::live::Recorder::default(),
             take: None,

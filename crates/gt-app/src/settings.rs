@@ -175,6 +175,9 @@ pub struct MidiPrefs {
     pub mtc_fps: u32,
     /// Input port whose clock the transport follows.
     pub clock_in_port: Option<String>,
+    /// Controller mapping picked per input port: a mapping's name, or "" for none (ports
+    /// not listed pick one themselves).
+    pub controller_maps: BTreeMap<String, String>,
 }
 
 impl Default for MidiPrefs {
@@ -194,6 +197,7 @@ impl Default for MidiPrefs {
             mtc_out_ports: Vec::new(),
             mtc_fps: m.mtc_rate.fps(),
             clock_in_port: None,
+            controller_maps: BTreeMap::new(),
         }
     }
 }

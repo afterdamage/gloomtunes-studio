@@ -41,6 +41,12 @@ allow = ["LGPL-3.0"]
 crate = "mp3lame-sys"
 allow = ["LGPL-3.0"]
 
+# tiny-keccak (through rhai's const-random, D149) is CC0-1.0: a public-domain dedication,
+# compatible with GPL-3.0; flagged in ARCHITECTURE §10.
+[[licenses.exceptions]]
+crate = "tiny-keccak"
+allow = ["CC0-1.0"]
+
 [licenses.private]
 # The workspace crates themselves are GPL-3.0-or-later and never published.
 ignore = true

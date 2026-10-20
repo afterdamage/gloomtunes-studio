@@ -813,6 +813,16 @@ files and scripting; (3) the out-of-process plugin sandbox.
   constant tempo (the song's tempo map is ignored meanwhile); MPE upper zone and MPE
   configuration messages are not read; the sampler ignores per-note tuning; hardware MIDI is
   untested in CI (no MIDI devices there).
+- PR 2 (D149): **controller mappings** (`gt_project::controller`, `*.gtmap.json`: knobs,
+  faders, pads and buttons by CC or note, to parameter keys with `selected` channel and strip,
+  transport buttons, notes or the script; relative encoders), a built-in generic mapping, user
+  mappings from the data folder picked by port name or in settings; mapped notes do not play.
+  **Scripts** in Rhai (MIT/Apache) with only transport, mixer and selected-channel access,
+  `eval` off and limits on operations, call depth and data size. Tests: mapping parsing and
+  errors, script actions, a runaway or recursive script stopped and still usable, mapping
+  choice by port.
+- Limits (PR 2): no feedback to controller LEDs or motor faders; scripts run on the UI thread
+  (once per message, at most 200 000 operations).
 
 ---
 

@@ -18,6 +18,10 @@ pub struct MidiPortRow {
     /// It is an MPE controller (lower zone: notes on channels 2 to 16 carry their own pitch,
     /// pressure and timbre).
     pub mpe: bool,
+    /// The controller mapping the user picked: a name, "" for none, `None` for automatic.
+    pub mapping: Option<String>,
+    /// The mapping in use ("" for none).
+    pub mapping_in_use: String,
 }
 
 /// One MIDI output port and what the engine sends it besides MIDI out channels.
@@ -192,6 +196,12 @@ pub struct MidiPanelModel {
     pub clock_in: Option<String>,
     /// The external tempo while following.
     pub clock_bpm: Option<f64>,
+    /// Controller mapping names.
+    pub mappings: Vec<String>,
+    /// Mapping files or scripts that failed.
+    pub mapping_errors: Vec<String>,
+    /// Where user mapping files go.
+    pub mapping_folder: String,
 }
 
 impl Default for MidiPanelModel {
@@ -214,6 +224,9 @@ impl Default for MidiPanelModel {
             mtc_rate: gt_core::MtcRate::default(),
             clock_in: None,
             clock_bpm: None,
+            mappings: Vec::new(),
+            mapping_errors: Vec::new(),
+            mapping_folder: String::new(),
         }
     }
 }
@@ -229,6 +242,18 @@ pub enum MidiAction {
     SetPortMpe(String, bool),
     /// Clock or time code out, the time code rate or the clock source changed.
     SyncChanged,
+    /// Pick a port's controller mapping (see [`MidiPortRow::mapping`]).
+    SetPortMapping(String, Option<String>),
+    /// Read the mapping files again.
+    ReloadMappings,
+}
+
+fn none_name(n: &str) -> &str {
+    if n.is_empty() {
+        tr("None")
+    } else {
+        n
+    }
 }
 
 /// Draws the panel; edits `m` in place.
@@ -258,10 +283,47 @@ pub fn midi_panel(ui: &mut Ui, theme: &GloomTheme, m: &mut MidiPanelModel) -> Ve
             {
                 actions.push(MidiAction::SetPortMpe(p.name.clone(), p.mpe));
             }
+            let shown = match &p.mapping {
+                None => format!("{} ({})", tr("Automatic"), none_name(&p.mapping_in_use)),
+                Some(n) => none_name(n).to_owned(),
+            };
+            let before = p.mapping.clone();
+            egui::ComboBox::from_id_salt(("controller_map", p.name.as_str()))
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut p.mapping, None, tr("Automatic"));
+                    ui.selectable_value(&mut p.mapping, Some(String::new()), tr("None"));
+                    for n in &m.mappings {
+                        ui.selectable_value(&mut p.mapping, Some(n.clone()), n.as_str());
+                    }
+                })
+                .response
+                .on_hover_text(tr(
+                    "Controller mapping: what the knobs, faders, pads and buttons do",
+                ));
+            if p.mapping != before {
+                actions.push(MidiAction::SetPortMapping(
+                    p.name.clone(),
+                    p.mapping.clone(),
+                ));
+            }
             if p.enabled && !p.connected {
                 ui.label(RichText::new(tr("cannot open")).color(theme.warn));
             }
         });
+    }
+    ui.horizontal(|ui| {
+        ui.label(dim(&format!(
+            "{} {}",
+            tr("Controller mappings (*.gtmap.json) load from"),
+            m.mapping_folder
+        )));
+        if ui.small_button(tr("Reload")).clicked() {
+            actions.push(MidiAction::ReloadMappings);
+        }
+    });
+    for e in &m.mapping_errors {
+        ui.label(RichText::new(e.as_str()).color(theme.warn));
     }
     ui.label(dim(tr(
         "Notes play the selected channel unless routed below. Right-click a knob or fader \

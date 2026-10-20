@@ -16,6 +16,7 @@ mod midi_io;
 mod midi_out_io;
 mod mpe;
 mod recording;
+mod script;
 mod settings;
 
 /// What `main` hands the app: the saved settings and when the process started.

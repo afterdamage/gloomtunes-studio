@@ -466,6 +466,7 @@ impl GloomApp {
             mtc_out_ports: self.sync.mtc_out.clone(),
             mtc_fps: m.mtc_rate.fps(),
             clock_in_port: m.clock_in.clone(),
+            controller_maps: self.controllers.chosen.clone(),
         };
         s.set_keymap(&self.keymap);
         s.theme = ThemePrefs::from_theme(&self.theme);

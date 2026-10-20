@@ -35,6 +35,7 @@ serde.workspace = true
 serde_json.workspace = true
 hound.workspace = true
 rtrb.workspace = true
+rhai.workspace = true
 
 [features]
 # Optional audio backends. Each needs extra system libraries; see README.md.

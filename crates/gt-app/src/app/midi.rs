@@ -76,7 +76,12 @@ impl GloomApp {
 
         let ccs = self.midi.take_cc();
         let mut moved = false;
+        self.controllers.refresh(&self.midi);
         for cc in ccs {
+            if cc.note {
+                self.controller_message(cc, &mut moved);
+                continue;
+            }
             if let Some(param) = self.learning.take() {
                 if self.project.learn_midi(cc.channel, cc.cc, param) {
                     self.toast(format!(
@@ -90,6 +95,15 @@ impl GloomApp {
                     // Mode messages (CC 120 and up) cannot be learned; keep waiting.
                     self.learning = Some(param);
                 }
+                continue;
+            }
+            let learned = self
+                .project
+                .midi_map
+                .iter()
+                .any(|b| b.channel == cc.channel && b.cc == cc.cc);
+            if !learned {
+                self.controller_message(cc, &mut moved);
                 continue;
             }
             for param in self.project.apply_cc(cc.channel, cc.cc, cc.value) {
@@ -567,12 +581,17 @@ impl GloomApp {
             .ports()
             .into_iter()
             .map(|p| MidiPortRow {
+                mapping: self.controllers.chosen.get(&p.name).cloned(),
+                mapping_in_use: self.controllers.in_use(&p.name),
                 name: p.name,
                 enabled: p.enabled,
                 connected: p.connected,
                 mpe: false,
             })
             .collect();
+        m.mappings = self.controllers.names();
+        m.mapping_errors = self.controllers.errors.clone();
+        m.mapping_folder = super::controllers::folder().display().to_string();
         m.error = self.midi.error();
         self.sync_model();
         let m = &mut self.midi_model;
@@ -596,6 +615,14 @@ impl GloomApp {
             match a {
                 MidiAction::SetPortEnabled(name, on) => self.midi.set_enabled(&name, on),
                 MidiAction::SetPortMpe(..) | MidiAction::SyncChanged => self.sync_action(&a),
+                MidiAction::SetPortMapping(port, map) => {
+                    match map {
+                        Some(n) => self.controllers.chosen.insert(port, n),
+                        None => self.controllers.chosen.remove(&port),
+                    };
+                    self.controllers.reset(&self.midi);
+                }
+                MidiAction::ReloadMappings => self.controllers.reload(&self.midi),
                 MidiAction::RoutesChanged => {
                     let p = &mut self.project;
                     p.midi_routes = m
