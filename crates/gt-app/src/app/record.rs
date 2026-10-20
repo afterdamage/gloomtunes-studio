@@ -88,7 +88,11 @@ impl GloomApp {
             if let (true, Some(input)) = (self.playlist.armed.contains(&t.id), t.input) {
                 routes.push(InputRoute {
                     input,
-                    strip: t.insert.min(gt_core::STRIPS - 1) as u16,
+                    strip: self
+                        .project
+                        .playlist
+                        .track_insert(t.id)
+                        .min(gt_core::STRIPS - 1) as u16,
                     armed: Some(monitor),
                 });
             }

@@ -71,6 +71,11 @@ impl History {
         }
     }
 
+    /// The last committed document.
+    pub fn base(&self) -> &Project {
+        &self.base
+    }
+
     /// Records the change from the last committed state to `project` as one undo step. Returns
     /// false (and records nothing) if nothing undoable changed. Clears the redo stack.
     pub fn commit(&mut self, project: &Project, label: &str) -> bool {
@@ -219,6 +224,8 @@ fn diff(a: &Project, b: &Project) -> Vec<Edit> {
         && a.playlist == b.playlist
         && a.tempo == b.tempo
         && a.signatures == b.signatures
+        && a.arrangements == b.arrangements
+        && a.current_arrangement == b.current_arrangement
         && a.patterns.len() == b.patterns.len()
         && a.patterns.iter().zip(&b.patterns).all(|(x, y)| {
             x.id == y.id && x.name == y.name && x.steps == y.steps && x.color == y.color

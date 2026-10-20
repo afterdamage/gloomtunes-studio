@@ -738,6 +738,26 @@ sound identical; the golden export test stays.
 - Limits: plugin slots in presets keep the plugin and its parameters but not its saved state;
   no strip docking (left/right sections).
 
+### Prompt 30: Playlist workflow
+- Folder tracks: group tracks (Ctrl+click names to pick several), nest folders, collapse to
+  hide their tracks, mute and solo a whole folder, colour it (its tracks follow), move tracks
+  in and out, ungroup. "Route folder to a group insert" gives the folder an insert: its tracks'
+  audio and their own inserts go through it.
+- Several arrangements per project with a switcher, new, duplicate, rename, reorder and
+  delete. Each has its own tracks, clips, markers, tempo map and time signatures; patterns,
+  channels and the mixer are shared (D143, schema 9).
+- Clip source menu (right-click a clip's name strip): select all clips of the source, make
+  unique (a pattern copy; linked automation clips unlinked), replace the pattern or audio while
+  keeping position, length and slip offset. Duplicated automation clips are now linked: an edit
+  to one goes to the others.
+- The engine crossfades the old song out when a new one arrives while playing, so switching
+  arrangements (or any playlist edit) never clicks.
+- Tests: arrangement switching during playback (tempo, positions, no click), make-unique
+  independence, folder mute/solo/collapse/route semantics, arrangement and folder round trips.
+- Limits: switching arrangements is an undo step; collapsed folders show no summary of the
+  hidden clips; a group insert only carries audio clips of its tracks (pattern clips play
+  through their channels' inserts).
+
 ---
 
 ## v1.0 scope

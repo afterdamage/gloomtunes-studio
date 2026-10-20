@@ -387,7 +387,7 @@ impl SongSnapshot {
                 live: None,
                 sample,
                 gain: 1.0,
-                route: t.insert.min(gt_core::STRIPS - 1) as u16,
+                route: pl.track_insert(t.id).min(gt_core::STRIPS - 1) as u16,
             });
         }
         for clip in &pl.clips {
@@ -448,9 +448,7 @@ impl SongSnapshot {
                             curve: FadeCurve::EqualPower,
                         }
                     };
-                    let route = pl
-                        .track(clip.track)
-                        .map_or(0, |t| t.insert.min(gt_core::STRIPS - 1));
+                    let route = pl.track_insert(clip.track).min(gt_core::STRIPS - 1);
                     let sec = |t: i64| tempo.tick_to_seconds(t as f64);
                     let (start_s, end_s, origin_s) = (
                         sec(clip.start),

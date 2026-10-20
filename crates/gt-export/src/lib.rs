@@ -611,7 +611,7 @@ fn insert_stems(base: &Project) -> Vec<(String, usize)> {
             .iter()
             .any(|c| c.track == t.id && !matches!(c.kind, ClipKind::Automation(_)))
         {
-            mark(t.insert);
+            mark(pl.track_insert(t.id));
         }
     }
     for (i, s) in m.strips.iter().enumerate().skip(1) {

@@ -51,7 +51,7 @@ pub struct Bounce {
 pub fn check_routing(project: &Project, track: TrackId) -> Result<(), String> {
     let pl = &project.playlist;
     let t = pl.track(track).ok_or("no such track")?;
-    let insert = t.insert.min(STRIPS - 1);
+    let insert = pl.track_insert(t.id).min(STRIPS - 1);
     for c in pl.clips.iter().filter(|c| c.track == track) {
         let ClipKind::Pattern(id) = c.kind else {
             continue;

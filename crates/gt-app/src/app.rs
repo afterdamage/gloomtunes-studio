@@ -1111,6 +1111,15 @@ impl GloomApp {
             || self.roll.is_dragging()
             || self.playlist.is_dragging();
         if !busy {
+            // An edit to a linked automation clip goes to its copies.
+            if self
+                .project
+                .playlist
+                .sync_links(&self.history.base().playlist)
+                > 0
+            {
+                self.push_song();
+            }
             if self.history.commit(&self.project, label) {
                 self.edits += 1;
             }
@@ -1661,6 +1670,12 @@ impl GloomApp {
             PlaylistAction::TimingChanged => {
                 self.push_timing();
                 self.pending_edit = Some("Tempo or time signature");
+            }
+            PlaylistAction::ArrangementChanged => {
+                // Its clips' audio may not be loaded yet; the song plays on from the same tick.
+                self.request_clip_audio();
+                self.push_timing();
+                self.pending_edit = Some("Arrangement");
             }
             PlaylistAction::Locate(t) => self.send(EngineCommand::Locate(Tick(t))),
             PlaylistAction::SetLoop { start, end } => {
