@@ -125,6 +125,11 @@ and the app shows it that way. Function keys on a Mac laptop may need **fn** hel
   - The arrangement box at the left of the toolbar switches arrangements; its **...** menu
     makes, duplicates, renames, moves and deletes them. Patterns are shared; clips, markers and
     tempo belong to each arrangement.
+  - **Edit audio...** in an audio clip's popup opens the audio editor: drag to select, click
+    to place the cursor, Ctrl+wheel zooms. Trim, cut, copy, paste, silence, normalize, fades,
+    reverse, gain and DC removal work on a copy with undo (Ctrl+Z); **Learn noise** on a
+    noise-only selection, then **Reduce noise**. **To MIDI** turns a melody or drum loop into
+    a pattern for the selected channel. **Apply** saves the edited copy into the clip.
   - Right-click a clip's name strip for its source: select all clips of it, **Make unique**, or
     replace the pattern or audio in place.
   - The ruler: click the bars row to move the playhead, drag it to set the loop. Right-click to

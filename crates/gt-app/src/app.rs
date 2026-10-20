@@ -43,6 +43,7 @@ struct TablesKey {
 mod automate;
 mod bounce;
 mod browse;
+mod edit_audio;
 mod midi;
 mod perform;
 mod plugins;
@@ -160,6 +161,8 @@ pub struct GloomApp {
     effect_files: HashMap<PathBuf, Arc<SampleData>>,
 
     playlist: PlaylistState,
+    /// The open audio editor (Prompt 32).
+    audio_editor: Option<gt_ui::views::AudioEditor>,
     /// Effect parameters the last song automates and the last modulation plan modulates. The
     /// engine sets them every control period; when neither drives one any more, its document
     /// value is sent again.
@@ -377,6 +380,7 @@ impl GloomApp {
             scopes: vec![Default::default(); STRIPS],
             effect_files: HashMap::new(),
             playlist: PlaylistState::default(),
+            audio_editor: None,
             lane_fx: Vec::new(),
             mod_fx: Vec::new(),
             sent_mods: None,
@@ -2965,6 +2969,7 @@ impl eframe::App for GloomApp {
         self.floating_views(&ctx, &theme, &cx, &mut out);
         self.on_views(out);
         self.workflow_windows(&ctx, &theme);
+        self.audio_editor_window(&ctx, &theme);
         if let Some((strip, k)) = self.mixer_state.file_request.take() {
             let d = rfd::FileDialog::new().add_filter("Audio", &gt_project::AUDIO_EXTENSIONS);
             if let Some(path) = d.pick_file() {

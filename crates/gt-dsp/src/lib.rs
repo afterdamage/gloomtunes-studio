@@ -8,8 +8,11 @@
 
 mod adsr;
 pub mod analysis;
+pub mod audio_edit;
+pub mod audio_to_midi;
 mod blep;
 mod click;
+pub mod denoise;
 pub mod drums;
 pub mod fx;
 mod gain;
