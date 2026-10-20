@@ -38,6 +38,7 @@ impl GloomApp {
     /// keyboard, the live channel and the transport bar's live state.
     pub(super) fn live_frame(&mut self, ctx: &egui::Context, dt: f32) {
         self.tick_performance();
+        self.follow_clock();
         let mut recorded = self.sweep_take();
         for e in self.audio.take_events() {
             match e {
@@ -47,9 +48,10 @@ impl GloomApp {
                     velocity,
                     tick,
                     playing,
+                    expr,
                 } => {
                     recorded |= if playing {
-                        self.record_live(slot, key, velocity, tick)
+                        self.record_live(slot, key, velocity, tick, expr)
                     } else {
                         self.step_key(slot, key, velocity)
                     };
@@ -329,7 +331,14 @@ impl GloomApp {
     }
 
     /// A live note the engine played on `slot` while the transport ran, at song tick `tick`.
-    fn record_live(&mut self, slot: u16, key: u8, velocity: f32, tick: f64) -> bool {
+    fn record_live(
+        &mut self,
+        slot: u16,
+        key: u8,
+        velocity: f32,
+        tick: f64,
+        expr: gt_engine::NoteExpr,
+    ) -> bool {
         let Some(len) = self
             .take
             .as_ref()
@@ -339,7 +348,17 @@ impl GloomApp {
             return false;
         };
         let at = self.recorded_at(tick);
-        let done = self.recorder.note(slot, key, velocity, at, len);
+        // An MPE note keeps the tuning and timbre it started with.
+        let mut done = self.recorder.note(slot, key, velocity, at, len);
+        if let Some((s, n)) = done.as_mut() {
+            if let Some(e) = self.note_expr.remove(&(*s, n.key)) {
+                n.fine = e.fine.clamp(-100.0, 100.0);
+                n.mod_x = e.mod_x;
+            }
+        }
+        if velocity > 0.0 && (expr.fine != 0.0 || expr.mod_x != 0.5) {
+            self.note_expr.insert((slot, key), expr);
+        }
         self.add_notes(&done.into_iter().collect::<Vec<_>>())
     }
 
@@ -551,9 +570,12 @@ impl GloomApp {
                 name: p.name,
                 enabled: p.enabled,
                 connected: p.connected,
+                mpe: false,
             })
             .collect();
         m.error = self.midi.error();
+        self.sync_model();
+        let m = &mut self.midi_model;
         m.buffer_ms = self.audio.buffer_ms().unwrap_or(0.0);
         let p = &self.project;
         m.channels = p.channels.iter().map(|c| c.name.clone()).collect();
@@ -568,9 +590,12 @@ impl GloomApp {
                 })
             })
             .collect();
-        for a in gt_ui::views::midi_panel(ui, theme, m) {
+        let actions = gt_ui::views::midi_panel(ui, theme, m);
+        for a in actions {
+            let m = &self.midi_model;
             match a {
                 MidiAction::SetPortEnabled(name, on) => self.midi.set_enabled(&name, on),
+                MidiAction::SetPortMpe(..) | MidiAction::SyncChanged => self.sync_action(&a),
                 MidiAction::RoutesChanged => {
                     let p = &mut self.project;
                     p.midi_routes = m

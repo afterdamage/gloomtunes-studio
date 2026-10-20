@@ -12,10 +12,11 @@ use crate::command::{EngineCommand, EngineEvent, Garbage, TransportState};
 use crate::control::{beats_of, ModClock, ModPlan, ParamDest};
 use crate::denormal::DenormalGuard;
 use crate::input::InputEngine;
-use crate::live::{clock_ns, LiveEvent, LiveKind, LiveRoutes, KEYBOARD, ROUTE_PORTS};
+use crate::live::{clock_ns, LiveEvent, LiveKind, LiveRoutes, NoteExprKind, KEYBOARD, ROUTE_PORTS};
+use crate::midi_out::{FrameClock, MidiOutEngine, MidiOutEvent};
 use crate::mixer::MixerEngine;
 use crate::plugin::{PluginContext, PluginTable};
-use crate::song::{AudioPlay, ChannelParams, SongSnapshot};
+use crate::song::{AudioPlay, ChannelParams, InstrumentKind, SongSnapshot};
 use crate::transport::{EventBuf, EventKind, ScheduledEvent, Transport};
 use crate::{EngineConfig, Telemetry, FADE_SECONDS, RENDER_QUANTUM, SCOPE_LEN};
 
@@ -160,6 +161,12 @@ pub struct AudioProcessor {
 
     /// Device input: monitoring, recording, latency measurement.
     input: Box<InputEngine>,
+    /// MIDI out channels, clock and time code (Prompt 33).
+    midi: Box<MidiOutEngine>,
+    /// The transport played last quantum (programs are sent again when it starts).
+    midi_playing: bool,
+    /// Per key: per-note values an MPE controller sent before the key went down.
+    live_expr: Box<[NoteExpr; 128]>,
 }
 
 impl std::fmt::Debug for AudioProcessor {
@@ -180,6 +187,7 @@ impl AudioProcessor {
         events: Producer<EngineEvent>,
         garbage: Producer<Garbage>,
         live: Consumer<LiveEvent>,
+        midi_out: Producer<MidiOutEvent>,
     ) -> Self {
         let sr = config.sample_rate.max(1) as f32;
         let mut preview = ChannelSlot::new(sr);
@@ -244,6 +252,9 @@ impl AudioProcessor {
             master: LinearRamp::new(1.0),
             fade_frames: (sr * FADE_SECONDS).round() as u32,
             input: Box::new(InputEngine::new()),
+            midi: Box::new(MidiOutEngine::new(midi_out)),
+            midi_playing: false,
+            live_expr: Box::new([NoteExpr::default(); 128]),
         }
     }
 
@@ -364,6 +375,7 @@ impl AudioProcessor {
         );
         self.apply_live();
         self.router.route(&mut self.scheduled, &self.channels);
+        self.run_midi_sync();
         // Recorded controllers, at once for built-in instruments (within a quantum).
         for i in 0..self.scheduled.as_slice().len() {
             if let EventKind::Control { slot, kind, value } = self.scheduled.as_slice()[i].kind {
@@ -668,6 +680,13 @@ impl AudioProcessor {
                 }
             }
         }
+        if p.kind == InstrumentKind::MidiOut {
+            if !p.silenced {
+                let at = self.frame_clock().at(0, p.hw.lead_ns);
+                self.midi.note_on(slot, &p.hw, at, key, velocity);
+            }
+            return;
+        }
         let ch = &mut self.channels[slot];
         if ch.is_plugin() {
             self.plugins.note_on(ch.plugin, 0, key, velocity);
@@ -695,6 +714,11 @@ impl AudioProcessor {
             }
             None => key,
         };
+        if p.kind == InstrumentKind::MidiOut {
+            let at = self.frame_clock().at(0, p.hw.lead_ns);
+            self.midi.note_off(slot, &p.hw, at, key);
+            return;
+        }
         let ch = &mut self.channels[slot];
         if ch.is_plugin() {
             self.plugins.note_off(ch.plugin, 0, key);
@@ -719,6 +743,10 @@ impl AudioProcessor {
     fn render_channel(&mut self, slot: usize, pctx: &PluginContext) {
         if self.channels[slot].is_plugin() {
             self.render_plugin_channel(slot, pctx);
+            return;
+        }
+        if self.channels[slot].params().kind == InstrumentKind::MidiOut {
+            self.render_midi_channel(slot);
             return;
         }
         let touches = |e: &&ScheduledEvent| match e.kind {
@@ -1073,7 +1101,12 @@ impl AudioProcessor {
     }
 
     fn release_all_channels(&mut self) {
-        for ch in &mut self.channels {
+        let clock = self.frame_clock();
+        for (slot, ch) in self.channels.iter_mut().enumerate() {
+            if self.midi.holds(slot) {
+                let hw = ch.params().hw;
+                self.midi.all_off(slot, &hw, clock.at(0, hw.lead_ns));
+            }
             if ch.is_plugin() {
                 self.plugins.release_all(ch.plugin, 0);
             } else {
@@ -1112,6 +1145,7 @@ impl AudioProcessor {
                 self.retire(Garbage::TempoMap(old));
             }
             EngineCommand::SetMetronome(on) => self.metronome = on,
+            EngineCommand::SetMidiSync(s) => self.midi.sync = s,
             EngineCommand::SetTestTone(on) => {
                 if on && !self.tone_on && self.tone_ramp.value() == 0.0 {
                     // Start from a zero crossing so the fade-in begins cleanly.
@@ -1494,6 +1528,15 @@ impl AudioProcessor {
         let n = match e.kind {
             LiveKind::Note(n) => n,
             kind => {
+                // MPE sends a note's starting values before the note.
+                if let LiveKind::NoteExpr { key, kind, value } = kind {
+                    let x = &mut self.live_expr[usize::from(key & 0x7F)];
+                    match kind {
+                        NoteExprKind::Tuning => x.fine = value * 100.0,
+                        NoteExprKind::Timbre => x.mod_x = value.clamp(0.0, 1.0),
+                        NoteExprKind::Pressure => {}
+                    }
+                }
                 if let Some(slot) = slot {
                     self.slot_expression(usize::from(slot), kind, offset);
                     let control = match kind {
@@ -1530,6 +1573,11 @@ impl AudioProcessor {
             kind,
         };
         let mut played = None;
+        let expr = if n.is_on() {
+            std::mem::take(&mut self.live_expr[usize::from(n.key)])
+        } else {
+            NoteExpr::default()
+        };
         if n.is_on() {
             // A key struck again before its release ends the old note first.
             if let Some(old) = self.live_held[h].checked_sub(1) {
@@ -1544,7 +1592,7 @@ impl AudioProcessor {
                     slot,
                     key: n.key,
                     velocity: n.velocity,
-                    expr: NoteExpr::default(),
+                    expr,
                 }));
                 self.live_held[h] = slot + 1;
                 played = Some(slot);
@@ -1564,6 +1612,7 @@ impl AudioProcessor {
                 velocity: n.velocity,
                 tick,
                 playing,
+                expr,
             });
         }
     }
@@ -1571,9 +1620,19 @@ impl AudioProcessor {
     /// Bend, sustain, mod wheel or aftertouch on a channel slot: built-in instruments take it
     /// at once, plugins as MIDI (polyphonic aftertouch as a note expression) at `offset`.
     fn slot_expression(&mut self, slot: usize, kind: LiveKind, offset: u32) {
+        if let LiveKind::NoteExpr { key, kind, value } = kind {
+            self.note_expression(slot, key, kind, value, offset);
+            return;
+        }
         let Some(ch) = self.channels.get_mut(slot) else {
             return;
         };
+        if ch.params().kind == InstrumentKind::MidiOut {
+            let hw = ch.params().hw;
+            let at = self.frame_clock().at(offset, hw.lead_ns);
+            self.midi.expression(slot, &hw, at, kind);
+            return;
+        }
         if ch.is_plugin() {
             let seven = |v: f32| (v.clamp(0.0, 1.0) * 127.0).round() as u8;
             let msg = match kind {
@@ -1589,7 +1648,7 @@ impl AudioProcessor {
                     self.plugins.key_pressure(ch.plugin, offset, key, value);
                     return;
                 }
-                LiveKind::Note(_) => return,
+                LiveKind::Note(_) | LiveKind::NoteExpr { .. } => return,
             };
             self.plugins.midi(ch.plugin, offset, msg);
             return;
@@ -1600,8 +1659,98 @@ impl AudioProcessor {
             LiveKind::ModWheel(v) => ch.set_mod_wheel(v),
             LiveKind::Pressure(v) => ch.set_pressure(v),
             LiveKind::KeyPressure { key, value } => ch.set_key_pressure(key, value),
-            LiveKind::Note(_) | LiveKind::Cc { .. } => {}
+            LiveKind::Note(_) | LiveKind::Cc { .. } | LiveKind::NoteExpr { .. } => {}
         }
+    }
+
+    /// An MPE expression on a held key: plugins as a note expression, built-in instruments on
+    /// the voices holding the key.
+    fn note_expression(&mut self, slot: usize, key: u8, kind: NoteExprKind, v: f32, offset: u32) {
+        let Some(ch) = self.channels.get_mut(slot) else {
+            return;
+        };
+        if ch.is_plugin() {
+            self.plugins
+                .note_expression(ch.plugin, offset, key, kind, v);
+        } else {
+            ch.set_note_expression(key, kind, v);
+        }
+    }
+
+    /// Where the sound of this quantum's frames will be, for MIDI going out.
+    fn frame_clock(&self) -> FrameClock {
+        let delay =
+            self.telemetry.output_latency.load(Ordering::Relaxed) as usize + self.mixer.latency();
+        FrameClock {
+            cb_ns: self.cb_ns,
+            cb_out: self.cb_out,
+            frame: self.frame_clock,
+            sample_rate: self.sample_rate,
+            delay: delay as u64,
+        }
+    }
+
+    /// MIDI clock and time code for this quantum; programs again when the song starts.
+    fn run_midi_sync(&mut self) {
+        let playing = self.transport.state() == TransportState::Playing;
+        if playing && !self.midi_playing {
+            self.midi.resend_programs();
+        }
+        self.midi_playing = playing;
+        let clock = self.frame_clock();
+        self.midi.run_sync(
+            playing,
+            self.scheduled.segments(),
+            self.sample_rate,
+            &self.transport,
+            &clock,
+        );
+    }
+
+    /// A MIDI out channel: its notes, controllers and program go to its device.
+    fn render_midi_channel(&mut self, slot: usize) {
+        let p = *self.channels[slot].params();
+        let clock = self.frame_clock();
+        let at = |offset: u32| clock.at(offset, p.hw.lead_ns);
+        self.midi.program(slot, &p.hw, at(0));
+        let mut peak = 0.0_f32;
+        for i in 0..self.scheduled.as_slice().len() {
+            let e = self.scheduled.as_slice()[i];
+            match e.kind {
+                EventKind::NoteOn {
+                    slot: s,
+                    key,
+                    velocity,
+                    ..
+                }
+                | EventKind::Chase {
+                    slot: s,
+                    key,
+                    velocity,
+                    held: true,
+                    ..
+                } if usize::from(s) == slot && !p.silenced => {
+                    self.midi.note_on(slot, &p.hw, at(e.offset), key, velocity);
+                    peak = peak.max(velocity);
+                }
+                EventKind::NoteOff { slot: s, key } if usize::from(s) == slot => {
+                    self.midi.note_off(slot, &p.hw, at(e.offset), key);
+                }
+                EventKind::Choke { slot: s } if usize::from(s) == slot => {
+                    self.midi.all_off(slot, &p.hw, at(e.offset));
+                }
+                EventKind::Wrap => self.midi.all_off(slot, &p.hw, at(e.offset)),
+                // Recorded controllers were turned into expression in `render_quantum`.
+                _ => {}
+            }
+        }
+        if self.midi.dropped > 0 {
+            let n = std::mem::take(&mut self.midi.dropped);
+            self.telemetry
+                .events_dropped
+                .fetch_add(n, Ordering::Relaxed);
+        }
+        self.telemetry.channel_peaks[slot].fetch_max(peak, Ordering::Relaxed);
     }
 
     /// Centres the bend, lifts the pedal and zeroes the wheels of a slot.
@@ -2190,6 +2339,7 @@ mod tests {
                     tick,
                     playing: true,
                     slot: 2,
+                    ..
                 } => Some((key, velocity, tick)),
                 _ => None,
             })
@@ -2710,5 +2860,123 @@ mod tests {
         p.process(&mut buf);
         let first = buf.iter().position(|&s| s != 0.0).unwrap() / 2;
         assert_eq!(first, crate::RENDER_QUANTUM, "played in the next block");
+    }
+
+    #[test]
+    fn midi_out_channels_send_notes_timed_with_the_audio() {
+        let (mut h, mut p) = engine(48_000, 2);
+        let mut out = h.take_midi_out().unwrap();
+        let live = crate::LiveInput::default();
+        live.connect(h.take_live_producer().unwrap());
+        h.send(EngineCommand::SetChannelParams {
+            slot: 0,
+            params: Box::new(crate::ChannelParams {
+                kind: crate::InstrumentKind::MidiOut,
+                hw: crate::MidiOutParams {
+                    channel: 2,
+                    program: Some(5),
+                    bank: Some(130),
+                    lead_ns: 2_000_000,
+                },
+                ..crate::ChannelParams::default()
+            }),
+        })
+        .unwrap();
+        h.send(EngineCommand::SetLiveChannel(Some(0))).unwrap();
+        h.send(EngineCommand::SetMetronome(false)).unwrap();
+        // 10 ms of output latency.
+        p.telemetry.output_latency.store(480, Ordering::Relaxed);
+        let ms = 1_000_000;
+        let mut buf = vec![0.0; 960];
+        p.process_at(&mut buf, 1_000 * ms);
+        let mut got = Vec::new();
+        while let Ok(e) = out.pop() {
+            got.push((e.at_ns, e.message().to_vec()));
+        }
+        // Bank (130 = 1 · 128 + 2) and program at once, on MIDI channel 3.
+        let msgs: Vec<_> = got.iter().map(|g| g.1.clone()).collect();
+        assert_eq!(
+            msgs,
+            vec![vec![0xB2, 0, 1], vec![0xB2, 32, 2], vec![0xC2, 5]]
+        );
+        // A key 5 ms into the first callback plays 5 ms into the second, which the device
+        // plays 10 ms late: 1025 ms, sent 2 ms early.
+        live.send(crate::LiveEvent {
+            kind: crate::LiveKind::Note(crate::LiveNote::on(60, 1.0)),
+            port: 0,
+            channel: 0,
+            at_ns: 1_005 * ms,
+        });
+        p.process_at(&mut buf, 1_010 * ms);
+        let e = out.pop().unwrap();
+        assert_eq!(e.message(), &[0x92, 60, 127]);
+        let expected = 1_023 * ms as i64;
+        assert!((e.at_ns as i64 - expected).abs() < 30_000, "{}", e.at_ns);
+        // The audio stays silent: the device makes the sound.
+        assert!(buf.iter().all(|s| *s == 0.0));
+        // A new song releases the held key on the device.
+        h.send(EngineCommand::SetSong(Box::default())).unwrap();
+        p.process_at(&mut buf, 1_020 * ms);
+        assert_eq!(out.pop().unwrap().message(), &[0x82, 60, 0]);
+        assert!(out.pop().is_err());
+    }
+
+    #[test]
+    fn mpe_values_sent_before_a_note_start_it_and_reach_its_voice() {
+        let (mut h, mut p, live) = live_synth(&[0]);
+        h.send(EngineCommand::SetLiveChannel(Some(0))).unwrap();
+        h.send(EngineCommand::Play).unwrap();
+        let mut buf = vec![0.0; 480];
+        p.process(&mut buf);
+        let expr = |kind, value| crate::LiveEvent {
+            kind: crate::LiveKind::NoteExpr {
+                key: 62,
+                kind,
+                value,
+            },
+            port: 0,
+            channel: 0,
+            at_ns: 0,
+        };
+        live.send(expr(crate::NoteExprKind::Tuning, 0.25));
+        live.send(expr(crate::NoteExprKind::Timbre, 0.9));
+        live.send(crate::LiveNote::on(62, 0.8));
+        p.process(&mut buf);
+        let mut started = Vec::new();
+        h.poll_events(|e| {
+            if let crate::EngineEvent::LiveNote { key, expr, .. } = e {
+                started.push((key, expr));
+            }
+        });
+        assert_eq!(started.len(), 1);
+        let (key, e) = started[0];
+        assert_eq!(key, 62);
+        assert!((e.fine - 25.0).abs() < 1e-4 && (e.mod_x - 0.9).abs() < 1e-6);
+        // The next note on that key starts neutral again.
+        live.send(crate::LiveNote::off(62));
+        live.send(crate::LiveNote::on(62, 0.8));
+        p.process(&mut buf);
+        let mut again = Vec::new();
+        h.poll_events(|e| {
+            if let crate::EngineEvent::LiveNote { expr, velocity, .. } = e {
+                if velocity > 0.0 {
+                    again.push(expr);
+                }
+            }
+        });
+        assert_eq!(again, vec![crate::NoteExpr::default()]);
+        // Bending the held key an octave retunes its voice.
+        let pitch = |p: &mut AudioProcessor| {
+            let mut b = vec![0.0; 4800];
+            p.process(&mut b);
+            let mut d = gt_dsp::analysis::PitchDetector::new(1024);
+            d.detect(&b[2048..], 48_000.0, 50.0, 2000.0)
+                .map(|(hz, _)| hz)
+        };
+        let before = pitch(&mut p).unwrap();
+        live.send(expr(crate::NoteExprKind::Tuning, 12.0));
+        p.process(&mut buf);
+        let after = pitch(&mut p).unwrap();
+        assert!((after / before - 2.0).abs() < 0.03, "{before} -> {after}");
     }
 }

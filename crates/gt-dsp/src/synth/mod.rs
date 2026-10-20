@@ -264,6 +264,8 @@ struct Voice {
     sustained: bool,
     /// Polyphonic aftertouch on this voice's key, 0 to 1.
     pressure: f32,
+    /// MPE pitch on this voice's key, semitones.
+    tuning: f32,
     key: u8,
     age: u64,
     velocity: f32,
@@ -326,6 +328,7 @@ impl Voice {
             held: false,
             sustained: false,
             pressure: 0.0,
+            tuning: 0.0,
             key: 0,
             age: 0,
             velocity: 0.0,
@@ -389,6 +392,7 @@ impl Voice {
         self.held = true;
         self.sustained = false;
         self.pressure = 0.0;
+        self.tuning = 0.0;
         self.key = key;
         self.age = age;
         self.velocity = velocity.clamp(0.0, 1.0);
@@ -486,7 +490,7 @@ impl Voice {
         } else {
             self.pitch += (self.target_pitch - self.pitch) * glide_coef;
         }
-        let base = self.pitch + x.bend_semis + md(ModDest::Pitch) * 12.0;
+        let base = self.pitch + self.tuning + x.bend_semis + md(ModDest::Pitch) * 12.0;
         let n = usize::from(p.unison.clamp(1, MAX_UNISON as u8));
         self.n_uni = n;
         let detune = (p.unison_detune_cents + md(ModDest::UnisonDetune) * 100.0).clamp(0.0, 100.0);
@@ -989,6 +993,26 @@ impl GloomSynth {
         for v in &mut self.voices {
             if v.active && v.key == key {
                 v.pressure = value.clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    /// Per-note pitch on `key` (MPE), in semitones from the note's own pitch.
+    pub fn set_key_tuning(&mut self, key: u8, semitones: f32) {
+        for v in &mut self.voices {
+            if v.active && v.key == key {
+                // The note's own fine pitch already moved its target; this is the rest.
+                let own = v.target_pitch - f32::from(v.key);
+                v.tuning = semitones.clamp(-96.0, 96.0) - own;
+            }
+        }
+    }
+
+    /// Per-note timbre on `key` (MPE CC 74), 0 to 1: moves mod X like the note's own value.
+    pub fn set_key_timbre(&mut self, key: u8, value: f32) {
+        for v in &mut self.voices {
+            if v.active && v.key == key {
+                v.mod_x = (value.clamp(0.0, 1.0) - 0.5) * 2.0;
             }
         }
     }

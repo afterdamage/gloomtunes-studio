@@ -461,6 +461,11 @@ impl GloomApp {
             record_mode: m.mode.key().to_owned(),
             loop_passes: m.passes.key().to_owned(),
             automation_mode: m.automation.key().to_owned(),
+            mpe_ports: self.midi.mpe_ports(),
+            clock_out_ports: self.sync.clock_out.clone(),
+            mtc_out_ports: self.sync.mtc_out.clone(),
+            mtc_fps: m.mtc_rate.fps(),
+            clock_in_port: m.clock_in.clone(),
         };
         s.set_keymap(&self.keymap);
         s.theme = ThemePrefs::from_theme(&self.theme);

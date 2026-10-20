@@ -23,6 +23,7 @@ mod denormal;
 pub mod input;
 mod live;
 mod load;
+pub mod midi_out;
 mod mixer;
 mod plugin;
 mod processor;
@@ -44,10 +45,11 @@ pub use input::{
     CalibrationSink, InputFeed, InputRoute, InputRoutes, RecMark, RecordSink, MAX_RECORD_LANES,
 };
 pub use live::{
-    clock_ns, control_kind, LiveEvent, LiveInput, LiveKind, LiveNote, LiveRoutes, RetroBuffer,
-    KEYBOARD, LIVE_CAPACITY, RETRO_CAPACITY, ROUTE_PORTS,
+    clock_ns, control_kind, LiveEvent, LiveInput, LiveKind, LiveNote, LiveRoutes, NoteExprKind,
+    RetroBuffer, KEYBOARD, LIVE_CAPACITY, RETRO_CAPACITY, ROUTE_PORTS,
 };
 pub use load::LoadMeter;
+pub use midi_out::{MidiOutEvent, MidiOutParams, MidiSyncSettings};
 pub use mixer::{
     create_effect, create_effect_with, EffectBox, MixerParams, SendParams, StripParams,
     MAX_PDC_FRAMES,
@@ -296,6 +298,7 @@ pub struct EngineHandle {
     events: Consumer<EngineEvent>,
     garbage: Consumer<Garbage>,
     live: Option<Producer<LiveEvent>>,
+    midi_out: Option<Consumer<MidiOutEvent>>,
     telemetry: Arc<Telemetry>,
     config: EngineConfig,
     /// Strips the engine's mixer has (or will have once the queued settings arrive).
@@ -353,6 +356,12 @@ impl EngineHandle {
         self.live.take()
     }
 
+    /// The receiving end of this engine's MIDI out queue (MIDI out channels, clock, time
+    /// code), for the thread that sends to the ports. Returns it once.
+    pub fn take_midi_out(&mut self) -> Option<Consumer<MidiOutEvent>> {
+        self.midi_out.take()
+    }
+
     /// Read-only access to the published telemetry.
     pub fn telemetry(&self) -> &Telemetry {
         &self.telemetry
@@ -377,6 +386,7 @@ pub fn create(config: EngineConfig) -> (EngineHandle, AudioProcessor) {
     let (evt_tx, evt_rx) = RingBuffer::new(EVENT_CAPACITY);
     let (gc_tx, gc_rx) = RingBuffer::new(GARBAGE_CAPACITY);
     let (live_tx, live_rx) = RingBuffer::new(LIVE_CAPACITY);
+    let (midi_tx, midi_rx) = RingBuffer::new(midi_out::MIDI_OUT_CAPACITY);
     let processor = AudioProcessor::new(
         config,
         Arc::clone(&telemetry),
@@ -384,12 +394,14 @@ pub fn create(config: EngineConfig) -> (EngineHandle, AudioProcessor) {
         evt_tx,
         gc_tx,
         live_rx,
+        midi_tx,
     );
     let handle = EngineHandle {
         commands: cmd_tx,
         events: evt_rx,
         garbage: gc_rx,
         live: Some(live_tx),
+        midi_out: Some(midi_rx),
         telemetry,
         config,
         mixer_strips: processor.mixer_capacity(),

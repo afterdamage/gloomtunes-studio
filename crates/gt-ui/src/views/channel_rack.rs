@@ -258,6 +258,13 @@ pub fn channel_rack(
                     add = Some(5);
                 }
                 if ui
+                    .button(tr("+ MIDI out"))
+                    .on_hover_text(tr("Add a MIDI out channel: its notes play an external synth or drum machine"))
+                    .clicked()
+                {
+                    add = Some(9);
+                }
+                if ui
                     .button(tr("+ Plugin"))
                     .on_hover_text(tr("Add a channel playing a CLAP instrument plugin"))
                     .clicked()
@@ -272,6 +279,7 @@ pub fn channel_rack(
             1 => project.add_synth_channel(&format!("Synth {n}"), gt_core::SynthPatch::default()),
             2 => project.add_drum_channel(&format!("Drums {n}")),
             5 => project.add_layer_channel(&format!("Layer {n}")),
+            9 => project.add_midi_out_channel(&format!("MIDI out {n}")),
             6 => project.add_drum_synth_channel(&format!("Drum synth {n}")),
             8 => project.add_player_channel(&format!("Player {n}"), gt_core::Player::default()),
             3 | 4 | 7 => {

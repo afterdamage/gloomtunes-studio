@@ -15,6 +15,20 @@ pub struct MidiPortRow {
     pub enabled: bool,
     /// It is connected now.
     pub connected: bool,
+    /// It is an MPE controller (lower zone: notes on channels 2 to 16 carry their own pitch,
+    /// pressure and timbre).
+    pub mpe: bool,
+}
+
+/// One MIDI output port and what the engine sends it besides MIDI out channels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MidiOutRow {
+    /// Port name.
+    pub name: String,
+    /// MIDI clock, start, stop and song position.
+    pub clock: bool,
+    /// MIDI Time Code.
+    pub mtc: bool,
 }
 
 /// What recording does to the notes already in the pattern.
@@ -168,6 +182,16 @@ pub struct MidiPanelModel {
     pub routes: Vec<MidiRouteRow>,
     /// Rack channel names, for route targets.
     pub channels: Vec<String>,
+    /// Output ports from the last scan.
+    pub outputs: Vec<MidiOutRow>,
+    /// Why MIDI output is unavailable, if it is.
+    pub out_error: Option<String>,
+    /// Time code frame rate.
+    pub mtc_rate: gt_core::MtcRate,
+    /// Input port whose MIDI clock the transport follows.
+    pub clock_in: Option<String>,
+    /// The external tempo while following.
+    pub clock_bpm: Option<f64>,
 }
 
 impl Default for MidiPanelModel {
@@ -185,6 +209,11 @@ impl Default for MidiPanelModel {
             automation: AutoMode::Latch,
             routes: Vec::new(),
             channels: Vec::new(),
+            outputs: Vec::new(),
+            out_error: None,
+            mtc_rate: gt_core::MtcRate::default(),
+            clock_in: None,
+            clock_bpm: None,
         }
     }
 }
@@ -196,6 +225,10 @@ pub enum MidiAction {
     SetPortEnabled(String, bool),
     /// `routes` changed (they belong to the project).
     RoutesChanged,
+    /// Mark an input port as an MPE controller, by name.
+    SetPortMpe(String, bool),
+    /// Clock or time code out, the time code rate or the clock source changed.
+    SyncChanged,
 }
 
 /// Draws the panel; edits `m` in place.
@@ -215,6 +248,16 @@ pub fn midi_panel(ui: &mut Ui, theme: &GloomTheme, m: &mut MidiPanelModel) -> Ve
             if ui.checkbox(&mut p.enabled, p.name.as_str()).changed() {
                 actions.push(MidiAction::SetPortEnabled(p.name.clone(), p.enabled));
             }
+            if ui
+                .checkbox(&mut p.mpe, tr("MPE"))
+                .on_hover_text(tr(
+                    "An MPE controller: each note on channels 2 to 16 bends, presses and \
+                     changes timbre on its own (lower zone, bend range 48)",
+                ))
+                .changed()
+            {
+                actions.push(MidiAction::SetPortMpe(p.name.clone(), p.mpe));
+            }
             if p.enabled && !p.connected {
                 ui.label(RichText::new(tr("cannot open")).color(theme.warn));
             }
@@ -226,6 +269,9 @@ pub fn midi_panel(ui: &mut Ui, theme: &GloomTheme, m: &mut MidiPanelModel) -> Ve
     )));
     if routes(ui, m) {
         actions.push(MidiAction::RoutesChanged);
+    }
+    if sync(ui, theme, m) {
+        actions.push(MidiAction::SyncChanged);
     }
     ui.add_space(6.0);
     ui.label(RichText::new(tr("Recording")).strong());
@@ -302,6 +348,59 @@ pub fn midi_panel(ui: &mut Ui, theme: &GloomTheme, m: &mut MidiPanelModel) -> Ve
             ui.end_row();
         });
     actions
+}
+
+/// Outputs, clock and time code out, and following an external clock. True when it changed.
+fn sync(ui: &mut Ui, theme: &GloomTheme, m: &mut MidiPanelModel) -> bool {
+    let dim = |s: &str| RichText::new(s).color(theme.text_dim);
+    let mut changed = false;
+    ui.add_space(6.0);
+    ui.label(RichText::new(tr("MIDI outputs and sync")).strong());
+    if let Some(e) = &m.out_error {
+        ui.label(RichText::new(e.as_str()).color(theme.warn));
+    } else if m.outputs.is_empty() {
+        ui.label(dim(tr("No MIDI outputs found.")));
+    }
+    for o in &mut m.outputs {
+        ui.horizontal(|ui| {
+            ui.label(o.name.as_str());
+            changed |= ui
+                .checkbox(&mut o.clock, tr("Clock"))
+                .on_hover_text(tr("Send MIDI clock, start, stop and song position"))
+                .changed();
+            changed |= ui
+                .checkbox(&mut o.mtc, tr("Time code"))
+                .on_hover_text(tr("Send MIDI Time Code"))
+                .changed();
+        });
+    }
+    ui.horizontal(|ui| {
+        ui.label(dim(tr("Time code rate")));
+        for r in gt_core::MtcRate::ALL {
+            changed |= ui
+                .selectable_value(&mut m.mtc_rate, r, format!("{} fps", r.fps()))
+                .changed();
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label(dim(tr("Follow clock from")));
+        let none = tr("Nothing (internal clock)");
+        egui::ComboBox::from_id_salt("clock_in")
+            .width(200.0)
+            .selected_text(m.clock_in.as_deref().unwrap_or(none))
+            .show_ui(ui, |ui| {
+                changed |= ui.selectable_value(&mut m.clock_in, None, none).changed();
+                for p in &m.ports {
+                    changed |= ui
+                        .selectable_value(&mut m.clock_in, Some(p.name.clone()), p.name.as_str())
+                        .changed();
+                }
+            });
+        if let Some(bpm) = m.clock_bpm.filter(|_| m.clock_in.is_some()) {
+            ui.label(format!("{bpm:.2} BPM"));
+        }
+    });
+    changed
 }
 
 /// The route list. True when it changed.

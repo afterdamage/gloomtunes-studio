@@ -670,6 +670,15 @@ impl ChannelSlot {
         self.synth.set_key_pressure(key, v);
     }
 
+    /// An MPE expression on `key` (the synth's voices on that key).
+    pub(crate) fn set_note_expression(&mut self, key: u8, kind: crate::NoteExprKind, v: f32) {
+        match kind {
+            crate::NoteExprKind::Tuning => self.synth.set_key_tuning(key, v),
+            crate::NoteExprKind::Pressure => self.synth.set_key_pressure(key, v),
+            crate::NoteExprKind::Timbre => self.synth.set_key_timbre(key, v),
+        }
+    }
+
     /// The live expression: bend in semitones, mod wheel and aftertouch.
     pub(crate) fn expression(&self) -> Expression {
         self.expr

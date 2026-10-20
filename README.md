@@ -270,6 +270,14 @@ and the app shows it that way. Function keys on a Mac laptop may need **fn** hel
     buffer plus an extra amount if your notes land late.
   - Right-click a knob, fader or control and pick **MIDI learn**, then move a controller (Esc
     cancels). **Forget MIDI** removes the binding. Bindings are saved with the project.
+  - **+ MIDI out** in the rack adds a channel that plays an external synth: pick its output
+    port, MIDI channel, program and bank, and the device's latency (notes go out that much
+    early). Its patterns, recorded controllers and live playing go to the device.
+  - **Settings > Audio and MIDI > MIDI outputs and sync**: tick **Clock** or **Time code** on
+    an output to send MIDI clock (with start, stop and song position) or MTC at 24, 25 or 30
+    fps. **Follow clock from** makes the transport and tempo follow another device's clock.
+  - Tick **MPE** on an input for an MPE controller: each note's own bend, pressure and timbre
+    (CC 74) play on its voice and its starting tuning and timbre are recorded into the note.
 - **CLAP plugins:**
   - At start the app looks for `.clap` files in `CLAP_PATH`, the standard folders
     (`~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap` on Linux; `Common Files\CLAP` and

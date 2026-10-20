@@ -301,6 +301,8 @@ pub enum Instrument {
     Layer(crate::rack::LayerSettings),
     /// Plays a sound pack's preset with macro knobs (Prompt 28).
     Player(Box<crate::player::Player>),
+    /// Sends its notes to an external MIDI device (Prompt 33); makes no sound of its own.
+    MidiOut(crate::hardware::MidiOutSettings),
 }
 
 impl Channel {
@@ -414,7 +416,25 @@ impl Channel {
             Instrument::Drums(k) => Box::new(k.sources_mut()),
             Instrument::Synth(p) => Box::new(p.tables.iter_mut().flatten()),
             Instrument::Player(p) => Box::new(p.base.sources_mut()),
-            Instrument::Plugin(_) | Instrument::Layer(_) => Box::new(std::iter::empty()),
+            Instrument::Plugin(_) | Instrument::Layer(_) | Instrument::MidiOut(_) => {
+                Box::new(std::iter::empty())
+            }
+        }
+    }
+
+    /// Where a MIDI out channel sends, if this is one.
+    pub fn midi_out(&self) -> Option<&crate::hardware::MidiOutSettings> {
+        match &self.instrument {
+            Instrument::MidiOut(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Mutable MIDI out settings, if this is a MIDI out channel.
+    pub fn midi_out_mut(&mut self) -> Option<&mut crate::hardware::MidiOutSettings> {
+        match &mut self.instrument {
+            Instrument::MidiOut(m) => Some(m),
+            _ => None,
         }
     }
 
@@ -1058,6 +1078,7 @@ impl Project {
                 Instrument::Plugin(p) => p.sanitize(),
                 Instrument::Drums(k) => k.sanitize(inserts),
                 Instrument::Layer(_) => {}
+                Instrument::MidiOut(m) => m.sanitize(),
             }
             c.swing = c.swing.filter(|s| s.is_finite()).map(|s| s.clamp(0.0, 1.0));
             c.choke = c.choke.min(Channel::CHOKE_GROUPS);
@@ -1188,6 +1209,15 @@ impl Project {
         self.add_instrument(
             name,
             Instrument::Layer(crate::rack::LayerSettings::default()),
+        )
+    }
+
+    /// Adds a MIDI out channel (no port yet) at the bottom of the rack. `None` when the rack is
+    /// full.
+    pub fn add_midi_out_channel(&mut self, name: &str) -> Option<ChannelId> {
+        self.add_instrument(
+            name,
+            Instrument::MidiOut(crate::hardware::MidiOutSettings::default()),
         )
     }
 
