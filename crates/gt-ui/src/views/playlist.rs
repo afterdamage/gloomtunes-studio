@@ -238,6 +238,8 @@ pub struct PlaylistState {
     pub armed: Vec<TrackId>,
     /// Performance mode: the playlist shows the launch grid (Prompt 31).
     pub performance: bool,
+    /// An audio clip to open in the audio editor (the app takes it).
+    pub edit_audio: Option<ClipId>,
     drag: Option<Drag>,
     /// Loop region being dragged (preview).
     loop_preview: Option<(i64, i64)>,
@@ -261,6 +263,7 @@ impl Default for PlaylistState {
             selected_tracks: Vec::new(),
             armed: Vec::new(),
             performance: false,
+            edit_audio: None,
             drag: None,
             loop_preview: None,
             popup: None,
@@ -1904,6 +1907,7 @@ fn show_popup(
     let selection = st.selected.clone();
     let mut select = None;
     let mut next = None;
+    let mut open_editor = None;
     let area = egui::Area::new(ui.id().with("pl_popup"))
         .order(egui::Order::Foreground)
         .fixed_pos(pos)
@@ -2161,6 +2165,14 @@ fn show_popup(
                         {
                             next = Some(Popup::Source(id));
                         }
+                        if ui
+                            .button(tr("Edit audio..."))
+                            .on_hover_text(tr("Open the clip's sound in the audio editor"))
+                            .clicked()
+                        {
+                            open_editor = Some(id);
+                            close = true;
+                        }
                     }
                     Popup::Source(id) => {
                         let Some(c) = project.playlist.clip(id) else {
@@ -2304,6 +2316,9 @@ fn show_popup(
     let combo_open = egui::Popup::is_any_open(ui.ctx());
     if let Some(sel) = select {
         st.selected = sel;
+    }
+    if open_editor.is_some() {
+        st.edit_audio = open_editor;
     }
     if let Some(p) = next {
         st.popup = Some((p, pos, 0));

@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod arrangement;
+pub mod audio_midi;
 pub mod autorec;
 pub mod demos;
 pub mod drum_synth;

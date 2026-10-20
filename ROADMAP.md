@@ -778,6 +778,20 @@ sound identical; the golden export test stays.
   automation clips are not launchable (they keep following the timeline); tempo-follow audio
   plays through the live stretch while performing.
 
+### Prompt 32: Audio editor and audio analysis
+- Audio editor (clip menu **Edit audio...**): zoomable waveform or spectrogram, selection and
+  cursor, trim, cut, copy, paste, silence, normalize, fade in/out, reverse, gain, DC removal,
+  32 undo steps; **Apply** saves an edited copy and points the clip at it (D146).
+- Spectral noise reduction learnt from a selected noise print.
+- Audio to MIDI: monophonic melodies (YIN) and drum hits (onsets, kick/snare/hat by
+  brightness) into a new pattern on a new track, placed through the tempo map.
+- Stem separation evaluated and deferred (D147): no model with clear redistribution terms
+  is ready to ship.
+- Tests: every edit on generated signals, noise reduction raising the SNR by more than 8 dB,
+  melody tracking over three octaves (keys exact, onsets within 30 ms), drum hits and classes.
+- Limits: undo keeps whole copies (long files use a lot of memory); the editor works at the
+  engine's sample rate; melody mode is monophonic; drum mode knows three classes.
+
 ---
 
 ## v1.0 scope
