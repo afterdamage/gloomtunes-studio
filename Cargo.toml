@@ -26,6 +26,8 @@ log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
 assert_no_alloc = "1.1"
 rtrb = "0.4"
+# Controller scripts (Prompt 33, D149): MIT OR Apache-2.0, sandboxed (no I/O, operation limits).
+rhai = { version = "1.20", default-features = false, features = ["std", "no_module", "no_custom_syntax", "no_time"] }
 symphonia = { version = "0.6", features = ["mp3"] }
 rubato = "5"
 hound = "3.5"

@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod controller;
 pub mod file;
 pub mod history;
 pub mod index;

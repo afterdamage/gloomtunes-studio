@@ -32,15 +32,19 @@ const SCAN_EVERY: Duration = Duration::from_secs(1);
 const RETRY_EVERY: Duration = Duration::from_secs(10);
 const CLIENT_NAME: &str = "GloomTunes Studio";
 
-/// A controller (CC) message.
+/// A controller (CC) message, or a note a controller mapping takes (D149).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MidiCc {
     /// MIDI channel 0 to 15.
     pub channel: u8,
-    /// Controller number.
+    /// Controller number, or the key of a mapped note.
     pub cc: u8,
-    /// Value 0 to 127.
+    /// Value 0 to 127 (a note's velocity, 0 for its release).
     pub value: u8,
+    /// A mapped note rather than a controller.
+    pub note: bool,
+    /// The input port's number (see [`MidiIo::port_number`]; 0 until stamped).
+    pub port: u8,
     /// When it arrived on [`gt_engine::clock_ns`]'s clock (0 until stamped), so recorded
     /// automation lands where a live note sent at the same moment would play (D111).
     pub at_ns: u64,
@@ -94,6 +98,8 @@ fn decode(msg: &[u8]) -> Option<MidiIn> {
                 channel,
                 cc: cc & 0x7F,
                 value: value & 0x7F,
+                note: false,
+                port: 0,
                 at_ns: 0,
             };
             match c.cc {
@@ -105,6 +111,9 @@ fn decode(msg: &[u8]) -> Option<MidiIn> {
         _ => None,
     }
 }
+
+/// A note a controller mapping takes: MIDI channel (`None`: any) and key.
+pub type MappedNote = (Option<u8>, u8);
 
 struct Shared {
     stop: AtomicBool,
@@ -130,6 +139,9 @@ struct Shared {
     clock_source: AtomicU32,
     /// Clock messages from the source since the UI last looked, with arrival times.
     clock: Mutex<Vec<(ClockMessage, u64)>>,
+    /// Notes a controller mapping takes instead of playing them, by port number: MIDI
+    /// channel (`None`: any) and key.
+    mapped_notes: Mutex<HashMap<u8, Vec<MappedNote>>>,
 }
 
 impl Shared {
@@ -183,6 +195,7 @@ impl MidiIo {
             clock_name: Mutex::new(None),
             clock_source: AtomicU32::new(u32::MAX),
             clock: Mutex::new(Vec::new()),
+            mapped_notes: Mutex::new(HashMap::new()),
         });
         let (tx, rx) = channel();
         let s = Arc::clone(&shared);
@@ -278,6 +291,22 @@ impl MidiIo {
     /// The number live events from port `name` carry, once it has been seen.
     pub fn port_number(&self, name: &str) -> Option<usize> {
         lock(&self.shared.numbers).iter().position(|n| n == name)
+    }
+
+    /// The name of the port numbered `number`.
+    pub fn port_name(&self, number: u8) -> Option<String> {
+        lock(&self.shared.numbers).get(usize::from(number)).cloned()
+    }
+
+    /// Notes of port `number` that go to the UI (as [`MidiCc`] with `note` set) instead of
+    /// playing.
+    pub fn set_mapped_notes(&self, number: u8, notes: Vec<MappedNote>) {
+        let mut m = lock(&self.shared.mapped_notes);
+        if notes.is_empty() {
+            m.remove(&number);
+        } else {
+            m.insert(number, notes);
+        }
     }
 
     /// Count of messages received so far (changes when anything arrives).
@@ -463,6 +492,35 @@ fn connect(
                     return;
                 }
                 shared.activity.fetch_add(1, Ordering::Relaxed);
+                let port = state.number;
+                let to_ui = |cc: MidiCc| {
+                    let cc = MidiCc {
+                        at_ns: gt_engine::clock_ns(),
+                        port,
+                        ..cc
+                    };
+                    if tx.send(cc).is_ok() {
+                        ctx.request_repaint();
+                    }
+                };
+                if let &[status @ 0x80..=0x9F, key, vel, ..] = msg {
+                    let (channel, key) = (status & 0x0F, key & 0x7F);
+                    let mapped = lock(&shared.mapped_notes).get(&port).is_some_and(|n| {
+                        n.iter()
+                            .any(|&(ch, k)| k == key && ch.is_none_or(|c| c == channel))
+                    });
+                    if mapped {
+                        to_ui(MidiCc {
+                            channel,
+                            cc: key,
+                            value: if status >= 0x90 { vel & 0x7F } else { 0 },
+                            note: true,
+                            port,
+                            at_ns: 0,
+                        });
+                        return;
+                    }
+                }
                 let mut remapped = [0u8; 3];
                 let mut msg = msg;
                 if state.number < 64 && shared.mpe.load(Ordering::Relaxed) >> state.number & 1 == 1
@@ -483,15 +541,6 @@ fn connect(
                     remapped[0] &= 0xF0;
                     msg = &remapped[..n];
                 }
-                let to_ui = |cc: MidiCc| {
-                    let cc = MidiCc {
-                        at_ns: gt_engine::clock_ns(),
-                        ..cc
-                    };
-                    if tx.send(cc).is_ok() {
-                        ctx.request_repaint();
-                    }
-                };
                 match decode(msg) {
                     Some(MidiIn::Live(LiveKind::Note(n), LAUNCH_CHANNEL))
                         if shared.launch_mode.load(Ordering::Relaxed) =>
@@ -538,6 +587,8 @@ mod tests {
                 channel: 2,
                 cc: 74,
                 value: 100,
+                note: false,
+                port: 0,
                 at_ns: 0,
             }))
         );

@@ -278,6 +278,24 @@ and the app shows it that way. Function keys on a Mac laptop may need **fn** hel
     fps. **Follow clock from** makes the transport and tempo follow another device's clock.
   - Tick **MPE** on an input for an MPE controller: each note's own bend, pressure and timbre
     (CC 74) play on its voice and its starting tuning and timbre are recorded into the note.
+  - **Controller mappings**: each input picks a mapping (the generic one unless a mapping
+    file names the port): knobs CC 21 to 28 move the selected channel's volume, pan, cutoff,
+    resonance and envelope, CC 7 on channels 1 to 8 (16) the mixer faders (master), CC 112 to
+    119 are previous/next channel, metronome, loop, previous pattern, stop, play and record.
+    Pick another or **None** per input in settings. Your own `*.gtmap.json` files go in the
+    `controllers` folder of the data folder (shown in settings, **Reload** rereads them):
+    `{"name": "...", "ports": ["part of the port name"], "controls": [{"name": "Pad 1",
+    "type": "pad", "channel": 10, "note": 36, "transport": "play"}]}`, where a control takes
+    `cc` or `note` and one of `param` (a key like `channel/selected/volume`,
+    `channel/selected/synth/filter.cutoff`, `mixer/3/pan`, or a list tried in order),
+    `transport`, `play_note` or `script`; `"relative": true` for endless encoders. A
+    mapping's `script` (or `script_file`) is Rhai with `fn on_cc(channel, cc, value)` and
+    `fn on_note(channel, key, velocity)` returning `true` when it handled the message; it may
+    call `play()`, `stop()`, `record()`, `toggle_loop()`, `toggle_metronome()`,
+    `set_tempo(bpm)`, `select_channel(i)`, `set_param(key, v)`, `set_volume(strip, v)`,
+    `set_pan(strip, v)`, `play_note(key, vel)`, `release_note(key)` and read `tempo()`,
+    `playing()`, `channel()`, `channel_name()`, `param(key)`. Learned bindings win over
+    mappings.
 - **CLAP plugins:**
   - At start the app looks for `.clap` files in `CLAP_PATH`, the standard folders
     (`~/.clap`, `/usr/lib/clap`, `/usr/local/lib/clap` on Linux; `Common Files\CLAP` and
