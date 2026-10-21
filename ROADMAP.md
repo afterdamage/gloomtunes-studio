@@ -891,6 +891,14 @@ spectral filters; (3) the modular patcher; (4) the "start from an idea" dialog.
 - Limits (PR 4): close triads only (no sevenths or inversions); one chord per bar; the lead
   ignores the bass line.
 
+### UI pass (after the prompts)
+
+- D156: drag and drop from the browser to the rack, mixer and playlist; file drops go where
+  the pointer is; previews for synth presets, drum kits, effects and projects; drum kits listed
+  in the browser; the top bar and piano roll toolbar wrap instead of clipping; the piano roll
+  opens on the channel's notes; folder rows show their name, not the full path.
+- Limits: no plugin previews; player-pack presets are not listed in the browser yet.
+
 ---
 
 ## v1.0 scope

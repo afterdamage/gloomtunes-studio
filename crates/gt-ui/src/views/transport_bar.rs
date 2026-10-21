@@ -161,7 +161,7 @@ pub fn transport_bar(
 ) -> Vec<TransportAction> {
     let mut actions = Vec::new();
     let dim = |s: &str| RichText::new(s).color(theme.text_dim);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let playing = m.state == PlayState::Playing;
         let icon = if playing { Icon::Pause } else { Icon::Play };
         if icon_button(ui, theme, icon, playing)

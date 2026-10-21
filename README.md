@@ -185,6 +185,14 @@ and the app shows it that way. Function keys on a Mac laptop may need **fn** hel
   drums, bass, chords and a lead from the factory sounds, as patterns arranged into a 28-bar
   song with markers. **Variation** (or **Next**) picks another progression and melody; the same
   settings always build the same song. Nothing goes online.
+- **Drag and drop:** drag any browser row onto a view. A sound, synth preset, drum kit or
+  instrument plugin dropped on a channel replaces its sound (or fills a drum channel's pads);
+  dropped below the channels it makes a new one. Effects and effect plugins go on a mixer
+  strip or a chosen slot (or on a channel's mixer track). Sounds dropped on the playlist become
+  audio clips. Files from the file manager go where the pointer is.
+- **Previews:** clicking a synth preset, drum kit, effect or project in the browser plays a
+  short preview (a phrase for presets, a groove for kits, a drum and pluck loop through the
+  effect, the first bars of a project). Plugins are not previewed.
 - **First start:** a short wizard picks the audio output and buffer size (with a test tone),
   an accent colour and text size, and asks whether to save crash reports (off unless you turn
   it on). **Skip** keeps the defaults. Everything it sets is in Settings afterwards.

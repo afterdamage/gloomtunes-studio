@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
 
-use gt_core::{EffectKind, EffectSlot, SampleSource, SynthPatch, Tick};
+use gt_core::{EffectKind, SampleSource, SynthPatch, Tick};
 use gt_engine::EngineCommand;
 use gt_plugin_host::PluginInfo;
 use gt_project::index::{Index, ItemKind, Query};
@@ -156,12 +156,21 @@ impl GloomApp {
             }
             BrowserTab::Instruments => {
                 for (i, p) in SynthPatch::factory().iter().enumerate() {
-                    let engine = gt_core::synth::ENGINES[usize::from(p.engine().min(2))];
+                    let engines = gt_core::synth::ENGINES;
+                    let engine = engines[usize::from(p.engine()).min(engines.len() - 1)];
                     rows.push(row(
                         format!("synth:{}", p.name),
                         p.name.clone(),
                         format!("{engine} · {}", gt_ui::tr("factory")),
                         RowItem::FactorySynth(i),
+                    ));
+                }
+                for (i, (name, _)) in gt_core::DrumKit::factory_kits().iter().enumerate() {
+                    rows.push(row(
+                        format!("kit:{name}"),
+                        (*name).to_owned(),
+                        format!("{} · {}", gt_ui::tr("Drum kit"), gt_ui::tr("factory")),
+                        RowItem::Kit(i),
                     ));
                 }
                 for (name, path) in &self.user_presets {
@@ -289,6 +298,7 @@ impl GloomApp {
             BrowserAction::Open(dir) => self.open_folder(dir),
             BrowserAction::Refresh => self.refresh_browser(),
             BrowserAction::Activate(item) => self.activate(item),
+            BrowserAction::Audition(item) => self.audition(item),
             BrowserAction::ToggleFavourite(key) => {
                 let favs = &mut self.settings.browser.favourites;
                 if let Some(i) = favs.iter().position(|k| *k == key) {
@@ -335,7 +345,7 @@ impl GloomApp {
         }
     }
 
-    fn assign_sample(&mut self, src: SampleSource) {
+    pub(super) fn assign_sample(&mut self, src: SampleSource) {
         let i = self.rack.selected;
         let Some(ch) = self.project.channels.get_mut(i) else {
             return;
@@ -369,26 +379,26 @@ impl GloomApp {
                 Ok(p) => self.load_synth(p),
                 Err(e) => self.toast(format!("Cannot load {}: {e}", path.display())),
             },
+            RowItem::Kit(k) => {
+                let i = self.rack.selected;
+                let fill = self
+                    .project
+                    .channels
+                    .get(i)
+                    .is_some_and(|c| c.drums().is_some());
+                self.drop_on_rack(fill.then_some(i), RowItem::Kit(k));
+            }
             RowItem::Effect(key, preset) => {
-                let Some(kind) = EffectKind::from_key(&key) else {
-                    return;
-                };
-                let mut slot = EffectSlot::new(kind);
-                if let Some(p) = preset.and_then(|i| kind.presets().get(i)) {
-                    slot.apply_preset(p);
-                }
                 let Some((strip, k)) = self.effect_target() else {
                     self.toast(tr("This mixer track has no free effect slot"));
                     return;
                 };
-                self.project.mixer.strips[strip].slots[k] = Some(slot);
-                self.mixer_state.selected = strip;
-                self.mixer_state.slot = Some(k);
-                self.show_view(MainView::Mixer);
-                self.pending_edit = Some("Add effect");
+                if self.add_effect(strip, Some(k), &key, preset) {
+                    self.show_view(MainView::Mixer);
+                }
             }
             RowItem::Plugin(i) => {
-                if let Some(info) = self.browse.plugins.get(i).cloned() {
+                if let Some(info) = self.browse_plugin(i) {
                     let target = self.effect_target();
                     if info.kind() == gt_core::PluginKind::Effect && target.is_none() {
                         self.toast(tr("This mixer track has no free effect slot"));
@@ -407,7 +417,7 @@ impl GloomApp {
     }
 
     /// Loads `patch` into the selected synth channel, or a new synth channel.
-    fn load_synth(&mut self, patch: SynthPatch) {
+    pub(super) fn load_synth(&mut self, patch: SynthPatch) {
         let i = self.rack.selected;
         if let Some(p) = self.project.channels.get_mut(i).and_then(|c| c.synth_mut()) {
             *p = patch;
@@ -415,14 +425,12 @@ impl GloomApp {
             self.pending_edit = Some("Load preset");
             return;
         }
-        let name = patch.name.clone();
-        if self.project.add_synth_channel(&name, patch).is_none() {
-            self.toast(tr("The channel rack is full"));
-            return;
-        }
-        self.rack.selected = self.project.channels.len() - 1;
-        self.push_channels();
-        self.pending_edit = Some("Add synth");
+        self.new_synth(patch);
+    }
+
+    /// The Plugins tab's plugin `i`.
+    pub(super) fn browse_plugin(&self, i: usize) -> Option<PluginInfo> {
+        self.browse.plugins.get(i).cloned()
     }
 
     /// Plays `data` through the preview voice, stretched to the project tempo when the sound

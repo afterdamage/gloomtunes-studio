@@ -43,7 +43,9 @@ pub use midi_panel::{
     midi_panel, AutoMode, LoopPasses, MidiAction, MidiOutRow, MidiPanelModel, MidiPortRow,
     MidiRouteRow, RecordMode,
 };
-pub use mixer::{mixer_view, MixerRequest, MixerState, MixerView, StripMeter, STRIP_ICON_GLYPHS};
+pub use mixer::{
+    mixer_view, MixerDrop, MixerRequest, MixerState, MixerView, StripMeter, STRIP_ICON_GLYPHS,
+};
 pub use modulators::{modulators_panel, ModulatorsState};
 pub use patcher::{patcher_view, PatchPlace, PatcherAction, PatcherState};
 pub use performance::{grid as performance_rows, performance_grid, PerformanceView};

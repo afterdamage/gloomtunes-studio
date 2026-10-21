@@ -165,6 +165,7 @@ pub(super) fn lane_selector(
             .unwrap_or_default(),
         Lane::Curve(k) => format!("{} {}", tr("Note"), tr(k.name()).to_lowercase()),
     };
+    super::fit(ui, 130.0);
     egui::ComboBox::from_id_salt("roll_lane")
         .width(130.0)
         .selected_text(label)

@@ -2,10 +2,12 @@
 //! effect presets, plugins and projects, a search box over the app's file index, favourites
 //! and user tags.
 //!
-//! Click a sound to hear it, double-click (or use the button) to load it into the selected
-//! channel, or drag it onto a playlist track. Double-click a preset, plugin or project to use
-//! it. The app fills the rows (searching its index on a worker-built list) and acts on the
-//! returned actions; this view only shows them.
+//! Click a row to hear it (sounds, synth presets, drum kits, effects on a demo loop and
+//! projects), double-click (or use the button) to use it, or drag it where it should go: a
+//! sound onto a playlist track or the rack, a preset or kit onto the rack (a channel row to
+//! replace its sound), an effect onto a mixer track (see [`crate::dnd`]). The app fills the
+//! rows (searching its index on a worker-built list) and acts on the returned actions; this
+//! view only shows them.
 
 use std::path::PathBuf;
 
@@ -79,7 +81,7 @@ impl BrowserTab {
 }
 
 /// What a row stands for.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowItem {
     /// A sound (built-in or a file).
     Sample(SampleSource),
@@ -89,6 +91,8 @@ pub enum RowItem {
     FactorySynth(usize),
     /// A synth preset file.
     UserSynth(PathBuf),
+    /// A factory drum synth kit, by index into `DrumKit::factory_kits()`.
+    Kit(usize),
     /// An effect preset: effect key and preset index (`None`: the effect's defaults).
     Effect(String, Option<usize>),
     /// A plugin, by index into the catalog list the app keeps.
@@ -159,6 +163,8 @@ pub struct BrowserModel {
 pub enum BrowserAction {
     /// Play the sound through the preview voice (`bpm`: its tempo, for tempo-synced preview).
     Preview(SampleSource, Option<f32>),
+    /// Play a short render of a preset, kit, effect or project through the preview voice.
+    Audition(RowItem),
     /// Load the sound into the selected channel.
     Assign(SampleSource),
     /// List another folder.
@@ -330,7 +336,14 @@ fn folder_list(
             if m.folder.as_os_str().is_empty() {
                 return;
             }
-            ui.label(dim(&m.folder.display().to_string()));
+            // The path is in the box above; name the folder only.
+            let name = m
+                .folder
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| m.folder.display().to_string());
+            ui.label(RichText::new(format!("{name}/")).strong())
+                .on_hover_text(m.folder.display().to_string());
             if let Some(parent) = m.folder.parent() {
                 if ui
                     .selectable_label(false, dim(tr(".. (up)")))
@@ -474,18 +487,19 @@ fn row_ui(
                     .sense(egui::Sense::click_and_drag()),
             )
             .on_hover_text(hover_text(row));
-        let sample = match &row.item {
-            RowItem::Sample(s) => Some(s.clone()),
-            _ => None,
-        };
-        if let Some(src) = &sample {
-            if r.drag_started() {
+        if r.drag_started() {
+            m.selected = Some(row.key.clone());
+            if let RowItem::Sample(src) = &row.item {
                 // Load it while it is being dragged, so the clip gets its length and waveform.
-                m.selected = Some(row.key.clone());
                 m.selected_sample = Some(src.clone());
                 actions.push(BrowserAction::Preview(src.clone(), row.bpm));
             }
-            r.dnd_set_drag_payload(src.clone());
+        }
+        if !matches!(row.item, RowItem::Folder(_)) {
+            r.dnd_set_drag_payload(crate::dnd::Dragged {
+                item: row.item.clone(),
+                name: row.name.clone(),
+            });
         }
         if r.double_clicked() {
             m.selected = Some(row.key.clone());
@@ -502,7 +516,8 @@ fn row_ui(
                     actions.push(BrowserAction::Preview(s.clone(), row.bpm));
                 }
                 RowItem::Folder(p) => actions.push(BrowserAction::Open(p.clone())),
-                _ => {}
+                RowItem::Plugin(_) => {}
+                other => actions.push(BrowserAction::Audition(other.clone())),
             }
         }
         r.context_menu(|ui| {
@@ -564,23 +579,39 @@ fn row_ui(
 fn hover_text(row: &BrowserRow) -> String {
     match &row.item {
         RowItem::Sample(_) => tr(
-            "Click to hear, double-click to load into the selected channel, drag onto a \
-             playlist track for an audio clip; right-click for tags",
+            "Click to hear, double-click to load into the selected channel. Drag onto a \
+             playlist track for an audio clip, onto the channel rack for a new sampler, or \
+             onto a channel to replace its sound; right-click for tags",
         )
         .to_owned(),
         RowItem::Folder(_) => tr("Open this folder").to_owned(),
-        RowItem::FactorySynth(_) | RowItem::UserSynth(_) => {
-            tr("Double-click to load into the selected synth channel (or a new one)").to_owned()
-        }
-        RowItem::Effect(..) => {
-            tr("Double-click to add to the selected mixer track's first free slot").to_owned()
-        }
-        RowItem::Plugin(_) => tr(
-            "Double-click to add: an instrument as a new channel, an effect to the selected \
+        RowItem::FactorySynth(_) | RowItem::UserSynth(_) => tr(
+            "Click to hear, double-click to load into the selected synth channel (or a new \
+             one). Drag onto the channel rack for a new channel, or onto a synth channel to \
+             replace its sound",
+        )
+        .to_owned(),
+        RowItem::Kit(_) => tr(
+            "Click to hear, double-click to load into the selected drum channel (or a new \
+             one). Drag onto the channel rack for a new channel, or onto a drum channel",
+        )
+        .to_owned(),
+        RowItem::Effect(..) => tr(
+            "Click to hear it on a demo loop, double-click to add to the selected mixer \
+             track. Drag onto a mixer track or an effect slot, or onto a channel for its \
              mixer track",
         )
         .to_owned(),
-        RowItem::Project(p) => format!("{}\n{}", tr("Double-click to open"), p.display()),
+        RowItem::Plugin(_) => tr(
+            "Double-click to add: an instrument as a new channel, an effect to the selected \
+             mixer track. Or drag it onto the channel rack or a mixer track",
+        )
+        .to_owned(),
+        RowItem::Project(p) => format!(
+            "{}\n{}",
+            tr("Click to hear the start, double-click (or drag into the window) to open"),
+            p.display()
+        ),
     }
 }
 
