@@ -129,11 +129,19 @@ pub enum ModDest {
     EnvDecay,
     /// Release time of this voice's envelopes, ±4 octaves (at the note start).
     EnvRelease,
+    /// Additive: spectral filter frequency, ±6 octaves.
+    SpecCutoff,
+    /// Additive: tilt, ±12 dB per octave.
+    AddTilt,
+    /// Additive: resynthesis position, ±1.
+    AddPosition,
+    /// Additive: morph, ±1.
+    AddMorph,
 }
 
 impl ModDest {
     /// Number of destinations (including `Off`).
-    pub const COUNT: usize = 28;
+    pub const COUNT: usize = 32;
 }
 
 /// One row of the modulation matrix.

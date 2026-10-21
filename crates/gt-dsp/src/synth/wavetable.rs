@@ -244,6 +244,8 @@ pub struct SynthTables {
     pub bank: Arc<WtBank>,
     /// User tables of oscillators 1 and 2.
     pub user: [Option<Arc<Wavetable>>; 2],
+    /// The additive engine's resynthesized sample (Prompt 34).
+    pub resynth: Option<Arc<super::additive::Resynth>>,
 }
 
 impl SynthTables {
@@ -252,6 +254,7 @@ impl SynthTables {
         Self {
             bank: factory_bank(),
             user: [None, None],
+            resynth: None,
         }
     }
 

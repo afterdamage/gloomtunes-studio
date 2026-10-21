@@ -857,6 +857,16 @@ spectral filters; (3) the modular patcher; (4) the "start from an idea" dialog.
 - Limits (PR 1): one curve per note (up to 8 points), sent once per 32-frame quantum and
   starting one quantum after its note; envelope-time destinations act at the note start
   only; FM operator envelopes do not follow them; the sampler ignores tuning curves.
+- PR 2 (D153): **additive/spectral synth**, Gloom Synth's fifth engine (`gt_dsp::synth::
+  additive`): 64 sine partials from a 32-harmonic editor with tilt, odd/even balance and
+  inharmonic stretch; **resynthesis** of a loaded sample (pitch by YIN, harmonic levels per
+  frame by FFT) with morph, position and scan; **spectral filters** (low/high/band-pass,
+  notch, comb, formant) applied per partial; four new matrix destinations; five presets.
+- Tests: harmonic levels, tilt and even balance in the output; spectral filter gains;
+  resynthesis of a known tone (and none for noise); a resynthesised sample playing with its
+  harmonic balance; every factory preset sounding and bounded.
+- Limits (PR 2): resynthesis follows the harmonics of one pitch (no noise part, no inharmonic
+  partials from the sample); the sample shares the first wavetable slot.
 
 ---
 

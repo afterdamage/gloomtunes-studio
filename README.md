@@ -168,6 +168,12 @@ and the app shows it that way. Function keys on a Mac laptop may need **fn** hel
   `%APPDATA%\GloomTunes Studio\Presets\Gloom Synth` on Windows,
   `~/Library/Application Support/GloomTunes Studio/Presets/Gloom Synth` on macOS or
   `~/.local/share/gloomtunes-studio/presets/gloom-synth` on Linux, as a `.gloomsynth` JSON file.
+  - **Engine: Additive** builds the sound from 64 sine partials. Drag across the harmonic bars
+    to draw the levels (or pick Sine, Saw, Square, Triangle, Organ); Tilt, Even and Stretch
+    shape the spectrum. **Load…** under Resynthesis analyses a pitched recording into harmonic
+    levels over time: Morph blends it with the bars, Position and Scan pick where and how fast
+    it plays. The spectral filter (low/high/band-pass, notch, comb, formant vowels) shapes the
+    partials directly, so it never rings or clips.
 - **First start:** a short wizard picks the audio output and buffer size (with a test tone),
   an accent colour and text size, and asks whether to save crash reports (off unless you turn
   it on). **Skip** keeps the defaults. Everything it sets is in Settings afterwards.
