@@ -42,6 +42,10 @@ pub struct MixerState {
     pub remove_request: Option<usize>,
     /// Something only the app can do (presets, track links).
     pub request: Option<MixerRequest>,
+    /// The open patcher slot's editor.
+    pub patcher: crate::views::PatcherState,
+    /// The user chose "Plugin…" in this (strip, slot)'s patch: the app adds the plugin there.
+    pub patch_plugin_request: Option<(usize, usize)>,
 }
 
 /// What the mixer asks of the app.
@@ -84,6 +88,8 @@ impl Default for MixerState {
             analyzer: AnalyzerState::default(),
             remove_request: None,
             request: None,
+            patcher: crate::views::PatcherState::default(),
+            patch_plugin_request: None,
         }
     }
 }
@@ -748,6 +754,8 @@ fn detail(
                         for kind in EffectKind::ALL {
                             ui.selectable_value(&mut pick, Some(kind), kind.name());
                         }
+                        ui.selectable_value(&mut pick, Some(EffectKind::Patcher), tr("Patcher"))
+                            .on_hover_text(tr("A modular patch of modules, effects and plugins"));
                         ui.separator();
                         if ui
                             .selectable_label(false, tr("Plugin…"))
@@ -835,6 +843,28 @@ fn detail(
                 plugin_controls(ui, theme, owner, p, pv, &mut state.plugin_actions)
             } else if slot.kind == EffectKind::Plugin {
                 false
+            } else if let Some(patch) = slot.patch.as_deref_mut() {
+                let missing = PluginPanelView::default();
+                let pv = view.plugin.unwrap_or(&missing);
+                let mut acts = Vec::new();
+                let c = crate::views::patcher_view(
+                    ui,
+                    theme,
+                    crate::views::PatchPlace::Effect { strip: i, slot: k },
+                    patch,
+                    &mut state.patcher,
+                    pv,
+                    &mut acts,
+                );
+                for a in acts {
+                    match a {
+                        crate::views::PatcherAction::AddPlugin => {
+                            state.patch_plugin_request = Some((i, k));
+                        }
+                        crate::views::PatcherAction::Plugin(pa) => state.plugin_actions.push(pa),
+                    }
+                }
+                c
             } else if slot.kind == EffectKind::Eq {
                 eq_editor(
                     ui,

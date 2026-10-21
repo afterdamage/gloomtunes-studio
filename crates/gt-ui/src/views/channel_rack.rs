@@ -258,6 +258,13 @@ pub fn channel_rack(
                     add = Some(5);
                 }
                 if ui
+                    .button(tr("+ Patcher"))
+                    .on_hover_text(tr("Add a modular patcher: wire oscillators, filters, envelopes, effects and plugins freely"))
+                    .clicked()
+                {
+                    add = Some(10);
+                }
+                if ui
                     .button(tr("+ MIDI out"))
                     .on_hover_text(tr("Add a MIDI out channel: its notes play an external synth or drum machine"))
                     .clicked()
@@ -280,6 +287,7 @@ pub fn channel_rack(
             2 => project.add_drum_channel(&format!("Drums {n}")),
             5 => project.add_layer_channel(&format!("Layer {n}")),
             9 => project.add_midi_out_channel(&format!("MIDI out {n}")),
+            10 => project.add_patcher_channel(&format!("Patcher {n}")),
             6 => project.add_drum_synth_channel(&format!("Drum synth {n}")),
             8 => project.add_player_channel(&format!("Player {n}"), gt_core::Player::default()),
             3 | 4 | 7 => {

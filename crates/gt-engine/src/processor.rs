@@ -768,6 +768,10 @@ impl AudioProcessor {
             self.render_midi_channel(slot);
             return;
         }
+        if self.channels[slot].is_patcher() {
+            self.render_patch_channel(slot, pctx);
+            return;
+        }
         let touches = |e: &&ScheduledEvent| match e.kind {
             EventKind::Wrap => true,
             k => k.slot() == Some(slot as u16),
@@ -831,6 +835,63 @@ impl AudioProcessor {
                 }
             });
         }
+        self.telemetry.channel_peaks[slot].fetch_max(peak, Ordering::Relaxed);
+        if self.scope_slot == Some(slot) {
+            for (l, r) in self.scratch_l.iter_mut().zip(&self.scratch_r) {
+                *l = 0.5 * (*l + r);
+            }
+            self.write_scope();
+        }
+    }
+
+    /// Renders a patcher channel: its notes go to the patch at their offsets, the patch runs
+    /// one quantum (its plugin modules from the plugin table), then gain and pan.
+    fn render_patch_channel(&mut self, slot: usize, pctx: &PluginContext) {
+        let ch = &mut self.channels[slot];
+        let Some(patch) = ch.patch.as_mut() else {
+            return;
+        };
+        for e in self.scheduled.as_slice() {
+            match e.kind {
+                EventKind::NoteOn {
+                    slot: s,
+                    key,
+                    velocity,
+                    ..
+                }
+                | EventKind::Chase {
+                    slot: s,
+                    key,
+                    velocity,
+                    held: true,
+                    ..
+                } if usize::from(s) == slot => patch.note_on(e.offset, key, velocity),
+                EventKind::NoteOff { slot: s, key } if usize::from(s) == slot => {
+                    patch.note_off(e.offset, key);
+                }
+                EventKind::Wrap => patch.release_all(e.offset),
+                EventKind::Choke { slot: s } if usize::from(s) == slot => {
+                    patch.release_all(e.offset);
+                }
+                _ => {}
+            }
+        }
+        let fx = gt_dsp::FxContext {
+            bpm: pctx.bpm as f32,
+            sidechain: None,
+            beats: pctx.playing.then_some(pctx.beats),
+        };
+        self.scratch_l.fill(0.0);
+        self.scratch_r.fill(0.0);
+        patch.run(
+            &mut self.scratch_l,
+            &mut self.scratch_r,
+            &fx,
+            pctx,
+            Some((&mut self.plugins, &self.telemetry)),
+        );
+        let (ml, mr) = self.mixer.direct_mut(usize::from(ch.route()));
+        let peak = ch.mix_into((&self.scratch_l, &self.scratch_r), (ml, mr));
         self.telemetry.channel_peaks[slot].fetch_max(peak, Ordering::Relaxed);
         if self.scope_slot == Some(slot) {
             for (l, r) in self.scratch_l.iter_mut().zip(&self.scratch_r) {
@@ -1276,6 +1337,36 @@ impl AudioProcessor {
                 if let Some(old) = old {
                     self.retire(Garbage::Tables(old));
                 }
+            }
+            EngineCommand::SetChannelPatch { slot, patch } => {
+                let old = match self.channels.get_mut(usize::from(slot)) {
+                    Some(ch) => ch.set_patch(patch),
+                    None => patch,
+                };
+                if let Some(old) = old {
+                    self.retire(Garbage::Patch(old));
+                }
+            }
+            EngineCommand::SetPatchValues { target, mut values } => {
+                match target {
+                    crate::PatchTarget::Channel(slot) => {
+                        if let Some(p) = self
+                            .channels
+                            .get_mut(usize::from(slot))
+                            .and_then(|c| c.patch.as_mut())
+                        {
+                            p.set_values(&mut values);
+                        }
+                    }
+                    crate::PatchTarget::Effect { strip, slot } => {
+                        self.mixer.set_patch_values(
+                            usize::from(strip),
+                            usize::from(slot),
+                            &mut values,
+                        );
+                    }
+                }
+                self.retire(Garbage::PatchUpdate(values));
             }
             EngineCommand::NoteOn {
                 slot,
@@ -3114,5 +3205,59 @@ mod tests {
             (ratio - 2f32.powf(7.0 / 12.0)).abs() < 0.03,
             "{plain} -> {curved}"
         );
+    }
+
+    #[test]
+    fn a_patcher_channel_plays_its_song_notes_and_survives_a_rebuild() {
+        use gt_core::{Note, Project, PPQ};
+        let (mut h, mut p) = engine(48_000, 1);
+        h.send(EngineCommand::SetMetronome(false)).unwrap();
+        let mut project = Project::empty();
+        let ch = project.add_patcher_channel("P").unwrap();
+        project
+            .current_pattern_mut()
+            .notes
+            .insert(ch, vec![Note::new(0, 8 * PPQ, 69, 0.8)]);
+        let i = project.channel_index(ch).unwrap();
+        h.send(EngineCommand::SetChannelParams {
+            slot: i as u16,
+            params: Box::new(crate::ChannelParams::from_project(&project, i)),
+        })
+        .unwrap();
+        let patch = project.channels[i].patch().unwrap().clone();
+        h.send(EngineCommand::SetChannelPatch {
+            slot: i as u16,
+            patch: Some(Box::new(crate::PatchDsp::build(&patch, 48_000.0))),
+        })
+        .unwrap();
+        h.send(EngineCommand::SetSong(Box::new(
+            crate::SongSnapshot::compile(&project),
+        )))
+        .unwrap();
+        h.send(EngineCommand::Play).unwrap();
+        let mut b = vec![0.0; 9600];
+        p.process(&mut b);
+        let mut d = gt_dsp::analysis::PitchDetector::new(1024);
+        let (hz, _) = d.detect(&b[4800..], 48_000.0, 50.0, 2000.0).unwrap();
+        assert!((hz - 440.0).abs() < 5.0, "{hz}");
+        // New values only (the filter closed a little): the note goes on.
+        let mut changed = patch.clone();
+        changed.nodes[5].params[1] = 1500.0;
+        assert!(crate::same_structure(&patch, &changed));
+        h.send(EngineCommand::SetPatchValues {
+            target: crate::PatchTarget::Channel(i as u16),
+            values: Box::new(crate::PatchUpdate::of(&changed)),
+        })
+        .unwrap();
+        // A rebuilt patch carries on too.
+        h.send(EngineCommand::SetChannelPatch {
+            slot: i as u16,
+            patch: Some(Box::new(crate::PatchDsp::build(&changed, 48_000.0))),
+        })
+        .unwrap();
+        let mut b = vec![0.0; 4800];
+        p.process(&mut b);
+        let rms = (b.iter().map(|v| v * v).sum::<f32>() / b.len() as f32).sqrt();
+        assert!(rms > 0.01, "{rms}");
     }
 }

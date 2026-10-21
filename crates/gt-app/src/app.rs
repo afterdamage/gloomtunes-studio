@@ -72,6 +72,7 @@ struct SentEffect {
     kind: EffectKind,
     params: Vec<f32>,
     file: Option<PathBuf>,
+    patch: Option<Box<gt_core::Patch>>,
 }
 
 pub struct GloomApp {
@@ -154,6 +155,12 @@ pub struct GloomApp {
     sent_fx: Vec<[Option<SentEffect>; FX_SLOTS]>,
     /// Per channel slot, what its synth's wavetables were built from (none: no tables sent).
     sent_tables: Vec<Option<TablesKey>>,
+    /// The patch each patcher channel's engine slot runs (Prompt 34).
+    sent_patches: Vec<Option<gt_core::Patch>>,
+    /// The patcher editor of the selected channel.
+    patcher_state: gt_ui::views::PatcherState,
+    /// The patch the plugin browser adds a module to.
+    patch_plugin_target: Option<gt_ui::views::PatchPlace>,
     strip_meters: Vec<[MeterBallistics; 2]>,
     strip_view: Vec<StripMeter>,
     fx_meters: Vec<[f32; FX_SLOTS]>,
@@ -384,6 +391,9 @@ impl GloomApp {
             sent_mixer: None,
             sent_fx: vec![Default::default(); STRIPS],
             sent_tables: Vec::new(),
+            sent_patches: Vec::new(),
+            patcher_state: gt_ui::views::PatcherState::default(),
+            patch_plugin_target: None,
             strip_meters: vec![Default::default(); STRIPS],
             strip_view: vec![StripMeter::default(); STRIPS],
             fx_meters: vec![[0.0; FX_SLOTS]; STRIPS],
@@ -1292,7 +1302,29 @@ impl GloomApp {
                         }
                     }
                     (Some(w), Some(h))
+                        if w.kind == EffectKind::Patcher
+                            && h.kind == EffectKind::Patcher
+                            && matches!((&w.patch, &h.patch), (Some(a), Some(b))
+                                if gt_engine::same_structure(a, b)) =>
+                    {
+                        let patch = w.patch.as_deref().expect("matched");
+                        if Some(patch) != h.patch.as_deref()
+                            && self.try_send(EngineCommand::SetPatchValues {
+                                target: gt_engine::PatchTarget::Effect {
+                                    strip: strip as u16,
+                                    slot: k as u8,
+                                },
+                                values: Box::new(gt_engine::PatchUpdate::of(patch)),
+                            })
+                        {
+                            if let Some(s) = self.sent_fx[strip][k].as_mut() {
+                                s.patch = w.patch.clone();
+                            }
+                        }
+                    }
+                    (Some(w), Some(h))
                         if w.kind == h.kind
+                            && w.kind != EffectKind::Patcher
                             && w.file == h.file
                             && !w
                                 .params
@@ -1330,6 +1362,7 @@ impl GloomApp {
                                 kind: w.kind,
                                 params: w.params,
                                 file: w.file,
+                                patch: w.patch,
                             });
                         }
                     }
@@ -1578,6 +1611,40 @@ impl GloomApp {
         }
     }
 
+    /// Sends each patcher channel's patch to the engine when it changed: new values alone
+    /// when the structure is the same, else the patch built again (it carries on playing).
+    fn sync_patches(&mut self) {
+        if self.audio.engine().is_none() {
+            return;
+        }
+        let rate = self.rate() as f32;
+        let n = self.project.channels.len();
+        self.sent_patches.resize(n, None);
+        for i in 0..n {
+            let want = self.project.channels[i].patch();
+            let have = self.sent_patches[i].as_ref();
+            if want == have {
+                continue;
+            }
+            let cmd = match (want, have) {
+                (Some(w), Some(h)) if gt_engine::same_structure(w, h) => {
+                    EngineCommand::SetPatchValues {
+                        target: gt_engine::PatchTarget::Channel(i as u16),
+                        values: Box::new(gt_engine::PatchUpdate::of(w)),
+                    }
+                }
+                (w, _) => EngineCommand::SetChannelPatch {
+                    slot: i as u16,
+                    patch: w.map(|w| Box::new(gt_engine::PatchDsp::build(w, rate))),
+                },
+            };
+            let want = want.cloned();
+            if self.try_send(cmd) {
+                self.sent_patches[i] = want;
+            }
+        }
+    }
+
     /// Brings a freshly created engine up to date with the current settings.
     fn sync_new_engine(&mut self) {
         self.song_tempo = self.project.song_tempo();
@@ -1608,6 +1675,7 @@ impl GloomApp {
         self.sent_mixer = None;
         self.sent_fx = vec![Default::default(); STRIPS];
         self.sent_tables.clear();
+        self.sent_patches.clear();
         self.lane_fx.clear();
         self.mod_fx.clear();
         self.sent_mods = None;
@@ -2802,6 +2870,10 @@ impl eframe::App for GloomApp {
                 Instrument::Plugin(p) => {
                     Some(plugin_view(&self.plugins, &self.project, p.instance))
                 }
+                Instrument::Patcher(patch) => {
+                    let p = patch.node(self.patcher_state.selected?)?.plugin.as_ref()?;
+                    Some(plugin_view(&self.plugins, &self.project, p.instance))
+                }
                 _ => None,
             })
             .unwrap_or_default();
@@ -2933,6 +3005,42 @@ impl eframe::App for GloomApp {
                             };
                             (false, synth_panel(ui, &theme, &mut ch.name, patch, view))
                         }
+                        Instrument::Patcher(patch) => {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(tr("Patcher"))
+                                        .strong()
+                                        .color(theme.accent),
+                                );
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut ch.name).desired_width(140.0),
+                                )
+                                .on_hover_text(tr("Channel name"));
+                            });
+                            let place = gt_ui::views::PatchPlace::Channel(ch.id);
+                            let mut acts = Vec::new();
+                            let changed = gt_ui::views::patcher_view(
+                                ui,
+                                &theme,
+                                place,
+                                patch,
+                                &mut self.patcher_state,
+                                &channel_plugin_view,
+                                &mut acts,
+                            );
+                            for a in acts {
+                                match a {
+                                    gt_ui::views::PatcherAction::AddPlugin => {
+                                        self.patch_plugin_target = Some(place);
+                                    }
+                                    gt_ui::views::PatcherAction::Plugin(pa) => {
+                                        plugin_actions.push(pa);
+                                    }
+                                }
+                            }
+                            plugin_changed |= changed;
+                            (false, Vec::new())
+                        }
                         Instrument::Plugin(p) => {
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new(&p.name).strong().color(theme.accent));
@@ -3031,6 +3139,14 @@ impl eframe::App for GloomApp {
             self.show_plugins = true;
             self.plugin_browser.kind = Some(PluginKind::Effect);
             self.plugin_slot = Some(target);
+            self.patch_plugin_target = None;
+        }
+        if let Some((strip, slot)) = self.mixer_state.patch_plugin_request.take() {
+            self.patch_plugin_target = Some(gt_ui::views::PatchPlace::Effect { strip, slot });
+        }
+        if self.patch_plugin_target.is_some() && !self.show_plugins {
+            self.show_plugins = true;
+            self.plugin_browser.kind = None;
         }
         plugin_actions.append(&mut self.mixer_state.plugin_actions);
         for a in plugin_actions {
@@ -3062,6 +3178,7 @@ impl eframe::App for GloomApp {
         self.automation_frame(&ctx, &plugin_moves);
         self.sync_mixer();
         self.sync_tables();
+        self.sync_patches();
         self.sync_modulation();
         if !self.layout.visible(MainView::PianoRoll) {
             // Hidden mid-gesture (F6, tab click): the roll never sees the release.

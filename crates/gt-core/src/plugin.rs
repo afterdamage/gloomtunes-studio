@@ -248,6 +248,18 @@ pub enum PluginOwner {
         /// Slot index.
         slot: usize,
     },
+    /// A plugin module in a patch (Prompt 34): a patcher channel's, or (with `channel`
+    /// `None`) a patcher effect slot's.
+    Node {
+        /// The patcher channel.
+        channel: Option<crate::ChannelId>,
+        /// Strip of the patcher effect (0 for a channel).
+        strip: usize,
+        /// Slot of the patcher effect (0 for a channel).
+        slot: usize,
+        /// The module.
+        node: crate::patcher::NodeId,
+    },
 }
 
 #[cfg(test)]

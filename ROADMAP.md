@@ -867,6 +867,18 @@ spectral filters; (3) the modular patcher; (4) the "start from an idea" dialog.
   harmonic balance; every factory preset sounding and bounded.
 - Limits (PR 2): resynthesis follows the harmonics of one pitch (no noise part, no inharmonic
   partials from the sample); the sample shares the first wavetable slot.
+- PR 3 (D154): **modular patcher**, as an instrument (`Instrument::Patcher`) and an effect
+  (`EffectKind::Patcher`): `gt_core::patcher` (modules, ports, wires, order, per-voice
+  analysis) and `gt_engine::patcher::PatchDsp` (preallocated, built off the audio thread;
+  new values swap in without a rebuild, a rebuild takes over voices and tails). Built-in
+  modules, any built-in effect, Gloom Synth and plugins (`PluginOwner::Node`, loaded and
+  automatable like any plugin) with free audio, MIDI and modulation routing. Schema 13.
+- Tests: wire checks, ordering with loops, sanitizing; the starting patch playing two notes
+  with envelopes; an LFO on a parameter; a feedback loop staying finite; a synth module behind
+  transpose; a plugin module with a modulated parameter; a patcher channel in the engine
+  through a value update and a rebuild; the editor wiring by drag; saving and loading.
+- Limits (PR 3): notes and modulation act once per 32-frame quantum; plugin modules add no
+  delay compensation; a synth module's user wavetables are not loaded.
 
 ---
 

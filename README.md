@@ -174,6 +174,13 @@ and the app shows it that way. Function keys on a Mac laptop may need **fn** hel
     levels over time: Morph blends it with the bars, Position and Scan pick where and how fast
     it plays. The spectral filter (low/high/band-pass, notch, comb, formant vowels) shapes the
     partials directly, so it never rings or clips.
+- **+ Patcher** in the rack adds a modular patch, and **Patcher** in a mixer slot's menu adds
+  one as an effect. Pick modules from **＋ Module** (voices, oscillators, noise, filters,
+  envelopes, LFOs, amps, mixers, maths, transpose, Gloom Synth, any built-in effect, or a
+  plugin), drag from an output to an input to wire them (audio in the accent colour,
+  modulation gold, notes blue), and drop a modulation output on a module to move one of its
+  parameters, plugin ones included. The selected module's knobs and the wires into it, with
+  their amounts, sit under the canvas. Modules after **Voices** play once per note (up to 8); loops are allowed.
 - **First start:** a short wizard picks the audio output and buffer size (with a test tone),
   an accent colour and text size, and asks whether to save crash reports (off unless you turn
   it on). **Skip** keeps the defaults. Everything it sets is in Settings afterwards.

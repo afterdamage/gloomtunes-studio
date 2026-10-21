@@ -915,6 +915,8 @@ pub enum InstrumentKind {
     Layer,
     /// A MIDI out channel (uses `hw`): its notes go to a MIDI port, no sound of its own.
     MidiOut,
+    /// A modular patch (its `PatchDsp` arrives with `SetChannelPatch`).
+    Patcher,
 }
 
 /// Most children of a layer channel.
@@ -1147,6 +1149,7 @@ impl ChannelParams {
             // Pads play through the sampler's voices with a key map of their own; the
             // channel's sampler settings stay at their defaults (one-shot, open filter).
             Instrument::Drums(_) => {}
+            Instrument::Patcher(_) => p.kind = InstrumentKind::Patcher,
             Instrument::MidiOut(m) => {
                 p.kind = InstrumentKind::MidiOut;
                 p.hw = crate::MidiOutParams {

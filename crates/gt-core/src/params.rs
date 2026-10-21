@@ -288,6 +288,26 @@ impl ParamId {
                 plugin,
                 id,
             },
+            Self::Plugin {
+                owner:
+                    PluginOwner::Node {
+                        channel: None,
+                        strip,
+                        slot,
+                        node,
+                    },
+                plugin,
+                id,
+            } => Self::Plugin {
+                owner: PluginOwner::Node {
+                    channel: None,
+                    strip: f(strip)?,
+                    slot,
+                    node,
+                },
+                plugin,
+                id,
+            },
             p => p,
         })
     }
@@ -369,6 +389,20 @@ impl ParamId {
                 PluginOwner::Effect { strip, slot } => {
                     format!("mixer/{strip}/fx/{slot}/plugin/{plugin:08x}/{id}")
                 }
+                PluginOwner::Node {
+                    channel: Some(c),
+                    node,
+                    ..
+                } => format!("channel/{}/node/{}/plugin/{plugin:08x}/{id}", c.0, node.0),
+                PluginOwner::Node {
+                    channel: None,
+                    strip,
+                    slot,
+                    node,
+                } => format!(
+                    "mixer/{strip}/fx/{slot}/node/{}/plugin/{plugin:08x}/{id}",
+                    node.0
+                ),
             },
             Self::Tempo => "tempo".to_owned(),
             Self::Modulator { id, field } => format!("modulator/{}/{}", id.0, field.key()),
@@ -391,6 +425,16 @@ impl ParamId {
                 match rest {
                     ["plugin", h, k] => Some(Self::Plugin {
                         owner: PluginOwner::Channel(channel),
+                        plugin: u32::from_str_radix(h, 16).ok()?,
+                        id: k.parse().ok()?,
+                    }),
+                    ["node", n, "plugin", h, k] => Some(Self::Plugin {
+                        owner: PluginOwner::Node {
+                            channel: Some(channel),
+                            strip: 0,
+                            slot: 0,
+                            node: crate::patcher::NodeId(n.parse().ok()?),
+                        },
                         plugin: u32::from_str_radix(h, 16).ok()?,
                         id: k.parse().ok()?,
                     }),
@@ -425,6 +469,18 @@ impl ParamId {
                             id: k.parse().ok()?,
                         });
                     }
+                    ["fx", slot, "node", n, "plugin", h, k] => {
+                        return Some(Self::Plugin {
+                            owner: PluginOwner::Node {
+                                channel: None,
+                                strip,
+                                slot: num(slot).filter(|&s| s < FX_SLOTS)?,
+                                node: crate::patcher::NodeId(n.parse().ok()?),
+                            },
+                            plugin: u32::from_str_radix(h, 16).ok()?,
+                            id: k.parse().ok()?,
+                        });
+                    }
                     ["fx", slot, kind, k] => {
                         let kind = EffectKind::from_key(kind)?;
                         return Some(Self::Effect {
@@ -450,6 +506,14 @@ impl ParamId {
             | Self::SynthMod { channel, .. }
             | Self::Plugin {
                 owner: PluginOwner::Channel(channel),
+                ..
+            }
+            | Self::Plugin {
+                owner:
+                    PluginOwner::Node {
+                        channel: Some(channel),
+                        ..
+                    },
                 ..
             } => Some(channel),
             _ => None,
@@ -522,7 +586,18 @@ impl ParamId {
                         || "(deleted)".to_owned(),
                         |i| project.channels[i].name.clone(),
                     ),
-                    PluginOwner::Effect { strip: s, .. } => strip(s),
+                    PluginOwner::Effect { strip: s, .. }
+                    | PluginOwner::Node {
+                        channel: None,
+                        strip: s,
+                        ..
+                    } => strip(s),
+                    PluginOwner::Node {
+                        channel: Some(c), ..
+                    } => project.channel_index(c).map_or_else(
+                        || "(deleted)".to_owned(),
+                        |i| project.channels[i].name.clone(),
+                    ),
                 };
                 match self.plugin_ref(project) {
                     Some(p) => {
@@ -870,6 +945,44 @@ mod tests {
             assert!((id.get(&p).unwrap() - v).abs() < 1e-4, "{key}");
             assert!(!id.name(&p).is_empty());
         }
+    }
+
+    #[test]
+    fn plugin_modules_in_patches_are_found_and_addressed() {
+        let mut p = Project::empty();
+        let ch = p.add_patcher_channel("P").unwrap();
+        let i = p.channel_index(ch).unwrap();
+        let plugin = test_plugin("gt.node", 2);
+        let instance = plugin.instance;
+        let node = p.channels[i]
+            .patch_mut()
+            .unwrap()
+            .add_plugin(plugin, [0.0, 0.0])
+            .unwrap();
+        let (owner, found) = p.plugin_by_instance(instance).unwrap();
+        assert_eq!(found.name, "gt.node");
+        assert_eq!(
+            owner,
+            PluginOwner::Node {
+                channel: Some(ch),
+                strip: 0,
+                slot: 0,
+                node,
+            }
+        );
+        p.plugin_by_instance_mut(instance).unwrap().values[0] = 0.25;
+        assert_eq!(p.plugin(owner).unwrap().values[0], 0.25);
+        let id = ParamId::plugin_param(owner, p.plugin(owner).unwrap(), 100);
+        assert_eq!(ParamId::parse(&id.key()), Some(id), "{}", id.key());
+        assert_eq!(id.channel(), Some(ch));
+        let fx = PluginOwner::Node {
+            channel: None,
+            strip: 3,
+            slot: 2,
+            node,
+        };
+        let id = ParamId::plugin_param(fx, p.plugin(owner).unwrap(), 101);
+        assert_eq!(ParamId::parse(&id.key()), Some(id), "{}", id.key());
     }
 
     fn test_plugin(id: &str, n: u32) -> PluginRef {

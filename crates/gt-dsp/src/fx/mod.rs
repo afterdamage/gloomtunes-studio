@@ -112,6 +112,11 @@ pub trait Effect: Send {
     fn scope(&self) -> Option<std::sync::Arc<crate::analysis::Scope>> {
         None
     }
+    /// The effect as its own type, for hosts that run some effects differently (the
+    /// patcher, which needs the plugin table).
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
 }
 
 /// Frames between coefficient updates for effects that recompute filters from smoothed values.

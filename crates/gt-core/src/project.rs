@@ -303,6 +303,8 @@ pub enum Instrument {
     Player(Box<crate::player::Player>),
     /// Sends its notes to an external MIDI device (Prompt 33); makes no sound of its own.
     MidiOut(crate::hardware::MidiOutSettings),
+    /// A modular patch (Prompt 34).
+    Patcher(Box<crate::patcher::Patch>),
 }
 
 impl Channel {
@@ -416,9 +418,26 @@ impl Channel {
             Instrument::Drums(k) => Box::new(k.sources_mut()),
             Instrument::Synth(p) => Box::new(p.tables.iter_mut().flatten()),
             Instrument::Player(p) => Box::new(p.base.sources_mut()),
-            Instrument::Plugin(_) | Instrument::Layer(_) | Instrument::MidiOut(_) => {
-                Box::new(std::iter::empty())
-            }
+            Instrument::Plugin(_)
+            | Instrument::Layer(_)
+            | Instrument::MidiOut(_)
+            | Instrument::Patcher(_) => Box::new(std::iter::empty()),
+        }
+    }
+
+    /// The patch, if this is a patcher channel.
+    pub fn patch(&self) -> Option<&crate::patcher::Patch> {
+        match &self.instrument {
+            Instrument::Patcher(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Mutable patch, if this is a patcher channel.
+    pub fn patch_mut(&mut self) -> Option<&mut crate::patcher::Patch> {
+        match &mut self.instrument {
+            Instrument::Patcher(p) => Some(p),
+            _ => None,
         }
     }
 
@@ -1105,6 +1124,7 @@ impl Project {
                 Instrument::Drums(k) => k.sanitize(inserts),
                 Instrument::Layer(_) => {}
                 Instrument::MidiOut(m) => m.sanitize(),
+                Instrument::Patcher(p) => p.sanitize(),
             }
             c.swing = c.swing.filter(|s| s.is_finite()).map(|s| s.clamp(0.0, 1.0));
             c.choke = c.choke.min(Channel::CHOKE_GROUPS);
@@ -1245,6 +1265,12 @@ impl Project {
         )
     }
 
+    /// Adds a patcher channel with the starting patch at the bottom of the rack. `None` when
+    /// the rack is full.
+    pub fn add_patcher_channel(&mut self, name: &str) -> Option<ChannelId> {
+        self.add_instrument(name, Instrument::Patcher(Box::default()))
+    }
+
     /// Adds a MIDI out channel (no port yet) at the bottom of the rack. `None` when the rack is
     /// full.
     pub fn add_midi_out_channel(&mut self, name: &str) -> Option<ChannelId> {
@@ -1275,7 +1301,60 @@ impl Project {
                 }
             }
         }
+        // Plugin modules in patches.
+        for c in &self.channels {
+            if let Some(patch) = c.patch() {
+                out.extend(patch.plugins().map(|(node, p)| {
+                    let owner = PluginOwner::Node {
+                        channel: Some(c.id),
+                        strip: 0,
+                        slot: 0,
+                        node,
+                    };
+                    (owner, p)
+                }));
+            }
+        }
+        for (strip, s) in self.mixer.strips.iter().enumerate() {
+            for (slot, fx) in s.slots.iter().enumerate() {
+                if let Some(patch) = fx.as_ref().and_then(|f| f.patch.as_deref()) {
+                    out.extend(patch.plugins().map(|(node, p)| {
+                        let owner = PluginOwner::Node {
+                            channel: None,
+                            strip,
+                            slot,
+                            node,
+                        };
+                        (owner, p)
+                    }));
+                }
+            }
+        }
         out
+    }
+
+    /// The patch at a patch plugin's place.
+    fn patch_mut_at(
+        &mut self,
+        channel: Option<ChannelId>,
+        strip: usize,
+        slot: usize,
+    ) -> Option<&mut crate::patcher::Patch> {
+        match channel {
+            Some(id) => {
+                let i = self.channel_index(id)?;
+                self.channels[i].patch_mut()
+            }
+            None => self
+                .mixer
+                .strips
+                .get_mut(strip)?
+                .slots
+                .get_mut(slot)?
+                .as_mut()?
+                .patch
+                .as_deref_mut(),
+        }
     }
 
     /// The plugin at `owner`, if there is one.
@@ -1289,6 +1368,32 @@ impl Project {
                 .slots
                 .get(slot)?
                 .as_ref()?
+                .plugin
+                .as_deref(),
+            PluginOwner::Node {
+                channel: Some(id),
+                node,
+                ..
+            } => self.channels[self.channel_index(id)?]
+                .patch()?
+                .node(node)?
+                .plugin
+                .as_deref(),
+            PluginOwner::Node {
+                channel: None,
+                strip,
+                slot,
+                node,
+            } => self
+                .mixer
+                .strips
+                .get(strip)?
+                .slots
+                .get(slot)?
+                .as_ref()?
+                .patch
+                .as_ref()?
+                .node(node)?
                 .plugin
                 .as_deref(),
         }
@@ -1310,6 +1415,12 @@ impl Project {
                 .as_mut()?
                 .plugin
                 .as_deref_mut(),
+            PluginOwner::Node {
+                channel,
+                strip,
+                slot,
+                node,
+            } => self.patch_mut_at(channel, strip, slot)?.plugin_mut(node),
         }
     }
 
@@ -1433,11 +1544,25 @@ impl Project {
             if let Some(p) = c.plugin_mut() {
                 fix(p);
             }
+            if let Some(patch) = c.patch_mut() {
+                patch
+                    .nodes
+                    .iter_mut()
+                    .filter_map(|n| n.plugin.as_deref_mut())
+                    .for_each(&mut fix);
+            }
         }
         for s in &mut self.mixer.strips {
             for fx in s.slots.iter_mut().flatten() {
                 if let Some(p) = fx.plugin.as_deref_mut() {
                     fix(p);
+                }
+                if let Some(patch) = fx.patch.as_deref_mut() {
+                    patch
+                        .nodes
+                        .iter_mut()
+                        .filter_map(|n| n.plugin.as_deref_mut())
+                        .for_each(&mut fix);
                 }
             }
         }

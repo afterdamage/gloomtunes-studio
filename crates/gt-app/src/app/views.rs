@@ -85,7 +85,14 @@ impl GloomApp {
                 let open_plugin = self.mixer_state.slot.and_then(|k| {
                     let strip = &self.project.mixer.strips
                         [self.mixer_state.selected.min(self.project.mixer.inserts())];
-                    let p = strip.slots.get(k)?.as_ref()?.plugin.as_ref()?;
+                    let slot = strip.slots.get(k)?.as_ref()?;
+                    let p = match &slot.patch {
+                        Some(patch) => patch
+                            .node(self.mixer_state.patcher.selected?)?
+                            .plugin
+                            .as_ref()?,
+                        None => slot.plugin.as_ref()?,
+                    };
                     Some(plugin_view(&self.plugins, &self.project, p.instance))
                 });
                 let scope = self.mixer_state.slot.and_then(|k| {

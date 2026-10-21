@@ -104,6 +104,21 @@ pub enum EngineCommand {
         /// garbage.
         tables: Option<Arc<gt_dsp::synth::wavetable::SynthTables>>,
     },
+    /// Replace a patcher channel's patch (Prompt 34); the new one carries on from the old.
+    SetChannelPatch {
+        /// Channel slot.
+        slot: u16,
+        /// The new patch, built with [`crate::PatchDsp::build`]. The old one comes back as
+        /// garbage.
+        patch: Option<Box<crate::PatchDsp>>,
+    },
+    /// New parameter values and wire amounts for a running patch of the same structure.
+    SetPatchValues {
+        /// The patch.
+        target: crate::PatchTarget,
+        /// The values (they come back as garbage).
+        values: Box<crate::PatchUpdate>,
+    },
     /// Start a note on a channel now (auditioning from the UI).
     NoteOn {
         /// Channel slot.
@@ -208,6 +223,8 @@ impl EngineCommand {
                 | Self::SetChannelSample { .. }
                 | Self::SetChannelZones { .. }
                 | Self::SetChannelTables { .. }
+                | Self::SetChannelPatch { .. }
+                | Self::SetPatchValues { .. }
                 | Self::PreviewSample(_)
                 | Self::SetMixer(_)
                 | Self::GrowMixer(_)
@@ -308,6 +325,10 @@ pub enum Garbage {
     Zones(Arc<crate::zones::ZoneMap>),
     /// Wavetables no longer used by a synth.
     Tables(Arc<gt_dsp::synth::wavetable::SynthTables>),
+    /// A replaced patch.
+    Patch(Box<crate::PatchDsp>),
+    /// Patch values, already taken over.
+    PatchUpdate(Box<crate::PatchUpdate>),
     /// A mixer-settings box, already copied into the mixer.
     Mixer(Box<MixerParams>),
     /// The emptied list of new strips.

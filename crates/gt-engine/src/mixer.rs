@@ -85,6 +85,13 @@ pub fn create_effect_with(
         EffectKind::Stutter => Box::new(Stutter::new(sr)),
         // Plugins run from the plugin table (`EngineCommand::SetPlugin`), not from a box.
         EffectKind::Plugin => Box::new(Passthrough),
+        EffectKind::Patcher => {
+            let effect = gt_core::Patch::effect();
+            Box::new(crate::PatchDsp::build(
+                slot.patch.as_deref().unwrap_or(&effect),
+                sr,
+            ))
+        }
     };
     for (i, &v) in slot.params.iter().enumerate() {
         fx.set_param(i, v);
@@ -875,10 +882,45 @@ impl MixerEngine {
         let Some(f) = self.strips.get_mut(strip).and_then(|s| s.fx.get_mut(slot)) else {
             return effect;
         };
-        let old = std::mem::replace(&mut f.effect, effect);
+        let mut old = std::mem::replace(&mut f.effect, effect);
+        // A rebuilt patch carries on from the one it replaces.
+        if let (Some(new), Some(o)) = (f.effect.as_mut(), old.as_mut()) {
+            let new = new
+                .0
+                .as_any_mut()
+                .and_then(|a| a.downcast_mut::<crate::PatchDsp>());
+            let o =
+                o.0.as_any_mut()
+                    .and_then(|a| a.downcast_mut::<crate::PatchDsp>());
+            if let (Some(new), Some(o)) = (new, o) {
+                new.inherit(o);
+                f.wet = LinearRamp::new(if f.enabled { 1.0 } else { 0.0 });
+                self.update_latency();
+                return old;
+            }
+        }
         f.wet = LinearRamp::new(if f.enabled { 1.0 } else { 0.0 });
         self.update_latency();
         old
+    }
+
+    /// New values for a patcher effect's patch; the old ones are left in `values`.
+    pub(crate) fn set_patch_values(
+        &mut self,
+        strip: usize,
+        slot: usize,
+        values: &mut crate::PatchUpdate,
+    ) {
+        if let Some(p) = self
+            .strips
+            .get_mut(strip)
+            .and_then(|s| s.fx.get_mut(slot))
+            .and_then(|f| f.effect.as_mut())
+            .and_then(|e| e.0.as_any_mut())
+            .and_then(|a| a.downcast_mut::<crate::PatchDsp>())
+        {
+            p.set_values(values);
+        }
     }
 
     /// Sets one effect parameter. Returns true if that changed the effect's latency (the gate's
@@ -1259,8 +1301,18 @@ impl MixerEngine {
             if slot.plugin.is_some() {
                 plugins.run_effect(slot.plugin, &mut l, &mut r, pctx, telemetry);
             } else if let Some(fx) = &mut slot.effect {
-                fx.0.process(&mut l, &mut r, &ctx);
-                meter = fx.0.meter();
+                // A patch runs its plugin modules from the plugin table.
+                match fx
+                    .0
+                    .as_any_mut()
+                    .and_then(|a| a.downcast_mut::<crate::PatchDsp>())
+                {
+                    Some(p) => p.run(&mut l, &mut r, &ctx, pctx, Some((&mut *plugins, telemetry))),
+                    None => {
+                        fx.0.process(&mut l, &mut r, &ctx);
+                        meter = fx.0.meter();
+                    }
+                }
             }
             if blend {
                 for i in 0..Q {

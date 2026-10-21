@@ -605,6 +605,8 @@ enum InstrumentDto {
         #[serde(default)]
         macros: Vec<MacroDto>,
     },
+    /// A modular patch (Prompt 34).
+    Patcher { patch: PatchDto },
     /// A MIDI out channel (Prompt 33): the port by name and what to send.
     MidiOut {
         #[serde(default)]
@@ -1119,6 +1121,9 @@ pub(crate) struct EffectDto {
     file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     file_absolute: Option<String>,
+    /// A patcher slot's patch (Prompt 34).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    patch: Option<PatchDto>,
 }
 
 fn full_mix() -> f32 {
@@ -1640,6 +1645,9 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                 },
                 Instrument::Plugin(plugin) => InstrumentDto::Plugin {
                     plugin: plugin_dto(plugin),
+                },
+                Instrument::Patcher(patch) => InstrumentDto::Patcher {
+                    patch: patch_dto(patch),
                 },
                 Instrument::Drums(kit) => InstrumentDto::Drums {
                     banks: kit
@@ -2204,6 +2212,9 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
                 Some(pl) => Instrument::Plugin(Box::new(pl)),
                 None => continue,
             },
+            InstrumentDto::Patcher { patch } => {
+                Instrument::Patcher(Box::new(patch_from_dto(patch, &mut warnings, &mut plugin)))
+            }
             InstrumentDto::Drums { banks } => {
                 let banks = banks
                     .into_iter()
@@ -2555,6 +2566,7 @@ pub(crate) fn slots_dto(
                     .as_deref()
                     .and_then(|f| dir.and_then(|d| relative_path(d, f))),
                 file_absolute: e.file.as_ref().map(|f| f.to_string_lossy().into_owned()),
+                patch: e.patch.as_deref().map(patch_dto),
             })
         })
         .collect()
@@ -2584,6 +2596,9 @@ pub(crate) fn slots_from_dto(
             let mut e = EffectSlot::new(kind);
             e.enabled = ed.enabled;
             e.mix = ed.mix;
+            if let Some(patch) = ed.patch {
+                e.patch = Some(Box::new(patch_from_dto(patch, warnings, plugin)));
+            }
             // The relative path wins when the file is there (the folder moved).
             let relative = ed
                 .file
@@ -2605,6 +2620,197 @@ pub(crate) fn slots_from_dto(
         });
     }
     out
+}
+
+/// A patch in a file (Prompt 34).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PatchDto {
+    nodes: Vec<PatchNodeDto>,
+    wires: Vec<PatchWireDto>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PatchNodeDto {
+    id: u16,
+    kind: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    params: BTreeMap<String, f32>,
+    #[serde(default)]
+    pos: [f32; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    synth: Option<PatchSynthDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plugin: Option<PluginDto>,
+}
+
+/// A synth module's sound (no user wavetables).
+#[derive(Serialize, Deserialize)]
+struct PatchSynthDto {
+    preset_name: String,
+    params: BTreeMap<String, f32>,
+    mods: Vec<SynthModDto>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PatchWireDto {
+    from: u16,
+    port: u8,
+    to: u16,
+    /// An input port, or
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input: Option<u8>,
+    /// a parameter: its key for a built-in module, `id:N` for a plugin's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    param: Option<String>,
+    amount: f32,
+}
+
+fn patch_dto(p: &gt_core::Patch) -> PatchDto {
+    use gt_core::patcher::WireEnd;
+    let param_key = |to: gt_core::NodeId, i: u16| -> Option<String> {
+        let n = p.node(to)?;
+        match &n.plugin {
+            Some(pl) => pl
+                .params
+                .get(usize::from(i))
+                .map(|q| format!("id:{}", q.id)),
+            None => n
+                .kind
+                .params()
+                .get(usize::from(i))
+                .map(|q| q.key.to_owned()),
+        }
+    };
+    PatchDto {
+        nodes: p
+            .nodes
+            .iter()
+            .map(|n| PatchNodeDto {
+                id: n.id.0,
+                kind: n.kind.key(),
+                params: n
+                    .kind
+                    .params()
+                    .iter()
+                    .zip(&n.params)
+                    .map(|(q, &v)| (q.key.to_owned(), v))
+                    .collect(),
+                pos: n.pos,
+                synth: n.synth.as_deref().map(|s| PatchSynthDto {
+                    preset_name: s.name.clone(),
+                    params: SynthParam::ALL
+                        .iter()
+                        .map(|&q| (q.info().key.to_owned(), s.get(q)))
+                        .collect(),
+                    mods: s
+                        .mods
+                        .iter()
+                        .map(|m| SynthModDto {
+                            source: m.source.key().to_owned(),
+                            dest: m.dest.key().to_owned(),
+                            amount: m.amount,
+                        })
+                        .collect(),
+                }),
+                plugin: n.plugin.as_deref().map(plugin_dto),
+            })
+            .collect(),
+        wires: p
+            .wires
+            .iter()
+            .filter_map(|w| {
+                let (input, param) = match w.end {
+                    WireEnd::Input(i) => (Some(i), None),
+                    WireEnd::Param(i) => (None, Some(param_key(w.to, i)?)),
+                };
+                Some(PatchWireDto {
+                    from: w.from.0,
+                    port: w.port,
+                    to: w.to.0,
+                    input,
+                    param,
+                    amount: w.amount,
+                })
+            })
+            .collect(),
+    }
+}
+
+fn patch_from_dto(
+    d: PatchDto,
+    warnings: &mut Vec<String>,
+    plugin: &mut impl FnMut(PluginDto, &mut Vec<String>) -> Option<PluginRef>,
+) -> gt_core::Patch {
+    use gt_core::patcher::{ModuleKind, Node, NodeId, Patch, Wire, WireEnd};
+    let mut p = Patch {
+        nodes: Vec::new(),
+        wires: Vec::new(),
+    };
+    for nd in d.nodes {
+        let Some(kind) = ModuleKind::from_key(&nd.kind) else {
+            warnings.push(format!("unknown patch module \"{}\" removed", nd.kind));
+            continue;
+        };
+        let mut n = Node::new(NodeId(nd.id), kind, nd.pos);
+        for (v, q) in n.params.iter_mut().zip(kind.params()) {
+            if let Some(&x) = nd.params.get(q.key) {
+                *v = x;
+            }
+        }
+        if let (Some(sd), Some(s)) = (nd.synth, n.synth.as_deref_mut()) {
+            s.name = sd.preset_name;
+            for (key, v) in &sd.params {
+                if let Some(q) = SynthParam::from_key(key) {
+                    s.set(q, *v);
+                }
+            }
+            for (slot, m) in s.mods.iter_mut().zip(sd.mods.iter().take(MOD_SLOTS)) {
+                *slot = ModSlot {
+                    source: ModSource::from_key(&m.source).unwrap_or(ModSource::Off),
+                    dest: ModDest::from_key(&m.dest).unwrap_or(ModDest::Off),
+                    amount: m.amount,
+                };
+            }
+        }
+        if kind == ModuleKind::Plugin {
+            match nd.plugin.and_then(|dto| plugin(dto, warnings)) {
+                Some(pl) => n.plugin = Some(Box::new(pl)),
+                None => continue,
+            }
+        }
+        p.nodes.push(n);
+    }
+    for w in d.wires {
+        let to = NodeId(w.to);
+        let end = match (w.input, w.param) {
+            (Some(i), _) => WireEnd::Input(i),
+            (None, Some(key)) => {
+                let Some(n) = p.node(to) else { continue };
+                let index = match (&n.plugin, key.strip_prefix("id:")) {
+                    (Some(pl), Some(id)) => {
+                        let id: u32 = id.parse().unwrap_or(u32::MAX);
+                        pl.params.iter().position(|q| q.id == id)
+                    }
+                    (None, None) => n.kind.params().iter().position(|q| q.key == key),
+                    _ => None,
+                };
+                match index {
+                    Some(i) => WireEnd::Param(i as u16),
+                    None => continue,
+                }
+            }
+            (None, None) => continue,
+        };
+        p.wires.push(Wire {
+            from: NodeId(w.from),
+            port: w.port,
+            to,
+            end,
+            amount: w.amount,
+        });
+    }
+    p.sanitize();
+    p
 }
 
 fn plugin_dto(p: &PluginRef) -> PluginDto {
@@ -2954,6 +3160,35 @@ mod tests {
         let back = from_value(v, None).unwrap();
         assert_eq!(back.project.formulas, p.formulas);
         assert_eq!(back.project.modulators, p.modulators);
+        assert_eq!(back.project, p);
+    }
+
+    #[test]
+    fn patcher_channels_and_effects_round_trip() {
+        use gt_core::patcher::{ModuleKind as M, WireEnd as E};
+        let mut p = Project::demo();
+        let ch = p.add_patcher_channel("Patch").unwrap();
+        let i = p.channel_index(ch).unwrap();
+        let patch = p.channels[i].patch_mut().unwrap();
+        let lfo = patch.add(M::Lfo, [10.0, 300.0]).unwrap();
+        let filter = patch.nodes[5].id;
+        patch.connect(lfo, 0, filter, E::Param(1), -0.25).unwrap();
+        let s = patch.add(M::Synth, [400.0, 300.0]).unwrap();
+        *patch.node_mut(s).unwrap().synth.as_deref_mut().unwrap() = SynthPatch::factory().remove(3);
+        let mut slot = EffectSlot::new(EffectKind::Patcher);
+        let fx = slot.patch.as_deref_mut().unwrap();
+        let d = fx.add(M::Effect(EffectKind::Delay), [200.0, 60.0]).unwrap();
+        fx.node_mut(d).unwrap().params[1] = 0.6;
+        p.mixer.strips[1].slots[3] = Some(slot);
+        p.sanitize();
+        let v = to_value(&p, None, &HashMap::new());
+        let back = from_value(v, None).unwrap();
+        assert!(back.warnings.is_empty(), "{:?}", back.warnings);
+        assert_eq!(back.project.channels[i], p.channels[i]);
+        assert_eq!(
+            back.project.mixer.strips[1].slots[3],
+            p.mixer.strips[1].slots[3]
+        );
         assert_eq!(back.project, p);
     }
 
