@@ -867,6 +867,37 @@ spectral filters; (3) the modular patcher; (4) the "start from an idea" dialog.
   harmonic balance; every factory preset sounding and bounded.
 - Limits (PR 2): resynthesis follows the harmonics of one pitch (no noise part, no inharmonic
   partials from the sample); the sample shares the first wavetable slot.
+- PR 3 (D154): **modular patcher**, as an instrument (`Instrument::Patcher`) and an effect
+  (`EffectKind::Patcher`): `gt_core::patcher` (modules, ports, wires, order, per-voice
+  analysis) and `gt_engine::patcher::PatchDsp` (preallocated, built off the audio thread;
+  new values swap in without a rebuild, a rebuild takes over voices and tails). Built-in
+  modules, any built-in effect, Gloom Synth and plugins (`PluginOwner::Node`, loaded and
+  automatable like any plugin) with free audio, MIDI and modulation routing. Schema 13.
+- Tests: wire checks, ordering with loops, sanitizing; the starting patch playing two notes
+  with envelopes; an LFO on a parameter; a feedback loop staying finite; a synth module behind
+  transpose; a plugin module with a modulated parameter; a patcher channel in the engine
+  through a value update and a rebuild; the editor wiring by drag; saving and loading.
+- Limits (PR 3): notes and modulation act once per 32-frame quantum; plugin modules add no
+  delay compensation; a synth module's user wavetables are not loaded.
+- PR 4 (D155): **start from an idea**: File > Start from an idea… (or From an idea… in the
+  New dialog) picks a style (house, techno, hip hop, trap, drum and bass, ambient, synthwave,
+  lo-fi), tempo, key, mode and variation, and builds drums, bass, chords and a lead from
+  factory sounds as five part patterns in a 28-bar arrangement. `gt_core::idea`, no online
+  services.
+- Tests: every style builds from factory sounds into a sane project; bass, chords and lead
+  stay in the key for several keys and modes; the lead hits chord tones on the beat and ends
+  on the root; the same idea builds the same song and the seed changes it; the arrangement
+  uses every pattern under its markers; odd tempos and keys are clamped.
+- Limits (PR 4): close triads only (no sevenths or inversions); one chord per bar; the lead
+  ignores the bass line.
+
+### UI pass (after the prompts)
+
+- D156: drag and drop from the browser to the rack, mixer and playlist; file drops go where
+  the pointer is; previews for synth presets, drum kits, effects and projects; drum kits listed
+  in the browser; the top bar and piano roll toolbar wrap instead of clipping; the piano roll
+  opens on the channel's notes; folder rows show their name, not the full path.
+- Limits: no plugin previews; player-pack presets are not listed in the browser yet.
 
 ---
 

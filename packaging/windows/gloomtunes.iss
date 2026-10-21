@@ -1,13 +1,13 @@
 ; Inno Setup script for the Windows installer (Inno Setup 6).
 ;
 ;   cargo build --profile dist --locked -p gt-app
-;   iscc /DAppVersion=1.1.0 packaging\windows\gloomtunes.iss     ; writes dist\
+;   iscc /DAppVersion=1.2.0 packaging\windows\gloomtunes.iss     ; writes dist\
 ;
 ; Installs per user by default (no administrator rights needed); the first page offers an
 ; all-users install instead. Paths are relative to this file.
 
 #ifndef AppVersion
-  #define AppVersion "1.1.0"
+  #define AppVersion "1.2.0"
 #endif
 #ifndef Profile
   #define Profile "dist"

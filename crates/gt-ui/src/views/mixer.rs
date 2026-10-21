@@ -42,6 +42,24 @@ pub struct MixerState {
     pub remove_request: Option<usize>,
     /// Something only the app can do (presets, track links).
     pub request: Option<MixerRequest>,
+    /// The open patcher slot's editor.
+    pub patcher: crate::views::PatcherState,
+    /// The user chose "Plugin…" in this (strip, slot)'s patch: the app adds the plugin there.
+    pub patch_plugin_request: Option<(usize, usize)>,
+    /// A browser effect or plugin dropped on a strip (`slot`: on that effect slot, else the
+    /// first free one); the app adds it.
+    pub dropped: Option<MixerDrop>,
+}
+
+/// A browser row dropped on the mixer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MixerDrop {
+    /// Strip index.
+    pub strip: usize,
+    /// Effect slot, when dropped on one.
+    pub slot: Option<usize>,
+    /// What was dropped.
+    pub item: crate::views::RowItem,
 }
 
 /// What the mixer asks of the app.
@@ -84,6 +102,9 @@ impl Default for MixerState {
             analyzer: AnalyzerState::default(),
             remove_request: None,
             request: None,
+            patcher: crate::views::PatcherState::default(),
+            patch_plugin_request: None,
+            dropped: None,
         }
     }
 }
@@ -166,7 +187,7 @@ pub fn mixer_view(
                                 .iter()
                                 .find(|t| t.2 == i && i != MASTER)
                                 .map(|t| t.1.as_str());
-                            let (c, clicked) = strip(
+                            let (c, clicked, rect) = strip(
                                 ui,
                                 theme,
                                 i,
@@ -176,6 +197,16 @@ pub fn mixer_view(
                                 track,
                             );
                             changed |= c;
+                            if let Some(item) =
+                                crate::dnd::drop_zone(ui, theme, rect, crate::dnd::is_effect)
+                            {
+                                state.selected = i;
+                                state.dropped = Some(MixerDrop {
+                                    strip: i,
+                                    slot: None,
+                                    item,
+                                });
+                            }
                             if clicked && state.selected != i {
                                 state.selected = i;
                                 state.slot = mixer.strips[i].slots.iter().position(Option::is_some);
@@ -216,7 +247,7 @@ pub fn mixer_view(
     changed
 }
 
-/// One strip. Returns (changed, clicked).
+/// One strip. Returns (changed, clicked, its rectangle).
 fn strip(
     ui: &mut Ui,
     theme: &GloomTheme,
@@ -225,7 +256,7 @@ fn strip(
     selected: bool,
     meter: StripMeter,
     track: Option<&str>,
-) -> (bool, bool) {
+) -> (bool, bool, egui::Rect) {
     let mut changed = false;
     let fill = if selected {
         theme.accent_dim
@@ -353,7 +384,7 @@ fn strip(
         .response;
     // Pressing anywhere on the strip (fader and knob included) selects it.
     let clicked = ui.rect_contains_pointer(resp.rect) && ui.input(|i| i.pointer.any_pressed());
-    (changed, clicked)
+    (changed, clicked, resp.rect)
 }
 
 /// Colour, icon, the linked playlist track and presets of strip `i`.
@@ -739,7 +770,7 @@ fn detail(
                 let shown = slot.as_ref().map_or("—", |s| {
                     s.plugin.as_ref().map_or(s.kind.name(), |p| p.name.as_str())
                 });
-                egui::ComboBox::from_id_salt(("mixer_fx", i, k))
+                let combo = egui::ComboBox::from_id_salt(("mixer_fx", i, k))
                     .width(130.0)
                     .height(320.0)
                     .selected_text(RichText::new(shown).small())
@@ -748,6 +779,8 @@ fn detail(
                         for kind in EffectKind::ALL {
                             ui.selectable_value(&mut pick, Some(kind), kind.name());
                         }
+                        ui.selectable_value(&mut pick, Some(EffectKind::Patcher), tr("Patcher"))
+                            .on_hover_text(tr("A modular patch of modules, effects and plugins"));
                         ui.separator();
                         if ui
                             .selectable_label(false, tr("Plugin…"))
@@ -757,6 +790,15 @@ fn detail(
                             state.plugin_request = Some((i, k));
                         }
                     });
+                if let Some(item) =
+                    crate::dnd::drop_zone(ui, theme, combo.response.rect, crate::dnd::is_effect)
+                {
+                    state.dropped = Some(MixerDrop {
+                        strip: i,
+                        slot: Some(k),
+                        item,
+                    });
+                }
                 if pick != current {
                     *slot = pick.map(EffectSlot::new);
                     state.slot = pick.map(|_| k);
@@ -835,6 +877,28 @@ fn detail(
                 plugin_controls(ui, theme, owner, p, pv, &mut state.plugin_actions)
             } else if slot.kind == EffectKind::Plugin {
                 false
+            } else if let Some(patch) = slot.patch.as_deref_mut() {
+                let missing = PluginPanelView::default();
+                let pv = view.plugin.unwrap_or(&missing);
+                let mut acts = Vec::new();
+                let c = crate::views::patcher_view(
+                    ui,
+                    theme,
+                    crate::views::PatchPlace::Effect { strip: i, slot: k },
+                    patch,
+                    &mut state.patcher,
+                    pv,
+                    &mut acts,
+                );
+                for a in acts {
+                    match a {
+                        crate::views::PatcherAction::AddPlugin => {
+                            state.patch_plugin_request = Some((i, k));
+                        }
+                        crate::views::PatcherAction::Plugin(pa) => state.plugin_actions.push(pa),
+                    }
+                }
+                c
             } else if slot.kind == EffectKind::Eq {
                 eq_editor(
                     ui,

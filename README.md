@@ -174,6 +174,25 @@ and the app shows it that way. Function keys on a Mac laptop may need **fn** hel
     levels over time: Morph blends it with the bars, Position and Scan pick where and how fast
     it plays. The spectral filter (low/high/band-pass, notch, comb, formant vowels) shapes the
     partials directly, so it never rings or clips.
+- **+ Patcher** in the rack adds a modular patch, and **Patcher** in a mixer slot's menu adds
+  one as an effect. Pick modules from **＋ Module** (voices, oscillators, noise, filters,
+  envelopes, LFOs, amps, mixers, maths, transpose, Gloom Synth, any built-in effect, or a
+  plugin), drag from an output to an input to wire them (audio in the accent colour,
+  modulation gold, notes blue), and drop a modulation output on a module to move one of its
+  parameters, plugin ones included. The selected module's knobs and the wires into it, with
+  their amounts, sit under the canvas. Modules after **Voices** play once per note (up to 8); loops are allowed.
+- **File > Start from an idea…** builds a starter song from a style, tempo, key and mode:
+  drums, bass, chords and a lead from the factory sounds, as patterns arranged into a 28-bar
+  song with markers. **Variation** (or **Next**) picks another progression and melody; the same
+  settings always build the same song. Nothing goes online.
+- **Drag and drop:** drag any browser row onto a view. A sound, synth preset, drum kit or
+  instrument plugin dropped on a channel replaces its sound (or fills a drum channel's pads);
+  dropped below the channels it makes a new one. Effects and effect plugins go on a mixer
+  strip or a chosen slot (or on a channel's mixer track). Sounds dropped on the playlist become
+  audio clips. Files from the file manager go where the pointer is.
+- **Previews:** clicking a synth preset, drum kit, effect or project in the browser plays a
+  short preview (a phrase for presets, a groove for kits, a drum and pluck loop through the
+  effect, the first bars of a project). Plugins are not previewed.
 - **First start:** a short wizard picks the audio output and buffer size (with a test tone),
   an accent colour and text size, and asks whether to save crash reports (off unless you turn
   it on). **Skip** keeps the defaults. Everything it sets is in Settings afterwards.
@@ -393,14 +412,14 @@ packaging/macos/build-app.sh
 
 ```powershell
 # Windows installer into dist\ (Inno Setup 6: choco install innosetup)
-& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.1.0 packaging\windows\gloomtunes.iss
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.2.0 packaging\windows\gloomtunes.iss
 ```
 
 **Making a release:** set the version in the workspace `Cargo.toml` (`[workspace.package]
 version`), update `Cargo.lock` (`cargo build`), merge, then push a matching tag:
 
 ```sh
-git tag v1.1.0 && git push origin v1.1.0
+git tag v1.2.0 && git push origin v1.2.0
 ```
 
 `.github/workflows/release.yml` builds the four packages, writes `SHA256SUMS`, attests every

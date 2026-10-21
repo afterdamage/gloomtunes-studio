@@ -89,7 +89,7 @@ pub fn rack_groups(project: &Project) -> Vec<String> {
 }
 
 /// What changed, so the app can update the engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RackAction {
     /// Notes, swing, pattern length or the current pattern changed.
     SongChanged,
@@ -107,6 +107,14 @@ pub enum RackAction {
     AddPlugin,
     /// The current pattern's colour changed (an edit, nothing for the engine).
     PatternColor,
+    /// A browser row was dropped on channel `channel` (replace or fill it), or on the rack
+    /// below the channels (`None`: a new channel).
+    Drop {
+        /// The channel it landed on.
+        channel: Option<usize>,
+        /// What was dropped.
+        item: crate::views::RowItem,
+    },
 }
 
 /// Read-only playback information for the rack.
@@ -152,6 +160,7 @@ pub fn channel_rack(
         .iter_mut()
         .find(|p| p.id == current)
         .expect("current pattern exists");
+    let mut rows_rect = egui::Rect::NOTHING;
     egui::ScrollArea::both()
         .auto_shrink([false, true])
         .show(ui, |ui| {
@@ -169,20 +178,31 @@ pub fn channel_rack(
                     others: &names,
                     inserts,
                 };
-                let grid_x = ui
-                    .horizontal(|ui| {
-                        channel_row(
-                            ui,
-                            theme,
-                            ch,
-                            pattern,
-                            state,
-                            &row,
-                            &mut actions,
-                            &mut remove,
-                        )
-                    })
-                    .inner;
+                let line = ui.horizontal(|ui| {
+                    channel_row(
+                        ui,
+                        theme,
+                        ch,
+                        pattern,
+                        state,
+                        &row,
+                        &mut actions,
+                        &mut remove,
+                    )
+                });
+                let grid_x = line.inner;
+                rows_rect = rows_rect.union(line.response.rect);
+                let accepts = |it: &crate::views::RowItem| {
+                    crate::dnd::is_instrument(it) || crate::dnd::is_effect(it)
+                };
+                if let Some(item) = crate::dnd::drop_zone(ui, theme, line.response.rect, accepts)
+                {
+                    state.selected = i;
+                    actions.push(RackAction::Drop {
+                        channel: Some(i),
+                        item,
+                    });
+                }
                 if let (true, Some(lane)) = (row.selected, state.lane) {
                     ui.horizontal(|ui| {
                         ui.add_space((grid_x - ui.cursor().left()).max(0.0));
@@ -258,6 +278,13 @@ pub fn channel_rack(
                     add = Some(5);
                 }
                 if ui
+                    .button(tr("+ Patcher"))
+                    .on_hover_text(tr("Add a modular patcher: wire oscillators, filters, envelopes, effects and plugins freely"))
+                    .clicked()
+                {
+                    add = Some(10);
+                }
+                if ui
                     .button(tr("+ MIDI out"))
                     .on_hover_text(tr("Add a MIDI out channel: its notes play an external synth or drum machine"))
                     .clicked()
@@ -273,6 +300,17 @@ pub fn channel_rack(
                 }
             });
         });
+    // Anywhere else in the rack: a new channel.
+    let over_row = ui
+        .input(|i| i.pointer.hover_pos())
+        .is_some_and(|p| rows_rect.contains(p));
+    let new_channel = |it: &crate::views::RowItem| !over_row && crate::dnd::is_instrument(it);
+    if let Some(item) = crate::dnd::drop_zone(ui, theme, ui.max_rect(), new_channel) {
+        actions.push(RackAction::Drop {
+            channel: None,
+            item,
+        });
+    }
     if let Some(kind) = add {
         let n = project.channels.len() + 1;
         let added = match kind {
@@ -280,6 +318,7 @@ pub fn channel_rack(
             2 => project.add_drum_channel(&format!("Drums {n}")),
             5 => project.add_layer_channel(&format!("Layer {n}")),
             9 => project.add_midi_out_channel(&format!("MIDI out {n}")),
+            10 => project.add_patcher_channel(&format!("Patcher {n}")),
             6 => project.add_drum_synth_channel(&format!("Drum synth {n}")),
             8 => project.add_player_channel(&format!("Player {n}"), gt_core::Player::default()),
             3 | 4 | 7 => {

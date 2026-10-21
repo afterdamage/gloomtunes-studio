@@ -40,10 +40,12 @@ struct TablesKey {
     loaded: [bool; 2],
 }
 
+mod audition;
 mod automate;
 mod bounce;
 mod browse;
 mod controllers;
+mod drop;
 mod edit_audio;
 mod hardware;
 mod midi;
@@ -72,6 +74,7 @@ struct SentEffect {
     kind: EffectKind,
     params: Vec<f32>,
     file: Option<PathBuf>,
+    patch: Option<Box<gt_core::Patch>>,
 }
 
 pub struct GloomApp {
@@ -109,7 +112,14 @@ pub struct GloomApp {
     layout: Layout,
     /// A floating view to bring to the front this frame.
     focus_view: Option<MainView>,
+    /// Where the docked view was drawn last frame, for files dropped from the file manager.
+    view_rects: Vec<(MainView, egui::Rect)>,
+    /// The browser panel's area last frame (a browser row released there is not used).
+    browser_rect: Option<egui::Rect>,
+    /// The pointer's last known position in the main window.
+    last_pointer: Option<egui::Pos2>,
     browse: browse::BrowseState,
+    auditions: audition::Auditions,
     /// Tempo of the sound being previewed, when it follows the project tempo.
     preview_bpm: Option<f32>,
     /// A project to open once unsaved changes are dealt with.
@@ -154,6 +164,12 @@ pub struct GloomApp {
     sent_fx: Vec<[Option<SentEffect>; FX_SLOTS]>,
     /// Per channel slot, what its synth's wavetables were built from (none: no tables sent).
     sent_tables: Vec<Option<TablesKey>>,
+    /// The patch each patcher channel's engine slot runs (Prompt 34).
+    sent_patches: Vec<Option<gt_core::Patch>>,
+    /// The patcher editor of the selected channel.
+    patcher_state: gt_ui::views::PatcherState,
+    /// The patch the plugin browser adds a module to.
+    patch_plugin_target: Option<gt_ui::views::PatchPlace>,
     strip_meters: Vec<[MeterBallistics; 2]>,
     strip_view: Vec<StripMeter>,
     fx_meters: Vec<[f32; FX_SLOTS]>,
@@ -355,7 +371,11 @@ impl GloomApp {
             activity: [0.0; MAX_CHANNELS],
             layout: Layout::from_prefs(&settings.ui.layout),
             focus_view: None,
+            view_rects: Vec::new(),
+            browser_rect: None,
+            last_pointer: None,
             browse: browse::BrowseState::default(),
+            auditions: audition::Auditions::default(),
             preview_bpm: None,
             pending_open: None,
             show_history: false,
@@ -384,6 +404,9 @@ impl GloomApp {
             sent_mixer: None,
             sent_fx: vec![Default::default(); STRIPS],
             sent_tables: Vec::new(),
+            sent_patches: Vec::new(),
+            patcher_state: gt_ui::views::PatcherState::default(),
+            patch_plugin_target: None,
             strip_meters: vec![Default::default(); STRIPS],
             strip_view: vec![StripMeter::default(); STRIPS],
             fx_meters: vec![[0.0; FX_SLOTS]; STRIPS],
@@ -836,29 +859,6 @@ impl GloomApp {
         self.pending_edit = Some("Fill pads");
     }
 
-    /// Files dropped on the window: audio files (or folders of them) go to the selected
-    /// sampler, one as its sample and several as zones.
-    fn on_dropped_files(&mut self, paths: &[std::path::PathBuf]) {
-        let mut files = Vec::new();
-        for p in paths {
-            if p.is_dir() {
-                files.extend(gt_project::list_audio_files(p));
-            } else {
-                files.push(p.clone());
-            }
-        }
-        if self
-            .project
-            .channels
-            .get(self.rack.selected)
-            .is_some_and(|c| c.drums().is_some())
-        {
-            self.fill_pads(&files);
-        } else {
-            self.load_zones(&files);
-        }
-    }
-
     /// Sends every channel's sample and settings, clears slots no longer used, and the song.
     fn push_channels(&mut self) {
         let n = self.project.channels.len();
@@ -1077,6 +1077,7 @@ impl GloomApp {
                 key: ROOT_KEY,
             }),
             RackAction::PatternColor => self.pending_edit = Some("Pattern colour"),
+            RackAction::Drop { channel, item } => self.drop_on_rack(channel, item),
         }
     }
 
@@ -1292,7 +1293,29 @@ impl GloomApp {
                         }
                     }
                     (Some(w), Some(h))
+                        if w.kind == EffectKind::Patcher
+                            && h.kind == EffectKind::Patcher
+                            && matches!((&w.patch, &h.patch), (Some(a), Some(b))
+                                if gt_engine::same_structure(a, b)) =>
+                    {
+                        let patch = w.patch.as_deref().expect("matched");
+                        if Some(patch) != h.patch.as_deref()
+                            && self.try_send(EngineCommand::SetPatchValues {
+                                target: gt_engine::PatchTarget::Effect {
+                                    strip: strip as u16,
+                                    slot: k as u8,
+                                },
+                                values: Box::new(gt_engine::PatchUpdate::of(patch)),
+                            })
+                        {
+                            if let Some(s) = self.sent_fx[strip][k].as_mut() {
+                                s.patch = w.patch.clone();
+                            }
+                        }
+                    }
+                    (Some(w), Some(h))
                         if w.kind == h.kind
+                            && w.kind != EffectKind::Patcher
                             && w.file == h.file
                             && !w
                                 .params
@@ -1330,6 +1353,7 @@ impl GloomApp {
                                 kind: w.kind,
                                 params: w.params,
                                 file: w.file,
+                                patch: w.patch,
                             });
                         }
                     }
@@ -1578,6 +1602,40 @@ impl GloomApp {
         }
     }
 
+    /// Sends each patcher channel's patch to the engine when it changed: new values alone
+    /// when the structure is the same, else the patch built again (it carries on playing).
+    fn sync_patches(&mut self) {
+        if self.audio.engine().is_none() {
+            return;
+        }
+        let rate = self.rate() as f32;
+        let n = self.project.channels.len();
+        self.sent_patches.resize(n, None);
+        for i in 0..n {
+            let want = self.project.channels[i].patch();
+            let have = self.sent_patches[i].as_ref();
+            if want == have {
+                continue;
+            }
+            let cmd = match (want, have) {
+                (Some(w), Some(h)) if gt_engine::same_structure(w, h) => {
+                    EngineCommand::SetPatchValues {
+                        target: gt_engine::PatchTarget::Channel(i as u16),
+                        values: Box::new(gt_engine::PatchUpdate::of(w)),
+                    }
+                }
+                (w, _) => EngineCommand::SetChannelPatch {
+                    slot: i as u16,
+                    patch: w.map(|w| Box::new(gt_engine::PatchDsp::build(w, rate))),
+                },
+            };
+            let want = want.cloned();
+            if self.try_send(cmd) {
+                self.sent_patches[i] = want;
+            }
+        }
+    }
+
     /// Brings a freshly created engine up to date with the current settings.
     fn sync_new_engine(&mut self) {
         self.song_tempo = self.project.song_tempo();
@@ -1608,6 +1666,7 @@ impl GloomApp {
         self.sent_mixer = None;
         self.sent_fx = vec![Default::default(); STRIPS];
         self.sent_tables.clear();
+        self.sent_patches.clear();
         self.lane_fx.clear();
         self.mod_fx.clear();
         self.sent_mods = None;
@@ -2038,6 +2097,9 @@ impl GloomApp {
                     self.dialog = Some(Dialog::NewProject { templates });
                 }
             }
+            Then::Idea(idea) => {
+                self.replace_project(gt_core::idea::build(&idea), None);
+            }
             Then::Demo(n) => {
                 if let Some(demo) = gt_core::demos::DEMOS.get(n) {
                     self.replace_project((demo.build)(), None);
@@ -2187,6 +2249,13 @@ impl GloomApp {
                 self.dialog = (!templates.is_empty()).then_some(Dialog::NewProject { templates });
             }
             DialogAction::SaveTemplate(name) => self.save_template(&name),
+            DialogAction::IdeaForm => {
+                self.dialog = Some(Dialog::Idea(gt_core::idea::Idea::default()));
+            }
+            DialogAction::BuildIdea(idea) => {
+                self.dialog = None;
+                self.request(Then::Idea(idea));
+            }
             DialogAction::CancelExport => {
                 if let Some(Dialog::Export(form)) = &self.dialog {
                     if let Some(p) = &form.running {
@@ -2390,6 +2459,9 @@ impl GloomApp {
                     pick = then.map(FileCmd::Request);
                 }
             }
+            if ui.button(tr("Start from an idea…")).clicked() {
+                pick = Some(FileCmd::Idea);
+            }
             ui.menu_button(tr("Demo songs"), |ui| {
                 for (n, demo) in gt_core::demos::DEMOS.iter().enumerate() {
                     if ui
@@ -2536,6 +2608,9 @@ impl GloomApp {
             FileCmd::Export => self.show_export(),
             FileCmd::ImportMidi => self.show_import_midi(),
             FileCmd::ExportMidi => self.show_export_midi(),
+            FileCmd::Idea => {
+                self.dialog = Some(Dialog::Idea(gt_core::idea::Idea::default()));
+            }
             FileCmd::SaveTemplate => {
                 self.dialog = Some(Dialog::SaveTemplate {
                     name: self.doc_name(),
@@ -2629,6 +2704,7 @@ enum FileCmd {
     ImportMidi,
     ExportMidi,
     SaveTemplate,
+    Idea,
 }
 
 impl eframe::App for GloomApp {
@@ -2640,6 +2716,9 @@ impl eframe::App for GloomApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if let Some(p) = ctx.input(|i| i.pointer.latest_pos()) {
+            self.last_pointer = Some(p);
+        }
         self.perf.frame(frame.info().cpu_usage);
         self.audio.poll();
         if self.audio.take_fresh_engine() {
@@ -2650,6 +2729,7 @@ impl eframe::App for GloomApp {
         self.on_samples_ready(ready);
         self.poll_index();
         self.poll_preview();
+        self.poll_audition();
         self.apply_ui_prefs(&ctx);
 
         let dt = ctx.input(|i| i.stable_dt).min(0.1);
@@ -2701,46 +2781,48 @@ impl eframe::App for GloomApp {
         let transport_actions = egui::Panel::top("transport")
             .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(8))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    self.file_menu(ui);
-                    ui.separator();
-                    let a =
-                        transport_bar(ui, &theme, &mut self.transport, &self.project.signatures);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(egui::Button::selectable(self.show_settings, tr("Settings")))
-                            .on_hover_text(tr(
-                                "Audio device, MIDI, shortcuts, theme, performance and privacy",
-                            ))
-                            .clicked()
-                        {
-                            self.show_settings = !self.show_settings;
-                        }
-                        let redo =
-                            ui.add_enabled(redo_tip.is_some(), egui::Button::new(tr("Redo")));
-                        if redo
-                            .on_hover_text(redo_tip.as_deref().unwrap_or("Nothing to redo"))
-                            .clicked()
-                        {
-                            undo_clicked = Some(true);
-                        }
-                        let undo =
-                            ui.add_enabled(undo_tip.is_some(), egui::Button::new(tr("Undo")));
-                        if undo
-                            .on_hover_text(undo_tip.as_deref().unwrap_or("Nothing to undo"))
-                            .clicked()
-                        {
-                            undo_clicked = Some(false);
-                        }
-                        gt_ui::widgets::level_meter(
-                            ui,
-                            &theme,
-                            self.meter.level_db(),
-                            egui::vec2(90.0, 8.0),
-                        );
-                        self.cpu_meter_ui(ui, &theme);
-                    });
-                    a
+                // The meters and buttons on the right first; the menu and transport fill the
+                // rest and wrap to a second row when the window is narrow.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(egui::Button::selectable(self.show_settings, tr("Settings")))
+                        .on_hover_text(tr(
+                            "Audio device, MIDI, shortcuts, theme, performance and privacy",
+                        ))
+                        .clicked()
+                    {
+                        self.show_settings = !self.show_settings;
+                    }
+                    let redo = ui.add_enabled(redo_tip.is_some(), egui::Button::new(tr("Redo")));
+                    if redo
+                        .on_hover_text(redo_tip.as_deref().unwrap_or("Nothing to redo"))
+                        .clicked()
+                    {
+                        undo_clicked = Some(true);
+                    }
+                    let undo = ui.add_enabled(undo_tip.is_some(), egui::Button::new(tr("Undo")));
+                    if undo
+                        .on_hover_text(undo_tip.as_deref().unwrap_or("Nothing to undo"))
+                        .clicked()
+                    {
+                        undo_clicked = Some(false);
+                    }
+                    gt_ui::widgets::level_meter(
+                        ui,
+                        &theme,
+                        self.meter.level_db(),
+                        egui::vec2(90.0, 8.0),
+                    );
+                    self.cpu_meter_ui(ui, &theme);
+                    ui.add_space(8.0);
+                    let wrap =
+                        egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true);
+                    ui.with_layout(wrap, |ui| {
+                        self.file_menu(ui);
+                        ui.separator();
+                        transport_bar(ui, &theme, &mut self.transport, &self.project.signatures)
+                    })
+                    .inner
                 })
                 .inner
             })
@@ -2766,16 +2848,18 @@ impl eframe::App for GloomApp {
             .get(self.rack.selected)
             .filter(|c| c.sampler().is_some())
             .map(|c| c.name.clone());
+        self.browser_rect = None;
         if self.layout.browser {
-            let browser_actions = egui::Panel::left("browser")
+            let panel = egui::Panel::left("browser")
                 .resizable(true)
                 .default_size(250.0)
                 .min_size(180.0)
                 .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(8))
                 .show(ui, |ui| {
                     browser(ui, &theme, &mut self.browser, target.as_deref())
-                })
-                .inner;
+                });
+            self.browser_rect = Some(panel.response.rect);
+            let browser_actions = panel.inner;
             for a in browser_actions {
                 self.on_browser(a);
             }
@@ -2800,6 +2884,10 @@ impl eframe::App for GloomApp {
             .get(self.rack.selected)
             .and_then(|c| match &c.instrument {
                 Instrument::Plugin(p) => {
+                    Some(plugin_view(&self.plugins, &self.project, p.instance))
+                }
+                Instrument::Patcher(patch) => {
+                    let p = patch.node(self.patcher_state.selected?)?.plugin.as_ref()?;
                     Some(plugin_view(&self.plugins, &self.project, p.instance))
                 }
                 _ => None,
@@ -2933,6 +3021,42 @@ impl eframe::App for GloomApp {
                             };
                             (false, synth_panel(ui, &theme, &mut ch.name, patch, view))
                         }
+                        Instrument::Patcher(patch) => {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(tr("Patcher"))
+                                        .strong()
+                                        .color(theme.accent),
+                                );
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut ch.name).desired_width(140.0),
+                                )
+                                .on_hover_text(tr("Channel name"));
+                            });
+                            let place = gt_ui::views::PatchPlace::Channel(ch.id);
+                            let mut acts = Vec::new();
+                            let changed = gt_ui::views::patcher_view(
+                                ui,
+                                &theme,
+                                place,
+                                patch,
+                                &mut self.patcher_state,
+                                &channel_plugin_view,
+                                &mut acts,
+                            );
+                            for a in acts {
+                                match a {
+                                    gt_ui::views::PatcherAction::AddPlugin => {
+                                        self.patch_plugin_target = Some(place);
+                                    }
+                                    gt_ui::views::PatcherAction::Plugin(pa) => {
+                                        plugin_actions.push(pa);
+                                    }
+                                }
+                            }
+                            plugin_changed |= changed;
+                            (false, Vec::new())
+                        }
                         Instrument::Plugin(p) => {
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new(&p.name).strong().color(theme.accent));
@@ -2974,17 +3098,15 @@ impl eframe::App for GloomApp {
                 self.load_zones(&files);
             }
         }
-        if show_instrument {
-            let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
-                i.raw
-                    .dropped_files
-                    .iter()
-                    .map(|f| f.path().to_path_buf())
-                    .collect()
-            });
-            if !dropped.is_empty() {
-                self.on_dropped_files(&dropped);
-            }
+        let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+        if !dropped.is_empty() {
+            self.on_dropped_files(&dropped);
         }
         for a in synth_actions {
             self.on_synth_panel(a);
@@ -3013,6 +3135,15 @@ impl eframe::App for GloomApp {
             .show(ui, |ui| self.docked_views(ui, &theme, &cx, &mut out));
         self.floating_views(&ctx, &theme, &cx, &mut out);
         self.on_views(out);
+        // A browser row released where no view took it.
+        if let Some(item) = gt_ui::dnd::take_release(&ctx) {
+            let over_browser = self
+                .browser_rect
+                .zip(self.last_pointer)
+                .is_some_and(|(r, p)| r.contains(p));
+            self.drop_anywhere(item, over_browser);
+        }
+        gt_ui::dnd::paint_dragged(&ctx, &theme);
         self.workflow_windows(&ctx, &theme);
         self.audio_editor_window(&ctx, &theme);
         if let Some((strip, k)) = self.mixer_state.file_request.take() {
@@ -3031,6 +3162,14 @@ impl eframe::App for GloomApp {
             self.show_plugins = true;
             self.plugin_browser.kind = Some(PluginKind::Effect);
             self.plugin_slot = Some(target);
+            self.patch_plugin_target = None;
+        }
+        if let Some((strip, slot)) = self.mixer_state.patch_plugin_request.take() {
+            self.patch_plugin_target = Some(gt_ui::views::PatchPlace::Effect { strip, slot });
+        }
+        if self.patch_plugin_target.is_some() && !self.show_plugins {
+            self.show_plugins = true;
+            self.plugin_browser.kind = None;
         }
         plugin_actions.append(&mut self.mixer_state.plugin_actions);
         for a in plugin_actions {
@@ -3062,6 +3201,7 @@ impl eframe::App for GloomApp {
         self.automation_frame(&ctx, &plugin_moves);
         self.sync_mixer();
         self.sync_tables();
+        self.sync_patches();
         self.sync_modulation();
         if !self.layout.visible(MainView::PianoRoll) {
             // Hidden mid-gesture (F6, tab click): the roll never sees the release.
@@ -3079,7 +3219,10 @@ impl eframe::App for GloomApp {
                     .iter()
                     .flatten()
                     .any(MeterBallistics::is_moving);
-        let busy = self.library.is_busy() || self.indexing() || self.waiting_preview();
+        let busy = self.library.is_busy()
+            || self.indexing()
+            || self.waiting_preview()
+            || self.auditions.waiting();
         if playing || self.test_tone || self.meter.is_moving() || lights || busy {
             ctx.request_repaint_after(Duration::from_millis(16));
         } else if self.audio.engine().is_some() {

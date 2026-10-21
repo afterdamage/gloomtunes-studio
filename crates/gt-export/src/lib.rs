@@ -723,6 +723,16 @@ fn load_engine(
                 );
             }
         }
+        if let Some(patch) = ch.patch() {
+            send(
+                h,
+                p,
+                EngineCommand::SetChannelPatch {
+                    slot: i as u16,
+                    patch: Some(Box::new(gt_engine::PatchDsp::build(patch, rate as f32))),
+                },
+            );
+        }
         send(
             h,
             p,

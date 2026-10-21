@@ -78,6 +78,8 @@ pub(crate) struct ChannelSlot {
     sustained: [bool; VOICES_PER_CHANNEL],
     /// Read step of the last sampler note, where portamento starts from.
     last_step: Option<f64>,
+    /// A patcher channel's patch (Prompt 34).
+    pub(crate) patch: Option<Box<crate::PatchDsp>>,
 }
 
 /// Mod X below the middle closes a per-voice low-pass down to this frequency at 0.
@@ -128,6 +130,7 @@ impl ChannelSlot {
             sustain: false,
             sustained: [false; VOICES_PER_CHANNEL],
             last_step: None,
+            patch: None,
         }
     }
 
@@ -335,6 +338,23 @@ impl ChannelSlot {
         self.synth.set_tables(t)
     }
 
+    /// Replaces the patch; the new one takes over the old one's voices and tails.
+    pub(crate) fn set_patch(
+        &mut self,
+        p: Option<Box<crate::PatchDsp>>,
+    ) -> Option<Box<crate::PatchDsp>> {
+        let mut old = std::mem::replace(&mut self.patch, p);
+        if let (Some(new), Some(o)) = (self.patch.as_mut(), old.as_mut()) {
+            new.inherit(o);
+        }
+        old
+    }
+
+    /// True for a patcher channel (its notes go to the patch at their offsets).
+    pub(crate) fn is_patcher(&self) -> bool {
+        self.params.kind == InstrumentKind::Patcher
+    }
+
     pub(crate) fn set_zones(&mut self, z: Option<Arc<ZoneMap>>) -> Option<Arc<ZoneMap>> {
         self.kill_all();
         std::mem::replace(&mut self.zones, z)
@@ -374,6 +394,12 @@ impl ChannelSlot {
     /// newest held voice glides to its key instead.
     pub(crate) fn note_on_expr(&mut self, key: u8, velocity: f32, age: u64, e: NoteExpr) {
         if self.params.kind == InstrumentKind::Plugin {
+            return;
+        }
+        if self.is_patcher() {
+            if let Some(p) = &mut self.patch {
+                p.note_on(0, key, velocity);
+            }
             return;
         }
         if self.params.kind == InstrumentKind::Synth {
@@ -584,6 +610,13 @@ impl ChannelSlot {
     /// Releases held voices playing `key` (one-shot voices ignore it). With the sustain
     /// pedal down they keep sounding until it comes up.
     pub(crate) fn note_off(&mut self, key: u8) {
+        if let Some(p) = self
+            .patch
+            .as_mut()
+            .filter(|_| self.params.kind == InstrumentKind::Patcher)
+        {
+            p.note_off(0, key);
+        }
         self.synth.note_off(key);
         for (v, s) in self.voices.iter_mut().zip(&mut self.sustained) {
             if v.is_held() && !*s && v.key() == key {
@@ -598,6 +631,9 @@ impl ChannelSlot {
 
     /// Releases every voice.
     pub(crate) fn release_all(&mut self) {
+        if let Some(p) = &mut self.patch {
+            p.release_all(0);
+        }
         self.synth.release_all();
         for v in &mut self.voices {
             v.release();
@@ -607,6 +643,9 @@ impl ChannelSlot {
 
     /// Cuts every voice with a short fade: another channel of its choke group played.
     pub(crate) fn choke(&mut self) {
+        if let Some(p) = &mut self.patch {
+            p.release_all(0);
+        }
         self.synth.choke_all();
         for v in &mut self.voices {
             if v.is_active() {
@@ -618,6 +657,9 @@ impl ChannelSlot {
 
     /// Silences every voice at once.
     pub(crate) fn kill_all(&mut self) {
+        if let Some(p) = &mut self.patch {
+            p.release_all(0);
+        }
         self.synth.kill_all();
         for v in &mut self.voices {
             v.kill();

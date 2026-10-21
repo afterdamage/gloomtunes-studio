@@ -58,6 +58,8 @@ pub enum EffectKind {
     Stutter,
     /// A third-party effect plugin (its parameters live in [`EffectSlot::plugin`]).
     Plugin,
+    /// A modular patch (Prompt 34, in [`EffectSlot::patch`]).
+    Patcher,
 }
 
 const fn info(
@@ -822,6 +824,7 @@ impl EffectKind {
             Self::Vocoder => "vocoder",
             Self::Stutter => "stutter",
             Self::Plugin => "plugin",
+            Self::Patcher => "patcher",
         }
     }
 
@@ -850,6 +853,7 @@ impl EffectKind {
             Self::Vocoder => "Vocoder",
             Self::Stutter => "Stutter / Gate",
             Self::Plugin => "Plugin",
+            Self::Patcher => "Patcher",
         }
     }
 
@@ -857,7 +861,7 @@ impl EffectKind {
     pub fn from_key(key: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
-            .chain([Self::Plugin])
+            .chain([Self::Plugin, Self::Patcher])
             .find(|k| k.key() == key)
     }
 
@@ -885,7 +889,7 @@ impl EffectKind {
             Self::PitchShift => &PITCH,
             Self::Vocoder => &VOCODER,
             Self::Stutter => &STUTTER,
-            Self::Plugin => &[],
+            Self::Plugin | Self::Patcher => &[],
         }
     }
 }
@@ -906,6 +910,8 @@ pub struct EffectSlot {
     pub plugin: Option<Box<PluginRef>>,
     /// An audio file the effect uses (a convolution reverb's own impulse response).
     pub file: Option<std::path::PathBuf>,
+    /// The patch, when `kind` is [`EffectKind::Patcher`].
+    pub patch: Option<Box<crate::patcher::Patch>>,
 }
 
 impl EffectSlot {
@@ -918,6 +924,7 @@ impl EffectSlot {
             mix: 1.0,
             plugin: None,
             file: None,
+            patch: (kind == EffectKind::Patcher).then(|| Box::new(crate::patcher::Patch::effect())),
         }
     }
 
@@ -930,6 +937,7 @@ impl EffectSlot {
             mix: 1.0,
             plugin: Some(Box::new(plugin)),
             file: None,
+            patch: None,
         }
     }
 
@@ -974,6 +982,13 @@ impl EffectSlot {
         }
         if let Some(p) = &mut self.plugin {
             p.sanitize();
+        }
+        match (self.kind, &mut self.patch) {
+            (EffectKind::Patcher, Some(p)) => p.sanitize(),
+            (EffectKind::Patcher, None) => {
+                self.patch = Some(Box::new(crate::patcher::Patch::effect()));
+            }
+            _ => self.patch = None,
         }
         let table = self.kind.params();
         self.params.resize(table.len(), 0.0);

@@ -25,6 +25,7 @@ mod live;
 mod load;
 pub mod midi_out;
 mod mixer;
+pub mod patcher;
 mod plugin;
 mod processor;
 mod route;
@@ -55,6 +56,7 @@ pub use mixer::{
     MAX_PDC_FRAMES,
 };
 pub use mixer::{freeze_post_fx, Tap};
+pub use patcher::{same_structure, PatchDsp, PatchTarget, PatchUpdate};
 pub use plugin::{PluginBox, PluginContext, PluginProcessor, MAX_PLUGINS};
 pub use processor::{AudioProcessor, PREVIEW_GAIN, TEST_TONE_DBFS, TEST_TONE_HZ};
 pub use song::{

@@ -33,6 +33,7 @@ use gt_core::{
 };
 
 use crate::i18n::tr;
+use crate::views::RowItem;
 use crate::GloomTheme;
 
 const HEADER_W: f32 = 168.0;
@@ -240,6 +241,9 @@ pub struct PlaylistState {
     pub performance: bool,
     /// An audio clip to open in the audio editor (the app takes it).
     pub edit_audio: Option<ClipId>,
+    /// Sounds dropped on the window from the file manager over the playlist (the app fills
+    /// it): each becomes an audio clip where the pointer is, one track below the other.
+    pub dropped_files: Vec<SampleSource>,
     drag: Option<Drag>,
     /// Loop region being dragged (preview).
     loop_preview: Option<(i64, i64)>,
@@ -264,6 +268,7 @@ impl Default for PlaylistState {
             armed: Vec::new(),
             performance: false,
             edit_audio: None,
+            dropped_files: Vec::new(),
             drag: None,
             loop_preview: None,
             popup: None,
@@ -484,10 +489,22 @@ pub fn playlist(
 
     let mut changed = false;
     changed |= grid_input(ui, st, &geo, &grid_resp, project, &mut actions);
-    if let Some(src) = drop_audio(ui, &grid_resp, st, &geo, project, view.audio) {
-        changed = true;
-        if view.audio.peaks(&src).is_none() {
-            actions.push(PlaylistAction::Load(src));
+    let mut dropped = std::mem::take(&mut st.dropped_files);
+    if let Some(src) = dragged_sample(ui, &grid_resp) {
+        dropped.push(src);
+    }
+    if !dropped.is_empty() {
+        let at = ui
+            .input(|i| i.pointer.latest_pos())
+            .unwrap_or(grid.left_top());
+        for (k, src) in dropped.into_iter().enumerate() {
+            let p = at + vec2(0.0, k as f32 * geo.track_h);
+            if drop_audio(ui, p, st, &geo, project, view.audio, &src) {
+                changed = true;
+                if view.audio.peaks(&src).is_none() {
+                    actions.push(PlaylistAction::Load(src));
+                }
+            }
         }
     }
     let timing = ruler_input(ui, st, &geo, ruler, &ruler_resp, project, &mut actions);
@@ -1506,25 +1523,39 @@ fn drag_update(
     }
 }
 
-/// Adds an audio clip where a sound from the browser is dropped. Returns the sound.
+/// A sound from the browser released over the grid, if any (other items are left for the
+/// app).
+fn dragged_sample(ui: &Ui, resp: &Response) -> Option<SampleSource> {
+    let d = egui::DragAndDrop::payload::<crate::dnd::Dragged>(ui.ctx())?;
+    let RowItem::Sample(src) = &d.item else {
+        return None;
+    };
+    let src = src.clone();
+    resp.dnd_release_payload::<crate::dnd::Dragged>()?;
+    Some(src)
+}
+
+/// Adds an audio clip of `src` at point `p` of the grid (the track under it, the snapped
+/// tick). False when `p` is below the last track.
 fn drop_audio(
     ui: &Ui,
-    resp: &Response,
+    p: Pos2,
     st: &mut PlaylistState,
     geo: &Geo,
     project: &mut Project,
     audio: &dyn AudioLookup,
-) -> Option<SampleSource> {
-    let src = resp.dnd_release_payload::<SampleSource>()?;
-    let p = ui.input(|i| i.pointer.interact_pos())?;
-    let track = geo.track_at(geo.row(p.y))?;
+    src: &SampleSource,
+) -> bool {
+    let Some(track) = geo.track_at(geo.row(p.y)) else {
+        return false;
+    };
     let start = snap_of(ui, st)
         .floor(geo.tick(p.x), &project.signatures)
         .max(0);
     // Length: the sound's duration at the tempo where it starts, else one bar.
     let tempo = &project.tempo;
     let length = audio
-        .peaks(&src)
+        .peaks(src)
         .map(|(pk, rate)| {
             let secs = pk.frames() as f64 / f64::from(rate.max(1));
             let end = tempo.seconds_to_tick(tempo.tick_to_seconds(start as f64) + secs);
@@ -1536,7 +1567,7 @@ fn drop_audio(
         start,
         length,
         ClipKind::Audio {
-            source: (*src).clone(),
+            source: src.clone(),
             gain: 1.0,
             gaps: Vec::new(),
             takes: Vec::new(),
@@ -1545,7 +1576,7 @@ fn drop_audio(
     );
     st.selected = vec![id];
     st.selected_track = Some(track);
-    Some((*src).clone())
+    true
 }
 
 fn key_commands(ui: &Ui, st: &mut PlaylistState, project: &mut Project) -> bool {
@@ -2573,7 +2604,9 @@ fn paint(
     }
 
     // Drop target highlight.
-    if egui::DragAndDrop::has_payload_of_type::<SampleSource>(ui.ctx()) {
+    if egui::DragAndDrop::payload::<crate::dnd::Dragged>(ui.ctx())
+        .is_some_and(|d| matches!(d.item, RowItem::Sample(_)))
+    {
         if let Some(pos) = ui
             .input(|i| i.pointer.hover_pos())
             .filter(|q| grid.contains(*q))

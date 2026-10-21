@@ -477,6 +477,7 @@ pub(super) fn tools_menu(ui: &mut Ui, st: &mut PianoRollState) {
         "Tools for the selection (or all notes), with a live preview",
     ));
     let label = st.chord.map_or("No chord", |c| c.name());
+    super::fit(ui, 96.0);
     egui::ComboBox::from_id_salt("roll_chord")
         .width(96.0)
         .selected_text(label)

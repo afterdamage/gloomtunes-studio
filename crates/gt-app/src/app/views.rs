@@ -85,7 +85,14 @@ impl GloomApp {
                 let open_plugin = self.mixer_state.slot.and_then(|k| {
                     let strip = &self.project.mixer.strips
                         [self.mixer_state.selected.min(self.project.mixer.inserts())];
-                    let p = strip.slots.get(k)?.as_ref()?.plugin.as_ref()?;
+                    let slot = strip.slots.get(k)?.as_ref()?;
+                    let p = match &slot.patch {
+                        Some(patch) => patch
+                            .node(self.mixer_state.patcher.selected?)?
+                            .plugin
+                            .as_ref()?,
+                        None => slot.plugin.as_ref()?,
+                    };
                     Some(plugin_view(&self.plugins, &self.project, p.instance))
                 });
                 let scope = self.mixer_state.slot.and_then(|k| {
@@ -122,6 +129,9 @@ impl GloomApp {
                 }
                 if let Some(r) = self.mixer_state.request.take() {
                     self.on_mixer_request(r);
+                }
+                if let Some(d) = self.mixer_state.dropped.take() {
+                    self.drop_on_mixer(d);
                 }
                 if let Some(i) = self.mixer_state.remove_request.take() {
                     if self.project.remove_insert(i) {
@@ -207,8 +217,12 @@ impl GloomApp {
             }
         });
         ui.separator();
+        self.view_rects.clear();
         match shown {
-            Some(v) => self.draw_view(ui, theme, v, cx, out),
+            Some(v) => {
+                self.view_rects.push((v, ui.available_rect_before_wrap()));
+                self.draw_view(ui, theme, v, cx, out);
+            }
             None => {
                 ui.centered_and_justified(|ui| {
                     ui.label(

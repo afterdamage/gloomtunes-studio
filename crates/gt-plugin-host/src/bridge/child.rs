@@ -273,7 +273,9 @@ pub(crate) fn serve(load: &dyn Fn(&PluginInfo) -> Result<Entry, String>) -> i32 
 /// The child's audio thread: one block per request until told to quit.
 fn audio_loop(shm: &Shm, mut p: Box<dyn PluginProcessor>) {
     let (mut l, mut r) = ([0f32; RENDER_QUANTUM], [0f32; RENDER_QUANTUM]);
-    let mut seen = shm.get(Word::Request);
+    // Start from the last finished block, not the last request: the host can ask for the
+    // first block before this thread runs.
+    let mut seen = shm.done();
     let mut last = Instant::now();
     loop {
         shm.wait_request(seen, last.elapsed());

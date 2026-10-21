@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod dnd;
 pub mod i18n;
 pub mod keymap;
 pub mod param_ui;

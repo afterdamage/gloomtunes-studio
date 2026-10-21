@@ -449,6 +449,8 @@ pub struct PianoRollState {
     audition_key: Option<u8>,
     /// What the roll is editing; selection resets when it changes.
     target: Option<(u32, u32)>,
+    /// Scroll to the notes on the next frame (set when the target changes).
+    frame_notes: bool,
     /// Geometry of the last frame (for tests).
     #[cfg(test)]
     last_geo: Option<Geo>,
@@ -491,6 +493,7 @@ impl Default for PianoRollState {
             drag: None,
             audition_key: None,
             target: None,
+            frame_notes: false,
             #[cfg(test)]
             last_geo: None,
         }
@@ -506,6 +509,7 @@ impl PianoRollState {
                 self.editable.clear();
             }
             self.target = Some((pattern, channel));
+            self.frame_notes = true;
             self.selected.clear();
             self.drag = None;
             self.dialog = None;
@@ -751,6 +755,9 @@ pub fn piano_roll(
     if hovered {
         handle_wheel(ui, st, grid);
     }
+    if std::mem::take(&mut st.frame_notes) {
+        frame_notes(st, notes, rows.as_deref(), grid);
+    }
     clamp_scroll(st, grid, row_count);
     let geo = Geo {
         grid,
@@ -923,6 +930,14 @@ fn fold_rows<'n>(
     (!rows.is_empty()).then_some(rows)
 }
 
+/// Starts a new toolbar row when a combo box `width` wide would not fit on this one (a
+/// combo box lays out in a group of its own, so a wrapping row cannot wrap it by itself).
+pub(super) fn fit(ui: &mut Ui, width: f32) {
+    if ui.available_size_before_wrap().x < width + 2.0 * ui.spacing().interact_size.y {
+        ui.end_row();
+    }
+}
+
 fn toolbar(
     ui: &mut Ui,
     theme: &GloomTheme,
@@ -954,6 +969,7 @@ fn toolbar(
         }
         ui.separator();
         ui.label(dim(tr("Snap")));
+        fit(ui, 56.0);
         egui::ComboBox::from_id_salt("roll_snap")
             .width(56.0)
             .selected_text(st.snap.label())
@@ -964,6 +980,7 @@ fn toolbar(
             });
         ui.separator();
         ui.label(dim(tr("Scale")));
+        fit(ui, 40.0);
         egui::ComboBox::from_id_salt("roll_scale_root")
             .width(40.0)
             .selected_text(key_name(st.scale_root).trim_end_matches('0').to_owned())
@@ -973,6 +990,7 @@ fn toolbar(
                     ui.selectable_value(&mut st.scale_root, r, name);
                 }
             });
+        fit(ui, 120.0);
         egui::ComboBox::from_id_salt("roll_scale")
             .width(120.0)
             .selected_text(st.scale.name())
@@ -1275,6 +1293,29 @@ fn handle_wheel(ui: &Ui, st: &mut PianoRollState, grid: Rect) {
     } else {
         st.scroll_rows -= scroll.y / st.key_height;
         st.scroll_tick -= f64::from(scroll.x / (st.px_per_beat / PPQ as f32));
+    }
+}
+
+/// Centres the rows on the notes, and scrolls back in time when they start before the left
+/// edge or after the right one (a newly shown channel opens on its notes).
+fn frame_notes(st: &mut PianoRollState, notes: &[Note], rows: Option<&[i32]>, grid: Rect) {
+    let (Some(lo), Some(hi)) = (
+        notes.iter().map(|n| i32::from(n.key)).min(),
+        notes.iter().map(|n| i32::from(n.key)).max(),
+    ) else {
+        return;
+    };
+    let row = |key: i32| match rows {
+        None => (KEYS - 1 - key) as f32,
+        Some(r) => r.partition_point(|&k| k > key) as f32,
+    };
+    let mid = (row(lo) + row(hi)) * 0.5;
+    st.scroll_rows = mid - grid.height() / st.key_height * 0.5;
+    let first = notes.iter().map(|n| n.start).min().unwrap_or(0);
+    let px_per_tick = f64::from(st.px_per_beat) / PPQ as f64;
+    let last_visible = st.scroll_tick + f64::from(grid.width()) / px_per_tick;
+    if (first as f64) < st.scroll_tick || first as f64 > last_visible {
+        st.scroll_tick = (first - first.rem_euclid(PPQ * 4)) as f64;
     }
 }
 

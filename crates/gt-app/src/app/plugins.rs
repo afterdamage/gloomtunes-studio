@@ -68,7 +68,19 @@ impl GloomApp {
                         .project
                         .channel_index(c)
                         .map_or_else(String::new, |i| self.project.channels[i].name.clone()),
-                    PluginOwner::Effect { strip, slot } => self.slot_name((strip, slot)),
+                    PluginOwner::Effect { strip, slot }
+                    | PluginOwner::Node {
+                        channel: None,
+                        strip,
+                        slot,
+                        ..
+                    } => self.slot_name((strip, slot)),
+                    PluginOwner::Node {
+                        channel: Some(c), ..
+                    } => self
+                        .project
+                        .channel_index(c)
+                        .map_or_else(String::new, |i| self.project.channels[i].name.clone()),
                 };
                 let title = format!("{} · {place}", p.name);
                 if let Err(e) = self.plugins.open_editor(id, &title) {
@@ -149,7 +161,18 @@ impl GloomApp {
             .map(|p| p.display().to_string())
             .collect();
         let target = self.effect_target();
-        let target_name = target.map(|t| self.slot_name(t));
+        let target_name = match self.patch_plugin_target {
+            Some(gt_ui::views::PatchPlace::Channel(c)) => self
+                .project
+                .channel_index(c)
+                .map(|i| format!("{} {}", tr("the patch of"), self.project.channels[i].name)),
+            Some(gt_ui::views::PatchPlace::Effect { strip, slot }) => Some(format!(
+                "{} {}",
+                tr("the patch in"),
+                self.slot_name((strip, slot))
+            )),
+            None => target.map(|t| self.slot_name(t)),
+        };
         let scanning = self.plugins.scanning().cloned();
         let view = PluginBrowserView {
             plugins: &entries,
@@ -174,6 +197,7 @@ impl GloomApp {
         if !open {
             self.show_plugins = false;
             self.plugin_slot = None;
+            self.patch_plugin_target = None;
         }
         for a in actions {
             match a {
@@ -210,8 +234,13 @@ impl GloomApp {
         }
     }
 
-    /// Loads `info` and adds it: an instrument as a new channel, an effect to `target`.
+    /// Loads `info` and adds it: into the patch the patcher asked for, else an instrument as a
+    /// new channel, an effect to `target`.
     pub(super) fn add_plugin(&mut self, info: &PluginInfo, target: Option<(usize, usize)>) {
+        if let Some(place) = self.patch_plugin_target {
+            self.add_patch_plugin(info, place);
+            return;
+        }
         let kind = info.kind();
         if kind == PluginKind::Effect && target.is_none() {
             return;
@@ -253,5 +282,47 @@ impl GloomApp {
         self.toast(format!("Added {}", info.name));
         self.show_plugins = false;
         self.plugin_slot = None;
+    }
+
+    /// Adds `info` as a module of the patch at `place`.
+    fn add_patch_plugin(&mut self, info: &PluginInfo, place: gt_ui::views::PatchPlace) {
+        let plugin = match self.plugins.instantiate(info) {
+            Ok(p) => p,
+            Err(e) => {
+                self.toast(e);
+                return;
+            }
+        };
+        let patch = match place {
+            gt_ui::views::PatchPlace::Channel(c) => self
+                .project
+                .channel_index(c)
+                .and_then(|i| self.project.channels[i].patch_mut()),
+            gt_ui::views::PatchPlace::Effect { strip, slot } => self
+                .project
+                .mixer
+                .strips
+                .get_mut(strip)
+                .and_then(|s| s.slots.get_mut(slot)?.as_mut()?.patch.as_deref_mut()),
+        };
+        let Some(patch) = patch else {
+            return;
+        };
+        let at = [60.0, 160.0];
+        match patch.add_plugin(plugin, at) {
+            Some(id) => {
+                match place {
+                    gt_ui::views::PatchPlace::Channel(_) => self.patcher_state.selected = Some(id),
+                    gt_ui::views::PatchPlace::Effect { .. } => {
+                        self.mixer_state.patcher.selected = Some(id);
+                    }
+                }
+                self.pending_edit = Some("Add plugin module");
+                self.toast(format!("Added {}", info.name));
+            }
+            None => self.toast(tr("The patch is full")),
+        }
+        self.show_plugins = false;
+        self.patch_plugin_target = None;
     }
 }
