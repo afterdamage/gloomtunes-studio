@@ -43,7 +43,7 @@ asio = ["cpal/asio"]          # Windows: needs the Steinberg ASIO SDK (not shipp
 jack = ["cpal/jack"]          # Linux: needs libjack-jackd2-dev
 pipewire = ["cpal/pipewire"]  # Linux: needs libpipewire-0.3-dev
 
-# Ubuntu/Debian package: `cargo deb -p gt-app` (see README, "Packaging").
+# Ubuntu/Debian package: `cargo deb -p gt-app` (see docs/BUILDING.md, "Packaging and releases").
 [package.metadata.deb]
 name = "gloomtunes-studio"
 maintainer = "Vasil Vasilev"
