@@ -506,6 +506,8 @@ pub struct Note {
     pub muted: bool,
     /// Colour group, 0 to [`Note::COLORS`] - 1.
     pub color: u8,
+    /// Polyphonic automation: an expression curve over the note (Prompt 34, D152).
+    pub curve: crate::NoteCurve,
 }
 
 impl Note {
@@ -530,6 +532,7 @@ impl Note {
             porta: false,
             muted: false,
             color: 0,
+            curve: crate::NoteCurve::default(),
         }
     }
 
@@ -556,6 +559,7 @@ impl Note {
         self.mod_x = fix(self.mod_x, 0.0, 1.0, Self::NEUTRAL);
         self.mod_y = fix(self.mod_y, 0.0, 1.0, Self::NEUTRAL);
         self.color = self.color.min(Self::COLORS - 1);
+        self.curve.sanitize();
     }
 }
 
@@ -701,6 +705,8 @@ pub struct Project {
     pub current_arrangement: usize,
     /// LFOs and envelope followers on parameters, at most [`MAX_MODULATORS`].
     pub modulators: Vec<Modulator>,
+    /// The text of each formula modulator, by modulator id (Prompt 34, D151).
+    pub formulas: BTreeMap<ModulatorId, String>,
     /// MIDI controllers bound to parameters (MIDI learn).
     pub midi_map: Vec<crate::MidiBinding>,
     /// MIDI inputs that play fixed channels (the rest play the selected channel).
@@ -751,6 +757,7 @@ impl Project {
             arrangements: vec![crate::Arrangement::named("Arrangement 1")],
             current_arrangement: 0,
             modulators: Vec::new(),
+            formulas: BTreeMap::new(),
             midi_map: Vec::new(),
             midi_routes: Vec::new(),
             info: ProjectInfo::default(),
@@ -859,7 +866,16 @@ impl Project {
             amount: 0.5,
             enabled: true,
         });
+        if source == ModSourceKind::Formula {
+            self.formulas
+                .insert(id, crate::modulation::DEFAULT_FORMULA.to_owned());
+        }
         Some(id)
+    }
+
+    /// The text of formula modulator `id` (`"0"` when it has none).
+    pub fn formula(&self, id: ModulatorId) -> &str {
+        self.formulas.get(&id).map_or("0", String::as_str)
     }
 
     /// The modulator with this id.
@@ -867,9 +883,19 @@ impl Project {
         self.modulators.iter_mut().find(|m| m.id == id)
     }
 
-    /// Removes a modulator.
+    /// Removes a modulator, with its formula and the modulators that move it.
     pub fn remove_modulator(&mut self, id: ModulatorId) {
-        self.modulators.retain(|m| m.id != id);
+        let mut gone = vec![id];
+        while let Some(id) = gone.pop() {
+            self.modulators.retain(|m| m.id != id);
+            self.formulas.remove(&id);
+            gone.extend(
+                self.modulators
+                    .iter()
+                    .filter(|m| matches!(m.target, ParamId::Modulator { id: t, .. } if t == id))
+                    .map(|m| m.id),
+            );
+        }
     }
 
     /// "Intro" (kick and hat) and "Break" (bass and hat) patterns, and an arrangement: intro,
@@ -1155,6 +1181,13 @@ impl Project {
         for m in &mut self.modulators {
             m.sanitize();
         }
+        let formula_ids: std::collections::BTreeSet<ModulatorId> = self
+            .modulators
+            .iter()
+            .filter(|m| m.source == ModSourceKind::Formula)
+            .map(|m| m.id)
+            .collect();
+        self.formulas.retain(|id, _| formula_ids.contains(id));
         self.sanitize_midi();
         self.make_plugin_instances_unique();
         let next = self.next_id;

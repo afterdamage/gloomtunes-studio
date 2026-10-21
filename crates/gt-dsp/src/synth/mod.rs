@@ -111,6 +111,20 @@ pub struct WtOscSettings {
     pub warp_amount: f32,
 }
 
+/// An envelope's coefficients with its times scaled per voice (attack, decay, release).
+fn env_params(e: &EnvSettings, sr: f32, scale: [f32; 3]) -> AdsrParams {
+    if scale == [1.0; 3] {
+        return e.params(sr);
+    }
+    AdsrParams::new(
+        sr,
+        e.attack_ms * scale[0],
+        e.decay_ms * scale[1],
+        e.sustain,
+        e.release_ms * scale[2],
+    )
+}
+
 /// Voices per synth.
 pub const SYNTH_VOICES: usize = 16;
 /// Most unison copies per oscillator.
@@ -319,6 +333,10 @@ struct Voice {
     /// before it.
     acc: f32,
     charge: f32,
+    /// Matrix modulation of the LFO depths, from the last control update.
+    lfo_depth: [f32; 2],
+    /// Envelope time multipliers (attack, decay, release) taken at the note start.
+    env_scale: [f32; 3],
 }
 
 impl Voice {
@@ -373,6 +391,8 @@ impl Voice {
             wt_mip: [0; 2],
             acc: 0.0,
             charge: 0.0,
+            lfo_depth: [0.0; 2],
+            env_scale: [1.0; 3],
         }
     }
 
@@ -404,6 +424,8 @@ impl Voice {
         self.mod_x = 0.0;
         self.mod_y = 0.0;
         self.release_scale = 1.0;
+        self.lfo_depth = [0.0; 2];
+        self.env_scale = [1.0; 3];
         self.ctl_left = 0;
         if stolen {
             self.amp.retrigger(amp);
@@ -451,9 +473,10 @@ impl Voice {
     /// samples.
     fn control(&mut self, p: &SynthSettings, x: &Expression, sr: f32, glide_coef: f32) {
         let ctl = CONTROL_FRAMES as f32;
+        let depth = |d: f32| (1.0 + d).clamp(0.0, 2.0);
         let lfo_v = [
-            self.lfo[0].value(p.lfo[0].wave),
-            self.lfo[1].value(p.lfo[1].wave),
+            self.lfo[0].value(p.lfo[0].wave) * depth(self.lfo_depth[0]),
+            self.lfo[1].value(p.lfo[1].wave) * depth(self.lfo_depth[1]),
         ];
         let m = ModInputs {
             lfo: lfo_v,
@@ -469,6 +492,7 @@ impl Voice {
         }
         .eval(&p.mods);
         let md = |d: ModDest| m[d as usize];
+        self.lfo_depth = [md(ModDest::Lfo1Depth), md(ModDest::Lfo2Depth)];
 
         for (j, lfo) in self.lfo.iter_mut().enumerate() {
             let rate_mod = if j == 0 {
@@ -572,7 +596,7 @@ impl Voice {
             self.acc *= (-ctl / (ACCENT_DECAY_S * sr)).exp();
             self.charge *= (-ctl / (CHARGE_DECAY_S * sr)).exp();
         }
-        let octaves = p.filter_env_octaves * self.menv.level()
+        let octaves = (p.filter_env_octaves + md(ModDest::ModEnvAmount) * 6.0) * self.menv.level()
             + accent_oct
             + p.key_track * (self.pitch - 60.0) / 12.0
             + md(ModDest::Cutoff) * 6.0
@@ -784,9 +808,10 @@ impl GloomSynth {
         } else {
             1.0 - (-4.6 * CONTROL_FRAMES as f32 / frames).exp()
         };
+        let sr = self.sr;
         for v in &mut self.voices {
-            v.amp.set_params(self.amp_params);
-            v.menv.set_params(self.menv_params);
+            v.amp.set_params(env_params(&s.amp_env, sr, v.env_scale));
+            v.menv.set_params(env_params(&s.mod_env, sr, v.env_scale));
             if s.engine == Engine::Fm && v.active {
                 v.fm.update(&s.fm, v.key, v.velocity, self.sr);
             }
@@ -853,6 +878,8 @@ impl GloomSynth {
         v.mod_y = e.y();
         v.release_scale = e.release_scale();
         v.target_pitch = target;
+        self.start_env_mods(idx);
+        let v = &mut self.voices[idx];
         if e.glide == Glide::Porta && from != target {
             let ms = self.settings.glide_ms;
             let s = if ms > 0.0 {
@@ -926,6 +953,45 @@ impl GloomSynth {
         v.acc = if accent { 1.0 } else { 0.0 };
         v.charge = charge;
         self.last_pitch = Some(target);
+        self.start_env_mods(0);
+    }
+
+    /// Per-voice envelope times: the matrix at the note start (LFOs and envelopes at zero)
+    /// scales this voice's attack, decay and release.
+    fn start_env_mods(&mut self, idx: usize) {
+        let s = &self.settings;
+        let wanted = |d: ModDest| {
+            s.mods
+                .iter()
+                .any(|m| m.dest == d && m.source != ModSource::Off)
+        };
+        if !(wanted(ModDest::EnvAttack) || wanted(ModDest::EnvDecay) || wanted(ModDest::EnvRelease))
+        {
+            return;
+        }
+        let x = self.expr;
+        let v = &mut self.voices[idx];
+        let m = ModInputs {
+            velocity: v.velocity,
+            key: v.key,
+            random: v.random,
+            mod_wheel: x.mod_wheel,
+            pressure: x.pressure.max(v.pressure),
+            mod_x: v.mod_x,
+            mod_y: v.mod_y,
+            ..ModInputs::default()
+        }
+        .eval(&s.mods);
+        let k = |d: ModDest| (m[d as usize].clamp(-1.0, 1.0) * 4.0).exp2();
+        v.env_scale = [
+            k(ModDest::EnvAttack),
+            k(ModDest::EnvDecay),
+            k(ModDest::EnvRelease),
+        ];
+        v.amp
+            .set_params(env_params(&s.amp_env, self.sr, v.env_scale));
+        v.menv
+            .set_params(env_params(&s.mod_env, self.sr, v.env_scale));
     }
 
     fn pick_voice(&self) -> usize {
@@ -1288,6 +1354,53 @@ mod tests {
         let lo = windows.iter().cloned().fold(f32::MAX, f32::min);
         let hi = windows.iter().cloned().fold(0.0, f32::max);
         assert!(lo < 430.0 && hi > 450.0, "{lo} {hi}");
+    }
+
+    #[test]
+    fn velocity_sets_each_voices_attack_and_lfo_depth() {
+        // Velocity to attack time, -100 %: soft notes take 16 times as long as loud ones.
+        let mut p = sine_patch();
+        p.amp_env.attack_ms = 40.0;
+        p.mods[0] = ModSlot {
+            source: ModSource::Velocity,
+            dest: ModDest::EnvAttack,
+            amount: -1.0,
+        };
+        let rise = |velocity: f32| {
+            let mut s = GloomSynth::new(SR);
+            s.set_settings(&p);
+            s.note_on(69, velocity, 1);
+            let (l, _) = render(&mut s, 9600);
+            let peak = l.iter().fold(0.0_f32, |m, x| m.max(x.abs()));
+            l.iter().position(|x| x.abs() > 0.5 * peak).unwrap()
+        };
+        let (loud, soft) = (rise(1.0), rise(0.0));
+        assert!(loud < 300, "40 ms / 16 = 2.5 ms: {loud}");
+        assert!(soft > 700, "the full 40 ms: {soft}");
+
+        // LFO 1 on pitch at no depth of its own, opened by velocity: only the loud voice wobbles.
+        let mut p = sine_patch();
+        p.lfo[0].rate_hz = 5.0;
+        p.mods[0] = ModSlot {
+            source: ModSource::Lfo1,
+            dest: ModDest::Pitch,
+            amount: 1.0 / 12.0,
+        };
+        p.mods[1] = ModSlot {
+            source: ModSource::Velocity,
+            dest: ModDest::Lfo1Depth,
+            amount: -1.0,
+        };
+        let swing = |velocity: f32| {
+            let mut s = GloomSynth::new(SR);
+            s.set_settings(&p);
+            s.note_on(69, velocity, 1);
+            let (l, _) = render(&mut s, 48_000);
+            let w: Vec<f32> = l.chunks(2400).map(pitch_hz).collect();
+            w.iter().cloned().fold(0.0, f32::max) - w.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        assert!(swing(0.0) > 20.0, "{}", swing(0.0));
+        assert!(swing(1.0) < 2.0, "{}", swing(1.0));
     }
 
     #[test]

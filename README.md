@@ -234,6 +234,20 @@ and the app shows it that way. Function keys on a Mac laptop may need **fn** hel
     phase; followers track any mixer strip's level with attack, release and gain. The depth is
     in percent of the control's travel; negative inverts (a follower at -50 % ducks).
   - The demo pans the hat with a one-bar LFO and ducks the reverb bus under the kick.
+  - **Formula** modulators compute their value from an expression, for example
+    `tri(beat / 4) * wheel` or `0.5 * sin(2 * pi * t) * m3` (`m3` is the output of modulator
+    3; each row shows its number). Hover the formula field for the list of names and
+    functions; a ⚠ marks a formula that does not compile (it outputs 0).
+  - **＋** on a modulator's row adds an LFO, follower or formula to its depth or rate, so
+    modulators move each other (an LFO whose rate follows another LFO, a depth that follows
+    a follower).
+  - Gloom Synth's matrix can also move each voice's LFO depths, mod-envelope amount and
+    envelope times (attack, decay and release are taken when the note starts, so velocity or
+    key can set them per note).
+  - **Note curves** (piano roll bottom lane, under **Note curves**): drag over a note to draw
+    its own tuning, pressure or timbre curve, played on that note's voice only (polyphonic
+    automation; plugins get it as note expressions). With notes selected, only they are
+    drawn on; right-click removes a point. A note carries one curve of up to 8 points.
 - **File** (top left):
   - **New** (Ctrl+N), **Open** (Ctrl+O), **Save** (Ctrl+S) and **Save as** (Ctrl+Shift+S).
     Projects are `.gloom` files; tick **Embed samples** in Save as to put copies of every

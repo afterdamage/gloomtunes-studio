@@ -1469,11 +1469,13 @@ impl GloomApp {
                 self.show_view(MainView::PianoRoll);
                 self.push_song();
             }
-            ParamRequest::AddLfo(target) | ParamRequest::AddFollower(target) => {
-                let source = if matches!(req, ParamRequest::AddLfo(_)) {
-                    ModSourceKind::default_lfo()
-                } else {
-                    ModSourceKind::default_follower(follower_source(&target))
+            ParamRequest::AddLfo(target)
+            | ParamRequest::AddFollower(target)
+            | ParamRequest::AddFormula(target) => {
+                let source = match req {
+                    ParamRequest::AddLfo(_) => ModSourceKind::default_lfo(),
+                    ParamRequest::AddFormula(_) => ModSourceKind::Formula,
+                    _ => ModSourceKind::default_follower(follower_source(&target)),
                 };
                 if let Some(id) = self.project.add_modulator(target, source) {
                     if let (ModSourceKind::Follower { .. }, Some(m)) =

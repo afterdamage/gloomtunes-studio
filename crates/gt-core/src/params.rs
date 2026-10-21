@@ -12,6 +12,7 @@
 
 use crate::effects::EffectKind;
 use crate::mixer::{MixerStrip, StripKind, FX_SLOTS, MASTER, STRIPS};
+use crate::modulation::{ModField, ModulatorId};
 use crate::param::ParamCurve::{Linear, Power};
 use crate::param::ParamUnit::{Gain, Pan, Percent, Semitones, SignedPercent};
 use crate::param::{ParamCurve, ParamInfo, ParamUnit};
@@ -172,6 +173,8 @@ static STRIP_VOLUME: ParamInfo = info(
 static STRIP_PAN: ParamInfo = info("pan", "Pan", (-1.0, 1.0, 0.0), Linear, Pan);
 static STRIP_SEND: ParamInfo = info("send", "Send", (0.0, 1.0, 0.0), Linear, Gain);
 static MOD_AMOUNT: ParamInfo = info("amount", "Amount", (-1.0, 1.0, 0.0), Linear, SignedPercent);
+/// A modulator's speed offset (Prompt 34): ±4 octaves around its own rate.
+static MOD_RATE: ParamInfo = info("rate", "Rate", (-4.0, 4.0, 0.0), Linear, ParamUnit::Octaves);
 /// Plugin parameters are handled normalized (0..1 of the plugin's own range); the plugin host
 /// converts, and the plugin formats the value for display.
 static PLUGIN_PARAM: ParamInfo = info("value", "Value", (0.0, 1.0, 0.0), Linear, Percent);
@@ -231,6 +234,14 @@ pub enum ParamId {
     /// The song tempo (Prompt 31). Automation clips of it become ramps and steps of the
     /// tempo map the song plays with ([`Project::song_tempo`]); nothing else moves it.
     Tempo,
+    /// The depth or speed of a modulator (Prompt 34, D151): only other modulators move it, so
+    /// modulators can modulate each other.
+    Modulator {
+        /// The modulator.
+        id: ModulatorId,
+        /// Its depth or speed.
+        field: ModField,
+    },
 }
 
 /// Range of tempo automation: 40 to 240 BPM, linear.
@@ -311,6 +322,10 @@ impl ParamId {
             Self::Effect { kind, index, .. } => kind.params().get(index).unwrap_or(&MOD_AMOUNT),
             Self::Plugin { .. } => &PLUGIN_PARAM,
             Self::Tempo => &TEMPO_INFO,
+            Self::Modulator { field, .. } => match field {
+                ModField::Amount => &MOD_AMOUNT,
+                ModField::Rate => &MOD_RATE,
+            },
         }
     }
 
@@ -356,6 +371,7 @@ impl ParamId {
                 }
             },
             Self::Tempo => "tempo".to_owned(),
+            Self::Modulator { id, field } => format!("modulator/{}/{}", id.0, field.key()),
         }
     }
 
@@ -366,6 +382,10 @@ impl ParamId {
         let num = |s: &str| s.parse::<usize>().ok();
         match parts.as_slice() {
             ["tempo"] => Some(Self::Tempo),
+            ["modulator", id, f] => Some(Self::Modulator {
+                id: ModulatorId(id.parse().ok()?),
+                field: ModField::from_key(f)?,
+            }),
             ["channel", id, rest @ ..] => {
                 let channel = ChannelId(id.parse().ok()?);
                 match rest {
@@ -467,6 +487,10 @@ impl ParamId {
             }
             Self::Plugin { id, .. } => format!("Parameter {id}"),
             Self::Tempo => "Tempo".to_owned(),
+            Self::Modulator { field, .. } => match field {
+                ModField::Amount => "Depth".to_owned(),
+                ModField::Rate => "Rate".to_owned(),
+            },
         }
     }
 
@@ -511,6 +535,7 @@ impl ParamId {
                 }
             }
             Self::Tempo => "Song · Tempo".to_owned(),
+            Self::Modulator { id, .. } => format!("Modulator m{} · {}", id.0, self.label()),
         }
     }
 
@@ -577,6 +602,13 @@ impl ParamId {
                 slot.params.get(index).copied()
             }
             Self::Plugin { id, .. } => self.plugin_ref(project)?.value(id),
+            Self::Modulator { id, field } => {
+                let m = project.modulators.iter().find(|m| m.id == id)?;
+                match field {
+                    ModField::Amount => Some(m.amount),
+                    ModField::Rate => m.source.has_rate().then_some(0.0),
+                }
+            }
         }
     }
 
@@ -679,6 +711,14 @@ impl ParamId {
                 .is_some_and(|p| p.set_value(id, v)),
             // Only automation clips move the tempo, through the song's tempo map.
             Self::Tempo => false,
+            Self::Modulator { id, field } => match (project.modulator_mut(id), field) {
+                (Some(m), ModField::Amount) => {
+                    m.amount = v;
+                    true
+                }
+                // A speed offset has no value of its own; only modulators move it.
+                _ => false,
+            },
         }
     }
 
@@ -884,6 +924,30 @@ mod tests {
         assert_eq!(fx.key(), "mixer/2/fx/9/plugin/deadbeef/7");
         assert_eq!(ParamId::parse(&fx.key()), Some(fx));
         assert_eq!(ParamId::parse("mixer/2/fx/9/plugin/xyz/7"), None);
+    }
+
+    #[test]
+    fn modulator_fields_are_parameters_of_their_modulator() {
+        let mut p = Project::demo();
+        let m = p.modulators[0].id;
+        let depth = ParamId::Modulator {
+            id: m,
+            field: ModField::Amount,
+        };
+        let rate = ParamId::Modulator {
+            id: m,
+            field: ModField::Rate,
+        };
+        assert_eq!(ParamId::parse(&depth.key()), Some(depth));
+        assert_eq!(ParamId::parse(&rate.key()), Some(rate));
+        assert_eq!(ParamId::parse("modulator/3/speed"), None);
+        assert!(depth.set(&mut p, -0.25));
+        assert_eq!(depth.get(&p), Some(-0.25));
+        assert_eq!(rate.get(&p), Some(0.0), "an LFO has a rate");
+        assert!(!rate.set(&mut p, 2.0), "only modulators move a rate");
+        assert!(depth.name(&p).contains(&format!("m{}", m.0)));
+        p.remove_modulator(m);
+        assert!(!depth.is_valid(&p));
     }
 
     #[test]

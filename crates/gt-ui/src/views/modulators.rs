@@ -1,12 +1,15 @@
 //! The modulators editor: every LFO and envelope follower in the project, one row each.
 //!
-//! A row shows the target, the source and its settings, the depth and an on switch. With a
-//! focus parameter (picked from a control's "Show modulators"), only its modulators are listed.
+//! A row shows the modulator's number (`m3`, what formulas read), the target, the source and its
+//! settings, the depth and an on switch. With a focus parameter (picked from a control's "Show
+//! modulators"), only its modulators are listed. The ＋ menu of a row adds a modulator to its
+//! depth or rate (Prompt 34, D151).
 
 use egui::{vec2, RichText, Ui};
-use gt_core::modulation::SYNC_RATES;
+use gt_core::formula::Program;
+use gt_core::modulation::{DEFAULT_FORMULA, SYNC_RATES};
 use gt_core::{
-    LfoRate, LfoShape, MidiControl, ModSourceKind, ModulatorId, ParamId, Project, STRIPS,
+    LfoRate, LfoShape, MidiControl, ModField, ModSourceKind, ModulatorId, ParamId, Project, STRIPS,
 };
 
 use crate::i18n::tr;
@@ -55,9 +58,10 @@ pub fn modulators_panel(
         })
         .collect();
     let mut remove = None;
+    let mut add: Option<(ParamId, ModSourceKind)> = None;
     egui::ScrollArea::vertical().show(ui, |ui| {
         egui::Grid::new("modulators")
-            .num_columns(5)
+            .num_columns(7)
             .spacing(vec2(8.0, 4.0))
             .striped(true)
             .show(ui, |ui| {
@@ -68,6 +72,7 @@ pub fn modulators_panel(
                         .find(|m| m.id == id)
                         .map(|m| m.target.name(project))
                         .unwrap_or_default();
+                    let mut formula = project.formulas.get(&id).cloned();
                     let Some(m) = project.modulator_mut(id) else {
                         continue;
                     };
@@ -75,6 +80,12 @@ pub fn modulators_panel(
                         .checkbox(&mut m.enabled, "")
                         .on_hover_text(tr("On"))
                         .changed();
+                    ui.label(
+                        RichText::new(format!("m{}", id.0))
+                            .small()
+                            .color(theme.text_dim),
+                    )
+                    .on_hover_text(tr("This modulator's name in formulas"));
                     ui.scope(|ui| {
                         ui.set_min_width(150.0);
                         ui.add(
@@ -82,8 +93,18 @@ pub fn modulators_panel(
                                 .truncate(),
                         );
                     });
+                    let has_rate = m.source.has_rate();
                     ui.horizontal(|ui| {
+                        let was = m.source;
                         changed |= source_editor(ui, id, &mut m.source, &names);
+                        if m.source == ModSourceKind::Formula {
+                            if was != m.source && formula.is_none() {
+                                formula = Some(DEFAULT_FORMULA.to_owned());
+                            }
+                            if let Some(text) = formula.as_mut() {
+                                changed |= formula_editor(ui, theme, text);
+                            }
+                        }
                     });
                     let mut pct = m.amount * 100.0;
                     if ui
@@ -103,8 +124,38 @@ pub fn modulators_panel(
                         m.amount = pct / 100.0;
                         changed = true;
                     }
+                    ui.menu_button("＋", |ui| {
+                        for (field, label) in [
+                            (ModField::Amount, tr("Modulate depth with")),
+                            (ModField::Rate, tr("Modulate rate with")),
+                        ] {
+                            if field == ModField::Rate && !has_rate {
+                                continue;
+                            }
+                            ui.menu_button(label, |ui| {
+                                for (kind, name) in [
+                                    (ModSourceKind::default_lfo(), tr("LFO")),
+                                    (ModSourceKind::default_follower(1), tr("Follower")),
+                                    (ModSourceKind::Formula, tr("Formula")),
+                                ] {
+                                    if ui.button(name).clicked() {
+                                        add = Some((ParamId::Modulator { id, field }, kind));
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        }
+                    })
+                    .response
+                    .on_hover_text(tr("Add a modulator to this modulator's depth or rate"));
                     if ui.small_button(tr("Remove")).clicked() {
                         remove = Some(id);
+                    }
+                    match formula {
+                        Some(text) if project.modulators.iter().any(|m| m.id == id) => {
+                            project.formulas.insert(id, text);
+                        }
+                        _ => {}
                     }
                     ui.end_row();
                 }
@@ -114,7 +165,30 @@ pub fn modulators_panel(
         project.remove_modulator(id);
         changed = true;
     }
+    if let Some((target, kind)) = add {
+        changed |= project.add_modulator(target, kind).is_some();
+    }
     changed
+}
+
+/// The text of a formula, with its error when it does not compile. Returns true on a change.
+fn formula_editor(ui: &mut Ui, theme: &GloomTheme, text: &mut String) -> bool {
+    let r = ui
+        .add(
+            egui::TextEdit::singleline(text)
+                .desired_width(200.0)
+                .font(egui::TextStyle::Monospace),
+        )
+        .on_hover_text(tr(
+            "Formula, -1 to 1: t (seconds), beat, bpm, wheel, touch, pi, m1 m2 … (other \
+             modulators); + - * / % ^ < >; sin cos (radians), tri saw sqr (cycles), abs floor \
+             frac sqrt exp log sign hash, min max pow step, clamp lerp if",
+        ));
+    if let Err(e) = Program::compile(text) {
+        ui.label(RichText::new("⚠").color(theme.warn))
+            .on_hover_text(e.to_string());
+    }
+    r.changed()
 }
 
 /// Source kind and its settings. Returns true if anything changed.
@@ -127,6 +201,7 @@ fn source_editor(ui: &mut Ui, id: ModulatorId, src: &mut ModSourceKind, strips: 
             let is_lfo = matches!(src, ModSourceKind::Lfo { .. });
             let is_fol = matches!(src, ModSourceKind::Follower { .. });
             let is_midi = matches!(src, ModSourceKind::Midi { .. });
+            let is_formula = *src == ModSourceKind::Formula;
             if ui.selectable_label(is_lfo, tr("LFO")).clicked() && !is_lfo {
                 *src = ModSourceKind::default_lfo();
             }
@@ -142,6 +217,14 @@ fn source_editor(ui: &mut Ui, id: ModulatorId, src: &mut ModSourceKind, strips: 
                 *src = ModSourceKind::Midi {
                     control: MidiControl::ModWheel,
                 };
+            }
+            if ui
+                .selectable_label(is_formula, tr("Formula"))
+                .on_hover_text(tr("An expression of time, the song and other modulators"))
+                .clicked()
+                && !is_formula
+            {
+                *src = ModSourceKind::Formula;
             }
         });
     match src {
@@ -261,6 +344,7 @@ fn source_editor(ui: &mut Ui, id: ModulatorId, src: &mut ModSourceKind, strips: 
                      selected channel",
                 ));
         }
+        ModSourceKind::Formula => {}
     }
     *src != before
 }

@@ -635,6 +635,7 @@ fn dest_used(d: ModDest, engine: u8) -> bool {
         | D::NoiseLevel
         | D::Cutoff
         | D::Resonance
+        | D::ModEnvAmount
         | D::UnisonDetune => engine != 1,
         _ => true,
     }

@@ -334,6 +334,12 @@ named_enum! {
         Wt2Pos => "wt2.pos", "WT 2 position";
         Wt1Warp => "wt1.warp", "WT 1 warp";
         Wt2Warp => "wt2.warp", "WT 2 warp";
+        Lfo1Depth => "lfo1.depth", "LFO 1 depth";
+        Lfo2Depth => "lfo2.depth", "LFO 2 depth";
+        ModEnvAmount => "modenv.amount", "Mod env amount";
+        EnvAttack => "env.attack", "Env attack";
+        EnvDecay => "env.decay", "Env decay";
+        EnvRelease => "env.release", "Env release";
     }
 }
 

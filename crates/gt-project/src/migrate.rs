@@ -45,13 +45,16 @@
 //!   nothing.
 //! - 11 (Prompt 33): MIDI out channels (`midi-out` instruments). Older builds cannot read them,
 //!   so the version is bumped. The upgrade from 10 changes nothing.
+//! - 12 (Prompt 34): formula modulators (`formula` sources), modulators on modulators
+//!   (`modulator/N/amount|rate` targets) and note curves (`curve` on notes). Older builds
+//!   would drop all three, so the version is bumped. The upgrade from 11 changes nothing.
 
 use serde_json::Value;
 
 use crate::file::{FileError, FORMAT};
 
 /// The schema version this build writes.
-pub const CURRENT: u32 = 11;
+pub const CURRENT: u32 = 12;
 
 /// One upgrade: rewrites a tree of version `from` into version `from + 1`.
 pub type Migration = fn(&mut Value) -> Result<(), String>;
@@ -59,7 +62,7 @@ pub type Migration = fn(&mut Value) -> Result<(), String>;
 /// Upgrades by version: entry `i` turns version `i + 1` into `i + 2`.
 pub const MIGRATIONS: &[Migration] = &[
     v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5, v5_to_v6, v6_to_v7, v7_to_v8, v8_to_v9, v9_to_v10,
-    v10_to_v11,
+    v10_to_v11, v11_to_v12,
 ];
 
 /// First send bus before version 8.
@@ -139,6 +142,11 @@ fn v9_to_v10(_: &mut Value) -> Result<(), String> {
 }
 
 fn v10_to_v11(_: &mut Value) -> Result<(), String> {
+    Ok(())
+}
+
+/// Version 12 added formulas, modulator targets and note curves, all new values.
+fn v11_to_v12(_: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
