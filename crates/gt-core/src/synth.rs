@@ -13,7 +13,19 @@ pub const OSC_WAVES: &[&str] = &["Sine", "Triangle", "Saw", "Square"];
 /// LFO waveform names, indexed by value.
 pub const LFO_WAVES: &[&str] = &["Sine", "Triangle", "Saw", "Square", "S&H"];
 /// Sound engines, indexed by value.
-pub const ENGINES: &[&str] = &["Gloom", "FM", "Wavetable", "Bass"];
+pub const ENGINES: &[&str] = &["Gloom", "FM", "Wavetable", "Bass", "Additive"];
+/// Spectral filter modes of the additive engine, indexed by value.
+pub const SPEC_FILTERS: &[&str] = &[
+    "Off",
+    "Low-pass",
+    "High-pass",
+    "Band-pass",
+    "Notch",
+    "Comb",
+    "Formant",
+];
+/// Editable harmonics of the additive engine.
+pub const HARMONICS: usize = 32;
 /// FM algorithms, indexed by value (the last is the free matrix).
 pub const FM_ALGORITHMS: &[&str] = &[
     "1 Stack",
@@ -129,7 +141,7 @@ synth_params! {
     VelocitySens => "velocity", "Velocity", 0.0, 1.0, 0.6, Linear, Percent;
     Volume => "volume", "Volume", 0.0, 1.0, 0.5, Power(2.0), Gain;
     // Prompt 24: the engine, FM and wavetable parameters (appended: indices are stable).
-    Engine => "engine", "Engine", 0.0, 3.0, 0.0, Stepped, Choice, ENGINES;
+    Engine => "engine", "Engine", 0.0, 4.0, 0.0, Stepped, Choice, ENGINES;
     FmAlgorithm => "fm.algorithm", "Algorithm", 0.0, 8.0, 0.0, Stepped, Choice, FM_ALGORITHMS;
     FmFeedback => "fm.feedback", "Feedback", 0.0, 1.0, 0.0, Linear, Percent;
     Op1Ratio => "fm1.ratio", "Ratio", 0.125, 32.0, 1.0, Power(2.0), Plain;
@@ -258,6 +270,50 @@ synth_params! {
     BassAccent => "bass.accent", "Accent", 0.0, 1.0, 0.6, Linear, Percent;
     BassThreshold => "bass.threshold", "Accent at", 0.5, 1.0, 0.79, Linear, Percent;
     BassSlide => "bass.slide", "Slide", 5.0, 500.0, 60.0, Power(2.0), Ms;
+    // Prompt 34: the additive/spectral engine (harmonic levels start as a saw).
+    Add1 => "add.h1", "H1", 0.0, 1.0, 1.0000, Linear, Percent;
+    Add2 => "add.h2", "H2", 0.0, 1.0, 0.5000, Linear, Percent;
+    Add3 => "add.h3", "H3", 0.0, 1.0, 0.3333, Linear, Percent;
+    Add4 => "add.h4", "H4", 0.0, 1.0, 0.2500, Linear, Percent;
+    Add5 => "add.h5", "H5", 0.0, 1.0, 0.2000, Linear, Percent;
+    Add6 => "add.h6", "H6", 0.0, 1.0, 0.1667, Linear, Percent;
+    Add7 => "add.h7", "H7", 0.0, 1.0, 0.1429, Linear, Percent;
+    Add8 => "add.h8", "H8", 0.0, 1.0, 0.1250, Linear, Percent;
+    Add9 => "add.h9", "H9", 0.0, 1.0, 0.1111, Linear, Percent;
+    Add10 => "add.h10", "H10", 0.0, 1.0, 0.1000, Linear, Percent;
+    Add11 => "add.h11", "H11", 0.0, 1.0, 0.0909, Linear, Percent;
+    Add12 => "add.h12", "H12", 0.0, 1.0, 0.0833, Linear, Percent;
+    Add13 => "add.h13", "H13", 0.0, 1.0, 0.0769, Linear, Percent;
+    Add14 => "add.h14", "H14", 0.0, 1.0, 0.0714, Linear, Percent;
+    Add15 => "add.h15", "H15", 0.0, 1.0, 0.0667, Linear, Percent;
+    Add16 => "add.h16", "H16", 0.0, 1.0, 0.0625, Linear, Percent;
+    Add17 => "add.h17", "H17", 0.0, 1.0, 0.0588, Linear, Percent;
+    Add18 => "add.h18", "H18", 0.0, 1.0, 0.0556, Linear, Percent;
+    Add19 => "add.h19", "H19", 0.0, 1.0, 0.0526, Linear, Percent;
+    Add20 => "add.h20", "H20", 0.0, 1.0, 0.0500, Linear, Percent;
+    Add21 => "add.h21", "H21", 0.0, 1.0, 0.0476, Linear, Percent;
+    Add22 => "add.h22", "H22", 0.0, 1.0, 0.0455, Linear, Percent;
+    Add23 => "add.h23", "H23", 0.0, 1.0, 0.0435, Linear, Percent;
+    Add24 => "add.h24", "H24", 0.0, 1.0, 0.0417, Linear, Percent;
+    Add25 => "add.h25", "H25", 0.0, 1.0, 0.0400, Linear, Percent;
+    Add26 => "add.h26", "H26", 0.0, 1.0, 0.0385, Linear, Percent;
+    Add27 => "add.h27", "H27", 0.0, 1.0, 0.0370, Linear, Percent;
+    Add28 => "add.h28", "H28", 0.0, 1.0, 0.0357, Linear, Percent;
+    Add29 => "add.h29", "H29", 0.0, 1.0, 0.0345, Linear, Percent;
+    Add30 => "add.h30", "H30", 0.0, 1.0, 0.0333, Linear, Percent;
+    Add31 => "add.h31", "H31", 0.0, 1.0, 0.0323, Linear, Percent;
+    Add32 => "add.h32", "H32", 0.0, 1.0, 0.0313, Linear, Percent;
+    AddTilt => "add.tilt", "Tilt", -12.0, 12.0, 0.0, Linear, Db;
+    AddEven => "add.even", "Even", 0.0, 2.0, 1.0, Linear, Percent;
+    AddStretch => "add.stretch", "Stretch", -1.0, 1.0, 0.0, Linear, SignedPercent;
+    AddMorph => "add.morph", "Morph", 0.0, 1.0, 1.0, Linear, Percent;
+    AddPosition => "add.position", "Position", 0.0, 1.0, 0.0, Linear, Percent;
+    AddScan => "add.scan", "Scan", 0.0, 2.0, 1.0, Linear, Percent;
+    SpecMode => "spec.mode", "Filter", 0.0, 6.0, 0.0, Stepped, Choice, SPEC_FILTERS;
+    SpecCutoff => "spec.cutoff", "Freq", 20.0, 20_000.0, 2000.0, Exp, Hz;
+    SpecWidth => "spec.width", "Width", 0.1, 6.0, 1.0, Power(2.0), Octaves;
+    SpecRes => "spec.res", "Reso", 0.0, 1.0, 0.0, Linear, Percent;
+    SpecVowel => "spec.vowel", "Vowel", 0.0, 1.0, 0.0, Linear, Percent;
 }
 
 macro_rules! named_enum {
@@ -340,6 +396,10 @@ named_enum! {
         EnvAttack => "env.attack", "Env attack";
         EnvDecay => "env.decay", "Env decay";
         EnvRelease => "env.release", "Env release";
+        SpecCutoff => "spec.cutoff", "Spectral freq";
+        AddTilt => "add.tilt", "Tilt";
+        AddPosition => "add.position", "Resynth position";
+        AddMorph => "add.morph", "Morph";
     }
 }
 
@@ -389,6 +449,8 @@ pub enum Uses {
     Wavetable,
     /// Bass only (accent, slide).
     Bass,
+    /// Additive only (harmonics, spectrum, spectral filter).
+    Additive,
 }
 
 impl SynthParam {
@@ -429,21 +491,29 @@ impl SynthParam {
             _ if i < P::Engine as usize => Uses::All,
             _ if i < P::Wt1Table as usize => Uses::Fm,
             _ if i < P::BassAccent as usize => Uses::Wavetable,
-            _ => Uses::Bass,
+            _ if i < P::Add1 as usize => Uses::Bass,
+            _ => Uses::Additive,
         }
     }
 
-    /// True when engine `engine` (0 Gloom, 1 FM, 2 Wavetable, 3 Bass) uses the parameter.
+    /// True when engine `engine` (0 Gloom, 1 FM, 2 Wavetable, 3 Bass, 4 Additive) uses the
+    /// parameter.
     pub fn used_by(self, engine: u8) -> bool {
         match self.uses() {
             Uses::All => true,
             Uses::Selector => false,
-            Uses::Oscillators => engine != 1,
+            Uses::Oscillators => engine != 1 && engine != 4,
             Uses::Gloom => engine == 0 || engine == 3,
             Uses::Fm => engine == 1,
             Uses::Wavetable => engine == 2,
             Uses::Bass => engine == 3,
+            Uses::Additive => engine == 4,
         }
+    }
+
+    /// Additive harmonic `k` (1 to [`HARMONICS`]).
+    pub fn harmonic(k: usize) -> SynthParam {
+        Self::ALL[Self::Add1 as usize + k.clamp(1, HARMONICS) - 1]
     }
 }
 
@@ -678,7 +748,71 @@ impl SynthPatch {
         out.extend(Self::fm_factory());
         out.extend(Self::wavetable_factory());
         out.extend(Self::bass_factory());
+        out.extend(Self::additive_factory());
         out
+    }
+
+    /// Additive patches (Prompt 34): harmonics set by a rule, spectrum and filter settings.
+    fn additive_factory() -> Vec<SynthPatch> {
+        use SynthParam as P;
+        let named = |name: &str, level: &dyn Fn(usize) -> f32| {
+            let mut p = SynthPatch {
+                name: name.to_owned(),
+                ..SynthPatch::default()
+            }
+            .with(P::Engine, 4.0)
+            .with(P::Volume, 0.45);
+            for k in 1..=HARMONICS {
+                p.set(P::harmonic(k), level(k));
+            }
+            p
+        };
+        let drawbar = |k: usize| match k {
+            1 | 2 | 3 | 4 | 6 | 8 => 0.8,
+            _ => 0.0,
+        };
+        vec![
+            named("Additive Organ", &drawbar)
+                .with(P::AmpAttack, 4.0)
+                .with(P::AmpDecay, 50.0)
+                .with(P::AmpSustain, 1.0)
+                .with(P::AmpRelease, 60.0),
+            named("Glass Pad", &|k| {
+                if k % 2 == 1 {
+                    1.0 / k as f32
+                } else {
+                    0.0
+                }
+            })
+            .with(P::AddStretch, 0.25)
+            .with(P::AddTilt, -2.0)
+            .with(P::AmpAttack, 600.0)
+            .with(P::AmpRelease, 1800.0)
+            .with_mod(0, ModSource::Lfo2, ModDest::AddTilt, 0.3),
+            named("Formant Choir", &|k| 1.0 / k as f32)
+                .with(P::SpecMode, 6.0)
+                .with(P::SpecWidth, 1.5)
+                .with(P::AmpAttack, 300.0)
+                .with(P::AmpRelease, 900.0)
+                .with(P::Lfo2Rate, 0.2)
+                .with_mod(0, ModSource::Lfo1, ModDest::Pitch, 0.004)
+                .with_mod(1, ModSource::ModWheel, ModDest::SpecCutoff, 0.3),
+            named("Spectral Sweep", &|k| 1.0 / k as f32)
+                .with(P::SpecMode, 3.0)
+                .with(P::SpecCutoff, 600.0)
+                .with(P::SpecWidth, 0.6)
+                .with(P::SpecRes, 0.5)
+                .with(P::Lfo2Rate, 0.25)
+                .with_mod(0, ModSource::Lfo2, ModDest::SpecCutoff, 0.5),
+            named("Comb Bell", &|k| 1.0 / (k as f32).sqrt())
+                .with(P::SpecMode, 5.0)
+                .with(P::SpecCutoff, 700.0)
+                .with(P::AddStretch, 0.5)
+                .with(P::AmpAttack, 1.0)
+                .with(P::AmpDecay, 2500.0)
+                .with(P::AmpSustain, 0.0)
+                .with(P::AmpRelease, 2500.0),
+        ]
     }
 
     /// More Gloom engine presets (Prompt 28). All original.

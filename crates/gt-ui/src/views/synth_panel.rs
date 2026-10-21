@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use egui::{pos2, vec2, Pos2, RichText, Sense, Shape, Stroke, Ui};
 use gt_core::synth::{
-    ModDest, ModSource, OpField, SynthParam as P, SynthPatch, ENGINES, FM_OPS, WT_TABLES,
+    ModDest, ModSource, OpField, SynthParam as P, SynthPatch, ENGINES, FM_OPS, HARMONICS, WT_TABLES,
 };
 use gt_core::{ChannelId, ParamId};
 
@@ -105,8 +105,9 @@ pub fn synth_panel(
             })
             .response
             .on_hover_text(tr(
-                "Sound engine: Gloom (subtractive), FM (six operators), Wavetable or Bass \
-                 (mono bass line: accent from velocity, slide from overlapping or slide notes)",
+                "Sound engine: Gloom (subtractive), FM (six operators), Wavetable, Bass \
+                 (mono bass line: accent from velocity, slide from overlapping or slide notes) \
+                 or Additive (harmonics, resynthesis and a spectral filter)",
             ));
         if ui
             .button(tr("Save preset"))
@@ -130,6 +131,7 @@ pub fn synth_panel(
                 let engine = patch.engine();
                 match engine {
                     1 => fm_sections(ui, theme, right, ch, patch, &mut changed),
+                    4 => additive_sections(ui, theme, right, ch, patch, &mut changed, &mut actions),
                     _ => {
                         for osc in 0..2 {
                             if engine == 2 {
@@ -344,6 +346,151 @@ fn wt_section(
             &[&[pos, warp, amount], &[ps[1], ps[2], ps[3], ps[4]]],
         );
     });
+}
+
+/// A harmonic's level in a shape, by harmonic number.
+type HarmonicShape = fn(usize) -> f32;
+
+/// The harmonic editor's shape buttons.
+const SHAPES: [(&str, HarmonicShape); 6] = [
+    ("Sine", |k| if k == 1 { 1.0 } else { 0.0 }),
+    ("Saw", |k| 1.0 / k as f32),
+    ("Square", |k| if k % 2 == 1 { 1.0 / k as f32 } else { 0.0 }),
+    ("Triangle", |k| {
+        if k % 2 == 1 {
+            1.0 / (k * k) as f32
+        } else {
+            0.0
+        }
+    }),
+    ("Organ", |k| match k {
+        1 | 2 | 3 | 4 | 6 | 8 => 0.8,
+        _ => 0.0,
+    }),
+    ("Clear", |_| 0.0),
+];
+
+/// The additive engine: the harmonic editor, the spectrum and resynthesis, the spectral
+/// filter.
+#[allow(clippy::too_many_arguments)]
+fn additive_sections(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    right: f32,
+    ch: Option<ChannelId>,
+    patch: &mut SynthPatch,
+    changed: &mut bool,
+    actions: &mut Vec<SynthPanelAction>,
+) {
+    section(ui, theme, right, "HARMONICS", |ui| {
+        *changed |= harmonic_bars(ui, theme, patch);
+        ui.horizontal(|ui| {
+            for (name, level) in SHAPES {
+                if ui.small_button(tr(name)).clicked() {
+                    for k in 1..=HARMONICS {
+                        patch.set(P::harmonic(k), level(k));
+                    }
+                    *changed = true;
+                }
+            }
+        });
+        *changed |= knob_rows(
+            ui,
+            theme,
+            ch,
+            patch,
+            &[&[P::AddTilt, P::AddEven, P::AddStretch]],
+        );
+    });
+    section(ui, theme, right, "RESYNTHESIS", |ui| {
+        ui.horizontal(|ui| {
+            match patch.tables[0]
+                .as_ref()
+                .map(gt_core::SampleSource::display_name)
+            {
+                Some(name) => {
+                    ui.label(RichText::new(name).small().color(theme.text));
+                    if ui
+                        .small_button("✕")
+                        .on_hover_text(tr("Forget the sample"))
+                        .clicked()
+                    {
+                        patch.tables[0] = None;
+                        *changed = true;
+                    }
+                }
+                None => {
+                    ui.label(RichText::new(tr("No sample")).small().color(theme.text_dim));
+                }
+            }
+            if ui
+                .small_button(tr("Load…"))
+                .on_hover_text(tr(
+                    "Analyse a pitched recording into harmonic levels over time; Morph blends \
+                     it with the harmonic editor",
+                ))
+                .clicked()
+            {
+                actions.push(SynthPanelAction::LoadTable(0));
+            }
+        });
+        *changed |= knob_rows(
+            ui,
+            theme,
+            ch,
+            patch,
+            &[&[P::AddMorph, P::AddPosition, P::AddScan]],
+        );
+    });
+    section(ui, theme, right, "SPECTRAL FILTER", |ui| {
+        *changed |= knob_rows(
+            ui,
+            theme,
+            ch,
+            patch,
+            &[
+                &[P::SpecMode, P::SpecCutoff, P::SpecWidth],
+                &[P::SpecRes, P::SpecVowel],
+            ],
+        );
+    });
+}
+
+/// The harmonic levels as bars; dragging across them draws the levels.
+fn harmonic_bars(ui: &mut Ui, theme: &GloomTheme, patch: &mut SynthPatch) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(260.0, 80.0), Sense::click_and_drag());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, f32::from(theme.radius), theme.bg_panel);
+    let w = rect.width() / HARMONICS as f32;
+    let mut changed = false;
+    if let (Some(pos), true) = (
+        resp.interact_pointer_pos(),
+        resp.dragged() || resp.clicked(),
+    ) {
+        let k = (((pos.x - rect.left()) / w) as usize).min(HARMONICS - 1) + 1;
+        let v = ((rect.bottom() - pos.y) / rect.height()).clamp(0.0, 1.0);
+        let param = P::harmonic(k);
+        if (patch.get(param) - v).abs() > 1e-4 {
+            patch.set(param, v);
+            changed = true;
+        }
+    }
+    for k in 1..=HARMONICS {
+        let v = patch.get(P::harmonic(k));
+        let x = rect.left() + (k - 1) as f32 * w;
+        let top = rect.bottom() - v * rect.height();
+        p.rect_filled(
+            egui::Rect::from_min_max(pos2(x + 1.0, top), pos2(x + w - 1.0, rect.bottom())),
+            0.0,
+            if k % 2 == 0 {
+                theme.accent_dim
+            } else {
+                theme.accent
+            },
+        );
+    }
+    resp.on_hover_text(tr("Harmonic levels: drag to draw"));
+    changed
 }
 
 /// The FM engine: algorithm and feedback, the free matrix, and the six operators.
@@ -627,6 +774,7 @@ fn dest_used(d: ModDest, engine: u8) -> bool {
     match d {
         D::Osc1Pw | D::Osc2Pw => engine == 0 || engine == 3,
         D::FmIndex | D::FmFeedback => engine == 1,
+        D::SpecCutoff | D::AddTilt | D::AddPosition | D::AddMorph => engine == 4,
         D::Wt1Pos | D::Wt2Pos | D::Wt1Warp | D::Wt2Warp => engine == 2,
         D::Osc1Pitch
         | D::Osc2Pitch
@@ -636,7 +784,7 @@ fn dest_used(d: ModDest, engine: u8) -> bool {
         | D::Cutoff
         | D::Resonance
         | D::ModEnvAmount
-        | D::UnisonDetune => engine != 1,
+        | D::UnisonDetune => engine != 1 && engine != 4,
         _ => true,
     }
 }

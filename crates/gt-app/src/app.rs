@@ -1541,7 +1541,7 @@ impl GloomApp {
         self.sent_tables.resize(n, None);
         for i in 0..n {
             let key = match &self.project.channels[i].instrument {
-                Instrument::Synth(p) if p.engine() == 2 => {
+                Instrument::Synth(p) if matches!(p.engine(), 2 | 4) => {
                     for src in p.tables.iter().flatten() {
                         if self.library.get(src).is_none() && self.library.status(src).is_none() {
                             self.library.request(src, rate);

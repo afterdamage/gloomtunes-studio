@@ -1324,6 +1324,10 @@ fn synth_settings_of(
                 DocDest::EnvAttack => ModDest::EnvAttack,
                 DocDest::EnvDecay => ModDest::EnvDecay,
                 DocDest::EnvRelease => ModDest::EnvRelease,
+                DocDest::SpecCutoff => ModDest::SpecCutoff,
+                DocDest::AddTilt => ModDest::AddTilt,
+                DocDest::AddPosition => ModDest::AddPosition,
+                DocDest::AddMorph => ModDest::AddMorph,
             },
             amount: d.amount.clamp(-1.0, 1.0),
         };
@@ -1377,6 +1381,7 @@ fn synth_settings_of(
             1 => Engine::Fm,
             2 => Engine::Wavetable,
             3 => Engine::Bass,
+            4 => Engine::Additive,
             _ => Engine::Subtractive,
         },
         fm: FmSettings {
@@ -1422,6 +1427,20 @@ fn synth_settings_of(
             accent: v(P::BassAccent),
             threshold: v(P::BassThreshold),
             slide_ms: v(P::BassSlide),
+        },
+        add: gt_dsp::synth::additive::AdditiveSettings {
+            harmonics: std::array::from_fn(|k| v(P::harmonic(k + 1))),
+            tilt_db: v(P::AddTilt),
+            even: v(P::AddEven),
+            stretch: v(P::AddStretch),
+            morph: v(P::AddMorph),
+            position: v(P::AddPosition),
+            scan: v(P::AddScan),
+            filter: gt_dsp::synth::additive::SpecFilter::from_index(v(P::SpecMode) as u8),
+            filter_hz: v(P::SpecCutoff),
+            width_oct: v(P::SpecWidth),
+            resonance: v(P::SpecRes),
+            vowel: v(P::SpecVowel),
         },
     }
 }

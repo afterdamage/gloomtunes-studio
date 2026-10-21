@@ -37,12 +37,14 @@ use crate::ladder::{ladder_g, ladder_k, Ladder};
 use crate::lfo::{Lfo, LfoWave, Noise};
 use crate::note::{Glide, NoteExpr};
 
+pub mod additive;
 mod common;
 pub mod fm;
 pub mod wavetable;
 
 use std::sync::Arc;
 
+use additive::{AdditiveMods, AdditiveSettings, AdditiveVoice};
 use common::{key_hz, pan_unit, ModInputs};
 pub use common::{EnvSettings, Expression, LfoSettings, ModDest, ModSlot, ModSource};
 use fm::{FmSettings, FmVoice};
@@ -64,6 +66,9 @@ pub enum Engine {
     /// or above the accent velocity opens the filter and gets louder, more so on consecutive
     /// accents.
     Bass,
+    /// Up to 64 sine partials from the harmonic editor or a resynthesized sample, shaped by a
+    /// spectral filter ([`additive`]); no ladder filter.
+    Additive,
 }
 
 /// Settings of the bass-line engine.
@@ -204,6 +209,8 @@ pub struct SynthSettings {
     pub wt: [WtOscSettings; 2],
     /// Bass-line engine.
     pub bass: BassSettings,
+    /// Additive engine.
+    pub add: AdditiveSettings,
 }
 
 impl Default for SynthSettings {
@@ -266,6 +273,7 @@ impl Default for SynthSettings {
             fm: FmSettings::default(),
             wt: [WtOscSettings::default(); 2],
             bass: BassSettings::default(),
+            add: AdditiveSettings::default(),
         }
     }
 }
@@ -325,6 +333,8 @@ struct Voice {
     gain_r_step: f32,
     /// FM operators.
     fm: FmVoice,
+    /// Additive partials.
+    add: AdditiveVoice,
     /// Wavetable position, warp amount and mip level of each oscillator.
     wt_pos: [f32; 2],
     wt_warp: [f32; 2],
@@ -386,6 +396,7 @@ impl Voice {
             gain_l_step: 0.0,
             gain_r_step: 0.0,
             fm: FmVoice::default(),
+            add: AdditiveVoice::default(),
             wt_pos: [0.0; 2],
             wt_warp: [0.0; 2],
             wt_mip: [0; 2],
@@ -471,7 +482,14 @@ impl Voice {
 
     /// Recomputes modulation and everything derived from it, for the next `CONTROL_FRAMES`
     /// samples.
-    fn control(&mut self, p: &SynthSettings, x: &Expression, sr: f32, glide_coef: f32) {
+    fn control(
+        &mut self,
+        p: &SynthSettings,
+        x: &Expression,
+        sr: f32,
+        glide_coef: f32,
+        tables: Option<&SynthTables>,
+    ) {
         let ctl = CONTROL_FRAMES as f32;
         let depth = |d: f32| (1.0 + d).clamp(0.0, 2.0);
         let lfo_v = [
@@ -566,6 +584,17 @@ impl Voice {
         self.noise_level = (p.noise_level + md(ModDest::NoiseLevel)).clamp(0.0, 1.0);
         match p.engine {
             Engine::Subtractive | Engine::Bass => {}
+            Engine::Additive => {
+                let mods = AdditiveMods {
+                    cutoff_oct: md(ModDest::SpecCutoff) * 6.0,
+                    tilt_db: md(ModDest::AddTilt) * 12.0,
+                    position: md(ModDest::AddPosition),
+                    morph: md(ModDest::AddMorph),
+                };
+                let resynth = tables.and_then(|t| t.resynth.as_deref());
+                self.add
+                    .control(&p.add, resynth, key_hz(base), sr, CONTROL_FRAMES, mods);
+            }
             Engine::Fm => {
                 let index = md(ModDest::FmIndex);
                 let feedback = md(ModDest::FmFeedback);
@@ -676,7 +705,7 @@ impl Voice {
         let waves = [p.osc[0].wave, p.osc[1].wave];
         for (ol, or) in out_l.iter_mut().zip(out_r.iter_mut()) {
             if self.ctl_left == 0 {
-                self.control(p, x, sr, glide_coef);
+                self.control(p, x, sr, glide_coef, tables);
                 self.ctl_left = CONTROL_FRAMES;
             }
             self.ctl_left -= 1;
@@ -698,6 +727,14 @@ impl Voice {
                     return;
                 }
                 let y = self.fm.tick();
+                self.gain_l += self.gain_l_step;
+                self.gain_r += self.gain_r_step;
+                *ol += y * a * self.gain_l;
+                *or += y * a * self.gain_r;
+                continue;
+            }
+            if p.engine == Engine::Additive {
+                let y = self.add.tick();
                 self.gain_l += self.gain_l_step;
                 self.gain_r += self.gain_r_step;
                 *ol += y * a * self.gain_l;
@@ -872,6 +909,9 @@ impl GloomSynth {
         if self.settings.engine == Engine::Fm {
             let fm = &self.settings.fm;
             v.fm.start(fm, key, v.velocity, self.sr, stolen);
+        }
+        if self.settings.engine == Engine::Additive {
+            v.add.start(stolen);
         }
         v.note_pan = e.pan.clamp(-1.0, 1.0);
         v.mod_x = e.x();
