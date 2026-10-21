@@ -745,6 +745,8 @@ pub fn note_expr(n: &Note) -> NoteExpr {
         } else {
             Glide::None
         },
+        curve: n.curve,
+        curve_s: 0.0,
     }
 }
 
@@ -1316,6 +1318,12 @@ fn synth_settings_of(
                 DocDest::Wt2Pos => ModDest::Wt2Pos,
                 DocDest::Wt1Warp => ModDest::Wt1Warp,
                 DocDest::Wt2Warp => ModDest::Wt2Warp,
+                DocDest::Lfo1Depth => ModDest::Lfo1Depth,
+                DocDest::Lfo2Depth => ModDest::Lfo2Depth,
+                DocDest::ModEnvAmount => ModDest::ModEnvAmount,
+                DocDest::EnvAttack => ModDest::EnvAttack,
+                DocDest::EnvDecay => ModDest::EnvDecay,
+                DocDest::EnvRelease => ModDest::EnvRelease,
             },
             amount: d.amount.clamp(-1.0, 1.0),
         };

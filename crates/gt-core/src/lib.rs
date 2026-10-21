@@ -15,10 +15,12 @@ pub mod autorec;
 pub mod demos;
 pub mod drum_synth;
 pub mod effects;
+pub mod formula;
 pub mod hardware;
 pub mod midi;
 pub mod mixer;
 pub mod modulation;
+pub mod note_curve;
 pub mod note_tools;
 pub mod pads;
 pub mod param;
@@ -50,8 +52,9 @@ pub use mixer::{
     MAX_INSERTS, MAX_SENDS, STRIPS, STRIP_ICONS,
 };
 pub use modulation::{
-    LfoRate, LfoShape, MidiControl, ModSourceKind, Modulator, ModulatorId, MAX_MODULATORS,
+    LfoRate, LfoShape, MidiControl, ModField, ModSourceKind, Modulator, ModulatorId, MAX_MODULATORS,
 };
+pub use note_curve::{CurveKind, CurvePoint, NoteCurve};
 pub use pads::{DrumKit, Pad, PadLayer};
 pub use param::{ParamCurve, ParamInfo, ParamUnit};
 pub use params::{ChannelParam, ParamId, StripParam, MASTER_VOLUME};

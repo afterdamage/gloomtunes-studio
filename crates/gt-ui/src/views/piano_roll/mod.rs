@@ -2802,6 +2802,27 @@ mod tests {
     }
 
     #[test]
+    fn note_curve_lane_draws_each_notes_own_curve() {
+        use egui::PointerButton::{Primary, Secondary};
+        use gt_core::CurveKind;
+        let mut h = Harness::new(vec![n(0, 960, 60), n(960, 960, 64)]);
+        h.st.lane = Lane::Curve(CurveKind::Timbre);
+        // A drag over the second note only: its curve rises, the first note keeps none.
+        let a = h.drag(lane_at(&h, 1000, 0.1), lane_at(&h, 1900, 0.9), Primary);
+        assert!(a.contains(&PianoRollAction::Changed));
+        assert!(h.notes[0].curve.is_off());
+        let c = h.notes[1].curve;
+        assert_eq!(c.kind, CurveKind::Timbre);
+        assert!(c.points().len() >= 2, "{c:?}");
+        assert!(c.value_at(0.0) < c.value_at(1.0));
+        // Right-click on a point removes it.
+        let before = c.points().len();
+        let at = 960 + (c.points()[0].at * 960.0) as i64;
+        h.drag(lane_at(&h, at, 0.5), lane_at(&h, at, 0.5), Secondary);
+        assert_eq!(h.notes[1].curve.points().len(), before - 1);
+    }
+
+    #[test]
     fn line_and_curve_drags_in_the_lanes() {
         use egui::PointerButton::Primary;
         let mut h = Harness::new((0..4).map(|i| n(i * 960, 240, 60)).collect());

@@ -211,6 +211,9 @@ pub enum ModSourceKind {
         /// Which controller.
         control: MidiControl,
     },
+    /// A formula (Prompt 34, D151): its text is in [`crate::Project::formulas`] under the
+    /// modulator's id ([`crate::formula`]).
+    Formula,
 }
 
 impl ModSourceKind {
@@ -239,6 +242,7 @@ impl ModSourceKind {
             Self::Lfo { .. } => "LFO",
             Self::Follower { .. } => "Follower",
             Self::Midi { .. } => "MIDI",
+            Self::Formula => "Formula",
         }
     }
 
@@ -266,8 +270,43 @@ impl ModSourceKind {
                 *release_ms = fin(*release_ms, 150.0).clamp(1.0, 5000.0);
                 *gain = fin(*gain, 1.0).clamp(0.1, 100.0);
             }
-            Self::Midi { .. } => {}
+            Self::Midi { .. } | Self::Formula => {}
         }
+    }
+
+    /// True for sources with a speed that [`ModField::Rate`] can scale (LFOs and followers).
+    pub fn has_rate(&self) -> bool {
+        matches!(self, Self::Lfo { .. } | Self::Follower { .. })
+    }
+}
+
+/// The formula a new formula modulator starts with: a sine at 1 Hz.
+pub const DEFAULT_FORMULA: &str = "sin(2 * pi * t)";
+
+/// What of a modulator another modulator can move (Prompt 34, D151): its depth, or its speed
+/// (an LFO's rate, a follower's attack and release), in octaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ModField {
+    /// The depth, -1 to 1.
+    Amount,
+    /// The speed, ±4 octaves around its own setting.
+    Rate,
+}
+
+impl ModField {
+    /// Project-file key.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Amount => "amount",
+            Self::Rate => "rate",
+        }
+    }
+
+    /// The field for a key.
+    pub fn from_key(key: &str) -> Option<Self> {
+        [Self::Amount, Self::Rate]
+            .into_iter()
+            .find(|f| f.key() == key)
     }
 }
 

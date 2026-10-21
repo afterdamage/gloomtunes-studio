@@ -65,6 +65,20 @@ struct CountIn {
 
 const Q: usize = RENDER_QUANTUM;
 
+/// Notes with a curve that play at once, at most (more play without their curves).
+const MAX_CURVES: usize = 256;
+
+/// A playing note's polyphonic automation (D152).
+#[derive(Debug, Clone, Copy)]
+struct ActiveCurve {
+    slot: u16,
+    key: u8,
+    curve: gt_core::NoteCurve,
+    /// Seconds into the note, and its length.
+    elapsed: f32,
+    length: f32,
+}
+
 /// Renders audio. Lives on the audio thread; every method here is real-time safe:
 /// no allocation, no locks, no I/O, no panics for any buffer length.
 pub struct AudioProcessor {
@@ -117,6 +131,8 @@ pub struct AudioProcessor {
     /// MIDI plugins sent to other channels (target slot, offset, message), played in the next
     /// block. Capacity fixed in `new`.
     midi_fwd: Vec<(u16, u32, [u8; 3])>,
+    /// Notes with a polyphonic automation curve that are playing. Capacity fixed in `new`.
+    curves: Vec<ActiveCurve>,
     preview: ChannelSlot,
     /// Increments with every note-on; orders voices for stealing.
     voice_age: u64,
@@ -226,6 +242,7 @@ impl AudioProcessor {
                 .map(|_| crate::mixer::PdcDelay::new())
                 .collect(),
             midi_fwd: Vec::with_capacity(MIDI_FORWARD),
+            curves: Vec::with_capacity(MAX_CURVES),
             preview,
             voice_age: 0,
             scope_slot: None,
@@ -387,6 +404,8 @@ impl AudioProcessor {
                 );
             }
         }
+
+        self.run_note_curves();
 
         // Metronome, sample-accurate: render up to each beat, trigger, continue.
         let mut cursor = 0;
@@ -970,6 +989,20 @@ impl AudioProcessor {
                 aftertouch: 0.0,
             };
             let live_slot = self.live_slot;
+            {
+                let mixer = &self.mixer;
+                let expr = live_slot
+                    .and_then(|s| self.channels.get(usize::from(s)))
+                    .map(ChannelSlot::expression)
+                    .unwrap_or_default();
+                let clock = ModClock {
+                    mod_wheel: expr.mod_wheel,
+                    aftertouch: expr.pressure,
+                    ..clock
+                };
+                plan.run_chain(&clock, |s| mixer.strip_peak(s));
+            }
+            let outputs = &plan.outputs;
             for (i, target) in plan.targets.iter_mut().enumerate() {
                 // MIDI sources follow the target's own channel, else the selected one.
                 let slot = match target.dest {
@@ -999,7 +1032,7 @@ impl AudioProcessor {
                     let prev: f32 = target
                         .mods
                         .iter()
-                        .map(|m| m.amount * m.state.output())
+                        .map(|m| m.depth() * m.state.output())
                         .sum();
                     apply_param(
                         &mut self.channels,
@@ -1015,7 +1048,7 @@ impl AudioProcessor {
                 let mut v = base_at(lane_tick);
                 for m in &mut target.mods {
                     let mixer = &self.mixer;
-                    v += m.amount * m.state.step(&m.source, &clock, |s| mixer.strip_peak(s));
+                    v += m.depth() * m.step(&clock, outputs, |s| mixer.strip_peak(s));
                 }
                 apply_param(
                     &mut self.channels,
@@ -1660,6 +1693,70 @@ impl AudioProcessor {
             LiveKind::Pressure(v) => ch.set_pressure(v),
             LiveKind::KeyPressure { key, value } => ch.set_key_pressure(key, value),
             LiveKind::Note(_) | LiveKind::Cc { .. } | LiveKind::NoteExpr { .. } => {}
+        }
+    }
+
+    /// Polyphonic automation: each playing note's curve is sent as a note expression at the
+    /// start of every quantum (so a note's first value arrives one quantum after it starts),
+    /// then this quantum's note starts and ends update the list.
+    fn run_note_curves(&mut self) {
+        let dt = Q as f32 / self.sample_rate as f32;
+        for i in 0..self.curves.len() {
+            let c = &mut self.curves[i];
+            let x = (c.elapsed / c.length).clamp(0.0, 1.0);
+            c.elapsed += dt;
+            let (slot, key, curve) = (c.slot, c.key, c.curve);
+            let kind = match curve.kind {
+                gt_core::CurveKind::Off => continue,
+                gt_core::CurveKind::Tuning => NoteExprKind::Tuning,
+                gt_core::CurveKind::Pressure => NoteExprKind::Pressure,
+                gt_core::CurveKind::Timbre => NoteExprKind::Timbre,
+            };
+            let v = gt_core::NoteCurve::plain(curve.kind, curve.value_at(x));
+            self.note_expression(usize::from(slot), key, kind, v, 0);
+        }
+        // A curve stays a little past its note's end, for the last point to arrive.
+        self.curves.retain(|c| c.elapsed <= c.length + 2.0 * dt);
+        for e in self.scheduled.as_slice() {
+            match e.kind {
+                EventKind::NoteOn {
+                    slot, key, expr, ..
+                } => {
+                    if !expr.curve.is_off() && self.curves.len() < MAX_CURVES {
+                        self.curves.push(ActiveCurve {
+                            slot,
+                            key,
+                            curve: expr.curve,
+                            elapsed: 0.0,
+                            length: expr.curve_s.max(1e-3),
+                        });
+                    }
+                }
+                EventKind::Chase {
+                    slot,
+                    key,
+                    into_s,
+                    held: true,
+                    expr,
+                    ..
+                } => {
+                    if !expr.curve.is_off() && self.curves.len() < MAX_CURVES {
+                        self.curves.push(ActiveCurve {
+                            slot,
+                            key,
+                            curve: expr.curve,
+                            elapsed: into_s.max(0.0),
+                            length: expr.curve_s.max(1e-3),
+                        });
+                    }
+                }
+                EventKind::NoteOff { slot, key } => {
+                    self.curves.retain(|c| c.slot != slot || c.key != key);
+                }
+                EventKind::Wrap => self.curves.clear(),
+                EventKind::Choke { slot } => self.curves.retain(|c| c.slot != slot),
+                _ => {}
+            }
         }
     }
 
@@ -2978,5 +3075,44 @@ mod tests {
         p.process(&mut buf);
         let after = pitch(&mut p).unwrap();
         assert!((after / before - 2.0).abs() < 0.03, "{before} -> {after}");
+    }
+
+    #[test]
+    fn a_notes_curve_plays_on_its_voice_only() {
+        use gt_core::{CurveKind, CurvePoint, Note, NoteCurve, Project, PPQ};
+        // Two notes an octave apart; the upper one carries a tuning curve a fifth up
+        // (+7 semitones), held over the whole note.
+        let render = |curve: NoteCurve| {
+            let (mut h, mut p, _live) = live_synth(&[0]);
+            let mut project = Project::empty();
+            let ch = project
+                .add_synth_channel("S", gt_core::SynthPatch::default())
+                .unwrap();
+            let mut n = Note::new(0, 8 * PPQ, 57, 0.8);
+            n.curve = curve;
+            project.current_pattern_mut().notes.insert(ch, vec![n]);
+            h.send(EngineCommand::SetSong(Box::new(
+                crate::SongSnapshot::compile(&project),
+            )))
+            .unwrap();
+            h.send(EngineCommand::Play).unwrap();
+            let mut b = vec![0.0; 9600];
+            p.process(&mut b);
+            let mut d = gt_dsp::analysis::PitchDetector::new(1024);
+            d.detect(&b[4800..], 48_000.0, 50.0, 2000.0)
+                .map(|(hz, _)| hz)
+                .unwrap()
+        };
+        let plain = render(NoteCurve::default());
+        let v = 0.5 + 7.0 / 24.0;
+        let curved = render(NoteCurve::new(
+            CurveKind::Tuning,
+            &[CurvePoint { at: 0.0, value: v }],
+        ));
+        let ratio = curved / plain;
+        assert!(
+            (ratio - 2f32.powf(7.0 / 12.0)).abs() < 0.03,
+            "{plain} -> {curved}"
+        );
     }
 }

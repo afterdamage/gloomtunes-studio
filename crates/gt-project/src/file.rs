@@ -32,13 +32,13 @@ use gt_core::modulation::SYNC_RATES;
 use gt_core::synth::{ModDest, ModSlot, ModSource, SynthParam, SynthPatch, MOD_SLOTS};
 use gt_core::{
     Adsr, AudioEdit, AudioInput, AudioTake, AutoPoint, Automation, BuiltInSample, Channel,
-    ChannelId, Clip, ClipId, ClipKind, ClipStretch, Curve, DrumKit, EffectSlot, Fade, FadeCurve,
-    Frozen, Gap, Instrument, Interp, KeyZone, LfoRate, LfoShape, LfoTarget, LoopMode, Marker,
-    MarkerAction, MidiControl, ModSourceKind, Modulator, ModulatorId, Note, Pad, PadLayer, PanLaw,
-    ParamId, Pattern, PatternId, Playlist, PluginFormat, PluginInstanceId, PluginKind,
-    PluginParamInfo, PluginRef, Project, SampleSource, SamplerFilter, SamplerFilterMode,
-    SamplerLfo, SamplerSettings, SigChange, StretchMode, TempoMap, TempoPoint, Tick, TimeSig,
-    TimeSigMap, Track, TrackId, WarpMarker, FX_SLOTS,
+    ChannelId, Clip, ClipId, ClipKind, ClipStretch, Curve, CurveKind, CurvePoint, DrumKit,
+    EffectSlot, Fade, FadeCurve, Frozen, Gap, Instrument, Interp, KeyZone, LfoRate, LfoShape,
+    LfoTarget, LoopMode, Marker, MarkerAction, MidiControl, ModSourceKind, Modulator, ModulatorId,
+    Note, NoteCurve, Pad, PadLayer, PanLaw, ParamId, Pattern, PatternId, Playlist, PluginFormat,
+    PluginInstanceId, PluginKind, PluginParamInfo, PluginRef, Project, SampleSource, SamplerFilter,
+    SamplerFilterMode, SamplerLfo, SamplerSettings, SigChange, StretchMode, TempoMap, TempoPoint,
+    Tick, TimeSig, TimeSigMap, Track, TrackId, WarpMarker, FX_SLOTS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -981,6 +981,37 @@ struct FullNoteDto {
     muted: bool,
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     color: u8,
+    /// Polyphonic automation (schema 12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    curve: Option<NoteCurveDto>,
+}
+
+/// A note's expression curve: its kind and `[position, value]` points.
+#[derive(Serialize, Deserialize)]
+struct NoteCurveDto {
+    kind: String,
+    points: Vec<(f32, f32)>,
+}
+
+impl NoteCurveDto {
+    fn of(c: &NoteCurve) -> Option<Self> {
+        (!c.is_off()).then(|| Self {
+            kind: c.kind.key().to_owned(),
+            points: c.points().iter().map(|p| (p.at, p.value)).collect(),
+        })
+    }
+
+    fn curve(&self) -> NoteCurve {
+        let Some(kind) = CurveKind::from_key(&self.kind) else {
+            return NoteCurve::default();
+        };
+        let points: Vec<CurvePoint> = self
+            .points
+            .iter()
+            .map(|&(at, value)| CurvePoint { at, value })
+            .collect();
+        NoteCurve::new(kind, &points)
+    }
 }
 
 impl NoteDto {
@@ -1002,6 +1033,7 @@ impl NoteDto {
             porta: n.porta,
             muted: n.muted,
             color: n.color,
+            curve: NoteCurveDto::of(&n.curve),
         })
     }
 
@@ -1018,6 +1050,11 @@ impl NoteDto {
                 porta: f.porta,
                 muted: f.muted,
                 color: f.color,
+                curve: f
+                    .curve
+                    .as_ref()
+                    .map(NoteCurveDto::curve)
+                    .unwrap_or_default(),
                 ..Note::new(f.start, f.length, f.key, f.velocity)
             },
         };
@@ -1295,6 +1332,10 @@ enum ModSourceDto {
     },
     Midi {
         control: String,
+    },
+    /// Schema 12.
+    Formula {
+        text: String,
     },
 }
 
@@ -1790,6 +1831,9 @@ fn project_dto(p: &Project, dir: Option<&Path>, embedded: &HashMap<PathBuf, Stri
                 },
                 ModSourceKind::Midi { control } => ModSourceDto::Midi {
                     control: control.key().to_owned(),
+                },
+                ModSourceKind::Formula => ModSourceDto::Formula {
+                    text: p.formula(m.id).to_owned(),
                 },
             },
         })
@@ -2426,6 +2470,10 @@ pub fn from_value(value: Value, dir: Option<&Path>) -> Result<Parsed, FileError>
             ModSourceDto::Midi { control } => ModSourceKind::Midi {
                 control: MidiControl::from_key(&control),
             },
+            ModSourceDto::Formula { text } => {
+                p.formulas.insert(ModulatorId(m.id), text);
+                ModSourceKind::Formula
+            }
         };
         p.modulators.push(Modulator {
             id: ModulatorId(m.id),
@@ -2864,6 +2912,49 @@ mod tests {
         assert_eq!(q.modulators, p.modulators);
         assert_eq!(q.midi_map, p.midi_map);
         assert_eq!(q, &p);
+    }
+
+    #[test]
+    fn formulas_modulator_targets_and_note_curves_round_trip() {
+        let mut p = Project::demo();
+        let lfo = p.modulators[0].id;
+        let f = p
+            .add_modulator(
+                ParamId::Modulator {
+                    id: lfo,
+                    field: gt_core::ModField::Rate,
+                },
+                ModSourceKind::Formula,
+            )
+            .unwrap();
+        p.formulas.insert(f, "tri(beat / 4) * wheel".to_owned());
+        let ch = p.channels[0].id;
+        let pat = p.current_pattern_mut();
+        let n = &mut pat.notes.get_mut(&ch).unwrap()[0];
+        n.curve = NoteCurve::new(
+            CurveKind::Pressure,
+            &[
+                CurvePoint {
+                    at: 0.0,
+                    value: 0.0,
+                },
+                CurvePoint {
+                    at: 0.5,
+                    value: 1.0,
+                },
+            ],
+        );
+        p.sanitize();
+        let v = to_value(&p, None, &HashMap::new());
+        let text = v.to_string();
+        assert!(
+            text.contains(&format!("modulator/{}/rate", lfo.0)),
+            "{text}"
+        );
+        let back = from_value(v, None).unwrap();
+        assert_eq!(back.project.formulas, p.formulas);
+        assert_eq!(back.project.modulators, p.modulators);
+        assert_eq!(back.project, p);
     }
 
     #[test]

@@ -838,6 +838,26 @@ files and scripting; (3) the out-of-process plugin sandbox.
   while blocks come, sleeping 1 ms after 50 ms of silence), so it costs CPU and the first
   block after silence can be late; editors open as the child's own windows.
 
+### Prompt 34: Niche features
+Split into four PRs, each shippable on its own: (1) modulators modulating each other,
+formulas and per-voice modulation; (2) the additive/spectral synth with resynthesis and
+spectral filters; (3) the modular patcher; (4) the "start from an idea" dialog.
+- PR 1 (D151, D152): **formula modulators** (`gt_core::formula`: a small expression language
+  compiled on the UI thread into a fixed-size program the audio thread runs with a fixed
+  stack; time, song position, tempo, wheel, aftertouch and other modulators' outputs), and
+  **modulators on modulators** (`ParamId::Modulator` depth and rate targets; links use the
+  previous quantum's outputs, so order and cycles do not matter). **Per-voice modulation** in
+  Gloom Synth's engines: matrix destinations for each voice's LFO depths, mod-envelope amount
+  and envelope times. **Polyphonic automation**: a note can carry a tuning, pressure or timbre
+  curve (`Note::curve`), drawn in the piano roll's bottom lane and played as note
+  expressions on its own voice. Schema 12.
+- Tests: formula parsing, precedence, functions, errors and limits; depth and rate chaining
+  and formulas reading modulators; velocity setting attack and LFO depth per voice; a curve
+  retuning its note; the curve lane; saving and loading all three.
+- Limits (PR 1): one curve per note (up to 8 points), sent once per 32-frame quantum and
+  starting one quantum after its note; envelope-time destinations act at the note start
+  only; FM operator envelopes do not follow them; the sampler ignores tuning curves.
+
 ---
 
 ## v1.0 scope

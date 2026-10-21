@@ -3,9 +3,14 @@
 //! pattern automation line for any parameter. Every lane is drawn freehand, as a straight
 //! line or as a curve: a line drag rebuilds the lane from the values it had when the drag
 //! began, so the line follows the pointer until the button comes up.
+//!
+//! A note curve lane (Prompt 34, D152) draws polyphonic automation: dragging over a note sets
+//! points of its own tuning, pressure or timbre curve (of the selected notes only, when some
+//! are selected); right-click removes the nearest point.
 
 use super::*;
 use crate::i18n::tr;
+use gt_core::{CurveKind, NoteCurve};
 
 /// What the bottom lane shows and edits.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -16,6 +21,31 @@ pub enum Lane {
     Control(ControlKind),
     /// One of the pattern's automation lines.
     Automation(ParamId),
+    /// Each note's own expression curve of this kind (polyphonic automation).
+    Curve(CurveKind),
+}
+
+/// Points of a note curve closer than this (of the note's length) are moved, not added.
+const CURVE_NEAR: f32 = 0.06;
+
+/// The notes under tick `t` whose curve the lane edits: the selected ones if any are.
+fn curve_notes(notes: &[Note], selected: &[bool], t: i64) -> Vec<usize> {
+    let any_sel = selected.iter().any(|&s| s);
+    notes
+        .iter()
+        .enumerate()
+        .filter(|(i, n)| {
+            (!any_sel || selected.get(*i).copied().unwrap_or(false))
+                && n.start <= t
+                && t < n.start + n.length.max(1)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Position of tick `t` in note `n`, 0 to 1.
+fn note_frac(n: &Note, t: i64) -> f32 {
+    ((t - n.start) as f32 / n.length.max(1) as f32).clamp(0.0, 1.0)
 }
 
 impl Default for Lane {
@@ -104,6 +134,12 @@ fn short_name(lane: Lane) -> String {
             ControlKind::Cc(n) => format!("CC{n}"),
         },
         Lane::Automation(_) => "Auto".to_owned(),
+        Lane::Curve(k) => match k {
+            CurveKind::Tuning => "Tune",
+            CurveKind::Pressure => "Press",
+            CurveKind::Timbre | CurveKind::Off => "Timb",
+        }
+        .to_owned(),
     }
 }
 
@@ -127,6 +163,7 @@ pub(super) fn lane_selector(
             .and_then(|i| view.automation_names.get(i))
             .cloned()
             .unwrap_or_default(),
+        Lane::Curve(k) => format!("{} {}", tr("Note"), tr(k.name()).to_lowercase()),
     };
     egui::ComboBox::from_id_salt("roll_lane")
         .width(130.0)
@@ -135,6 +172,11 @@ pub(super) fn lane_selector(
             ui.label(dim(tr("Notes")));
             for prop in NoteProp::ALL {
                 ui.selectable_value(&mut st.lane, Lane::Note(prop), prop.name());
+            }
+            ui.separator();
+            ui.label(dim(tr("Note curves")));
+            for kind in CurveKind::ALL {
+                ui.selectable_value(&mut st.lane, Lane::Curve(kind), tr(kind.name()));
             }
             ui.separator();
             ui.label(dim(tr("Controllers")));
@@ -302,6 +344,16 @@ pub(super) fn lane_input(
                     }
                 }
             }
+            Lane::Curve(_) => {
+                let t = geo.tick(p.x);
+                let mut changed = false;
+                for i in curve_notes(notes, &st.selected, t) {
+                    let n = &mut notes[i];
+                    let near = 8.0 / (geo.x(n.start + n.length.max(1)) - geo.x(n.start)).max(1.0);
+                    changed |= n.curve.remove_near(note_frac(n, t), near);
+                }
+                return (changed, false);
+            }
             Lane::Note(_) => {}
         }
         return (false, false);
@@ -311,7 +363,7 @@ pub(super) fn lane_input(
     let value = lane_value(lane, p.y);
     if resp.hovered() && pressed && st.drag.is_none() {
         st.drag = Some(match (st.lane_draw, st.lane) {
-            (LaneDraw::Freehand, Lane::Note(_)) => Drag::Velocity,
+            (LaneDraw::Freehand, Lane::Note(_)) | (_, Lane::Curve(_)) => Drag::Velocity,
             (LaneDraw::Freehand, Lane::Automation(_)) => Drag::Automation { last: snapped },
             (LaneDraw::Freehand, Lane::Control(_)) => Drag::Control { last: snapped },
             (_, lane_kind) => {
@@ -326,7 +378,7 @@ pub(super) fn lane_input(
                             .collect(),
                     ),
                     Lane::Control(_) => LaneSnapshot::Controls(controls.clone()),
-                    Lane::Automation(_) => LaneSnapshot::Auto(
+                    Lane::Automation(_) | Lane::Curve(_) => LaneSnapshot::Auto(
                         auto.map(|i| automation[i].points.clone())
                             .unwrap_or_default(),
                     ),
@@ -358,6 +410,23 @@ pub(super) fn lane_input(
     }
 
     match st.drag.clone() {
+        Some(Drag::Velocity) if matches!(st.lane, Lane::Curve(_)) => {
+            let Lane::Curve(kind) = st.lane else {
+                return (false, false);
+            };
+            let t = geo.tick(p.x);
+            let mut changed = false;
+            for i in curve_notes(notes, &st.selected, t) {
+                let n = &mut notes[i];
+                let before = n.curve;
+                if n.curve.kind != kind {
+                    n.curve = NoteCurve::new(kind, &[]);
+                }
+                n.curve.set_point(note_frac(n, t), value, CURVE_NEAR);
+                changed |= n.curve != before;
+            }
+            (changed, false)
+        }
         Some(Drag::Velocity) => {
             let Lane::Note(prop) = st.lane else {
                 return (false, false);
@@ -580,6 +649,45 @@ pub(super) fn paint_lane(
                 );
             }
             paint_controls(&lp, geo, lane, controls, kind, theme.accent, true);
+        }
+        Lane::Curve(kind) => {
+            let y = lane_y(lane, kind.neutral());
+            lp.line_segment(
+                [pos2(lane.left(), y), pos2(lane.right(), y)],
+                Stroke::new(1.0, theme.stroke),
+            );
+            let any_sel = st.selected.iter().any(|&s| s);
+            for i in visible_range(notes, t0, t1, sorted) {
+                let n = &notes[i];
+                let (x0, x1) = (geo.x(n.start), geo.x(n.start + n.length.max(1)));
+                if x1 < lane.left() || x0 > lane.right() {
+                    continue;
+                }
+                let sel = st.selected.get(i).copied().unwrap_or(false);
+                let c = if sel || !any_sel {
+                    group_color(theme, n.color)
+                } else {
+                    theme.accent_dim
+                };
+                if n.curve.kind != kind || n.curve.is_off() {
+                    lp.line_segment(
+                        [pos2(x0, y), pos2(x1, y)],
+                        Stroke::new(1.0, c.gamma_multiply(0.4)),
+                    );
+                    continue;
+                }
+                let steps = ((x1 - x0) / 3.0).clamp(2.0, 200.0) as usize;
+                let line: Vec<Pos2> = (0..=steps)
+                    .map(|k| {
+                        let f = k as f32 / steps as f32;
+                        pos2(x0 + (x1 - x0) * f, lane_y(lane, n.curve.value_at(f)))
+                    })
+                    .collect();
+                lp.add(egui::Shape::line(line, Stroke::new(1.5, c)));
+                for q in n.curve.points() {
+                    lp.circle_filled(pos2(x0 + (x1 - x0) * q.at, lane_y(lane, q.value)), 2.5, c);
+                }
+            }
         }
         Lane::Automation(t) => {
             let Some(a) = automation.iter().find(|a| a.target == t) else {

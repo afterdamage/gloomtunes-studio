@@ -564,7 +564,12 @@ impl Transport {
                     velocity: n.velocity,
                     into_s: (now_s - self.tempo.tick_to_seconds(n.on as f64)) as f32,
                     held,
-                    expr: n.expr,
+                    expr: NoteExpr {
+                        curve_s: (self.tempo.tick_to_seconds(n.off as f64)
+                            - self.tempo.tick_to_seconds(n.on as f64))
+                            as f32,
+                        ..n.expr
+                    },
                 },
             });
         }
@@ -610,10 +615,16 @@ impl Transport {
                             mut expr,
                             len,
                         } => {
-                            if let Glide::Slide { seconds } = &mut expr.glide {
-                                *seconds = (self.tempo.tick_to_seconds((tick + len) as f64)
+                            let length_s = || {
+                                (self.tempo.tick_to_seconds((tick + len) as f64)
                                     - self.tempo.tick_to_seconds(tick as f64))
-                                    as f32;
+                                    as f32
+                            };
+                            if let Glide::Slide { seconds } = &mut expr.glide {
+                                *seconds = length_s();
+                            }
+                            if !expr.curve.is_off() {
+                                expr.curve_s = length_s();
                             }
                             EventKind::NoteOn {
                                 slot: e.slot,

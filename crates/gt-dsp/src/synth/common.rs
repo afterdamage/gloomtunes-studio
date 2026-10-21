@@ -117,11 +117,23 @@ pub enum ModDest {
     Wt1Warp,
     /// Wavetable 2 warp amount, ±1.
     Wt2Warp,
+    /// LFO 1 depth on this voice, ±100 % (Prompt 34: per-voice modulation).
+    Lfo1Depth,
+    /// LFO 2 depth on this voice, ±100 %.
+    Lfo2Depth,
+    /// Mod envelope to cutoff amount on this voice, ±6 octaves.
+    ModEnvAmount,
+    /// Attack time of this voice's envelopes, ±4 octaves (taken at the note start).
+    EnvAttack,
+    /// Decay time of this voice's envelopes, ±4 octaves (at the note start).
+    EnvDecay,
+    /// Release time of this voice's envelopes, ±4 octaves (at the note start).
+    EnvRelease,
 }
 
 impl ModDest {
     /// Number of destinations (including `Off`).
-    pub const COUNT: usize = 22;
+    pub const COUNT: usize = 28;
 }
 
 /// One row of the modulation matrix.

@@ -26,6 +26,8 @@ pub enum ParamRequest {
     AddLfo(ParamId),
     /// Attach an envelope follower.
     AddFollower(ParamId),
+    /// Attach a formula modulator (Prompt 34).
+    AddFormula(ParamId),
     /// Show the parameter's modulators.
     ShowModulators(ParamId),
     /// Bind the next MIDI controller that moves.
@@ -166,6 +168,7 @@ pub fn param_menu(theme: &GloomTheme, resp: &Response, id: ParamId) {
             ("Automate in pattern", ParamRequest::AutomatePattern(id)),
             ("Add LFO", ParamRequest::AddLfo(id)),
             ("Add envelope follower", ParamRequest::AddFollower(id)),
+            ("Add formula", ParamRequest::AddFormula(id)),
         ];
         if modulated {
             items.push(("Show modulators", ParamRequest::ShowModulators(id)));

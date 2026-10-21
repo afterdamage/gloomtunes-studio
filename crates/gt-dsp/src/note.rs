@@ -31,6 +31,11 @@ pub struct NoteExpr {
     pub mod_y: f32,
     /// Slide or portamento.
     pub glide: Glide,
+    /// Polyphonic automation over the note (Prompt 34), played by the engine as note
+    /// expressions.
+    pub curve: gt_core::NoteCurve,
+    /// The note's length in seconds (set by the transport for a note with a curve).
+    pub curve_s: f32,
 }
 
 impl Default for NoteExpr {
@@ -42,6 +47,8 @@ impl Default for NoteExpr {
             mod_x: 0.5,
             mod_y: 0.5,
             glide: Glide::None,
+            curve: gt_core::NoteCurve::default(),
+            curve_s: 0.0,
         }
     }
 }

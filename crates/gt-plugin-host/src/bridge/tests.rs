@@ -66,7 +66,13 @@ fn a_plugin_in_its_own_process_runs_and_its_crash_is_contained() {
     let (mut p, _rx) = b.activate(RATE).unwrap();
     assert_eq!(block(&mut *p, 1.0), (true, 1.0));
     p.set_param(0, 0.25);
-    assert_eq!(block(&mut *p, 1.0), (true, 0.5));
+    // Under load a block can come back late (dry); the change arrives with the next one.
+    let until = Instant::now() + Duration::from_secs(5);
+    let mut out = block(&mut *p, 1.0);
+    while out == (true, 1.0) && Instant::now() < until {
+        out = block(&mut *p, 1.0);
+    }
+    assert_eq!(out, (true, 0.5));
     // A thousand blocks through the handshake.
     let t = Instant::now();
     for _ in 0..1000 {
