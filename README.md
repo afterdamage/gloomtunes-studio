@@ -181,6 +181,10 @@ and the app shows it that way. Function keys on a Mac laptop may need **fn** hel
   modulation gold, notes blue), and drop a modulation output on a module to move one of its
   parameters, plugin ones included. The selected module's knobs and the wires into it, with
   their amounts, sit under the canvas. Modules after **Voices** play once per note (up to 8); loops are allowed.
+- **File > Start from an idea…** builds a starter song from a style, tempo, key and mode:
+  drums, bass, chords and a lead from the factory sounds, as patterns arranged into a 28-bar
+  song with markers. **Variation** (or **Next**) picks another progression and melody; the same
+  settings always build the same song. Nothing goes online.
 - **First start:** a short wizard picks the audio output and buffer size (with a test tone),
   an accent colour and text size, and asks whether to save crash reports (off unless you turn
   it on). **Skip** keeps the defaults. Everything it sets is in Settings afterwards.

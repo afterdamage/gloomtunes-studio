@@ -11,7 +11,7 @@ use crate::synth::SynthPatch;
 use crate::time::{TempoMap, PPQ};
 
 /// Pad keys of a drum synth kit (bank A).
-mod pad {
+pub(crate) mod pad {
     pub const KICK: u8 = 60;
     pub const SNARE: u8 = 61;
     pub const HAT: u8 = 62;
@@ -110,16 +110,16 @@ fn key(name: &str) -> u8 {
     (12 * (octave + 1) + base + shift).clamp(0, 127) as u8
 }
 
-/// Builds a demo.
-struct Song {
-    p: Project,
+/// Builds a demo (also used by [`crate::idea`]).
+pub(crate) struct Song {
+    pub(crate) p: Project,
     /// Patterns in the order they were made; pattern `i` plays on track `i`.
     order: Vec<PatternId>,
     at: i64,
 }
 
 impl Song {
-    fn new(name: &str, style: &str, bpm: f64, swing: f32) -> Self {
+    pub(crate) fn new(name: &str, style: &str, bpm: f64, swing: f32) -> Self {
         let mut p = Project::empty();
         p.tempo = TempoMap::constant(bpm);
         p.swing = swing;
@@ -155,14 +155,14 @@ impl Song {
         }
     }
 
-    fn insert(&self, ch: ChannelId) -> usize {
+    pub(crate) fn insert(&self, ch: ChannelId) -> usize {
         self.p
             .channel_index(ch)
             .map_or(MASTER, |i| self.p.channels[i].insert)
     }
 
     /// A drum synth channel playing factory kit `kit`.
-    fn drums(&mut self, kit: &str) -> ChannelId {
+    pub(crate) fn drums(&mut self, kit: &str) -> ChannelId {
         let id = self.p.add_drum_synth_channel(kit).expect("demo fits");
         let k = DrumKit::factory_kits()
             .into_iter()
@@ -179,7 +179,7 @@ impl Song {
     }
 
     /// A synth channel with factory preset `preset`.
-    fn synth(&mut self, preset: &str, volume: f32) -> ChannelId {
+    pub(crate) fn synth(&mut self, preset: &str, volume: f32) -> ChannelId {
         let patch = SynthPatch::factory()
             .into_iter()
             .find(|p| p.name == preset)
@@ -190,7 +190,7 @@ impl Song {
     }
 
     /// Reverb and delay send levels of `ch`'s insert.
-    fn sends(&mut self, ch: ChannelId, reverb: f32, delay: f32) {
+    pub(crate) fn sends(&mut self, ch: ChannelId, reverb: f32, delay: f32) {
         let i = self.insert(ch);
         let m = &mut self.p.mixer;
         for (to, level) in [(DEMO_REVERB, reverb), (DEMO_DELAY, delay)] {
@@ -201,7 +201,7 @@ impl Song {
     }
 
     /// A new pattern of `bars` bars.
-    fn pattern(&mut self, name: &str, bars: u16) -> PatternId {
+    pub(crate) fn pattern(&mut self, name: &str, bars: u16) -> PatternId {
         let id = self.p.new_pattern();
         self.p.rename_pattern(id, name);
         if let Some(p) = self.p.patterns.iter_mut().find(|p| p.id == id) {
@@ -212,7 +212,12 @@ impl Song {
         id
     }
 
-    fn add(&mut self, pat: PatternId, ch: ChannelId, notes: impl IntoIterator<Item = Note>) {
+    pub(crate) fn add(
+        &mut self,
+        pat: PatternId,
+        ch: ChannelId,
+        notes: impl IntoIterator<Item = Note>,
+    ) {
         let p = self
             .p
             .patterns
@@ -226,7 +231,7 @@ impl Song {
 
     /// Drum hits of pad `key` from a grid: one character per cell, the cells spread evenly over
     /// `bars` bars; `x` hard, `o` soft, `.` nothing. Spaces are ignored.
-    fn hits(&mut self, pat: PatternId, ch: ChannelId, key: u8, bars: i64, grid: &str) {
+    pub(crate) fn hits(&mut self, pat: PatternId, ch: ChannelId, key: u8, bars: i64, grid: &str) {
         let cells: Vec<char> = grid.chars().filter(|c| !c.is_whitespace()).collect();
         let cell = bars * BAR / cells.len() as i64;
         let notes = cells.iter().enumerate().filter_map(|(i, c)| {
@@ -243,7 +248,7 @@ impl Song {
     /// A melodic line: tokens `key[:steps][!][~]` (`-` is a rest), each starting where the last
     /// ended; `!` is an accent (full velocity), `~` slides into the next note. Lengths are in
     /// 1/16 steps (default 1).
-    fn line(&mut self, pat: PatternId, ch: ChannelId, velocity: f32, line: &str) {
+    pub(crate) fn line(&mut self, pat: PatternId, ch: ChannelId, velocity: f32, line: &str) {
         let mut at = 0;
         let mut notes = Vec::new();
         for tok in line.split_whitespace() {
@@ -264,7 +269,7 @@ impl Song {
     }
 
     /// Chords: (start step, length in steps, notes).
-    fn chords(
+    pub(crate) fn chords(
         &mut self,
         pat: PatternId,
         ch: ChannelId,
@@ -282,7 +287,7 @@ impl Song {
     }
 
     /// The next `bars` bars play `patterns` (each repeated to fill the section), under a marker.
-    fn section(&mut self, marker: &str, bars: i64, patterns: &[PatternId]) {
+    pub(crate) fn section(&mut self, marker: &str, bars: i64, patterns: &[PatternId]) {
         let start = self.at;
         self.p.playlist.add_marker(start, marker);
         for &id in patterns {
@@ -305,7 +310,7 @@ impl Song {
         self.at += bars * BAR;
     }
 
-    fn finish(mut self) -> Project {
+    pub(crate) fn finish(mut self) -> Project {
         for (t, id) in self.p.playlist.tracks.iter_mut().zip(&self.order) {
             if let Some(p) = self.p.patterns.iter().find(|p| p.id == *id) {
                 t.name.clone_from(&p.name);

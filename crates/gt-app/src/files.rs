@@ -17,7 +17,7 @@ use gt_ui::tr;
 use gt_ui::GloomTheme;
 
 /// What to do once the current document is saved (or its changes discarded).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Then {
     /// Nothing more.
     Stay,
@@ -31,6 +31,8 @@ pub enum Then {
     OpenPending,
     /// Open factory demo `n` (`gt_core::demos::DEMOS`) as a new, unsaved project.
     Demo(usize),
+    /// Build a song from an idea (Prompt 34) as a new, unsaved project.
+    Idea(gt_core::idea::Idea),
 }
 
 /// The export dialog's settings.
@@ -205,6 +207,8 @@ pub enum Dialog {
     NewProject {
         templates: Vec<(String, PathBuf)>,
     },
+    /// Start from an idea: tempo, key and style (Prompt 34).
+    Idea(gt_core::idea::Idea),
     /// Keep the project as a template.
     SaveTemplate {
         name: String,
@@ -250,7 +254,89 @@ pub enum DialogAction {
     NewFrom(Option<PathBuf>),
     SaveTemplate(String),
     DeleteTemplate(PathBuf),
+    /// Build a song from this idea.
+    BuildIdea(gt_core::idea::Idea),
+    /// Show the idea form.
+    IdeaForm,
     Close,
+}
+
+/// The "start from an idea" form: style, tempo, key, mode and seed.
+fn idea_form(
+    ui: &mut Ui,
+    theme: &GloomTheme,
+    idea: &mut gt_core::idea::Idea,
+) -> Option<DialogAction> {
+    use gt_core::idea::{Idea, Style, KEY_NAMES};
+    let mut action = None;
+    egui::Grid::new("idea").num_columns(2).show(ui, |ui| {
+        ui.label(tr("Style"));
+        egui::ComboBox::from_id_salt("idea.style")
+            .selected_text(tr(idea.style.name()))
+            .show_ui(ui, |ui| {
+                for s in Style::ALL {
+                    if ui.selectable_label(idea.style == s, tr(s.name())).clicked() {
+                        // A new style brings its usual tempo and mode; key and seed stay.
+                        *idea = Idea {
+                            root: idea.root,
+                            seed: idea.seed,
+                            ..Idea::for_style(s)
+                        };
+                    }
+                }
+            });
+        ui.end_row();
+        ui.label(tr("Tempo"));
+        ui.add(
+            egui::DragValue::new(&mut idea.tempo)
+                .range(40.0..=240.0)
+                .speed(0.5)
+                .suffix(" BPM"),
+        );
+        ui.end_row();
+        ui.label(tr("Key"));
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("idea.root")
+                .width(60.0)
+                .selected_text(KEY_NAMES[usize::from(idea.root % 12)])
+                .show_ui(ui, |ui| {
+                    for (i, name) in KEY_NAMES.iter().enumerate() {
+                        ui.selectable_value(&mut idea.root, i as u8, *name);
+                    }
+                });
+            ui.selectable_value(&mut idea.minor, true, tr("Minor"));
+            ui.selectable_value(&mut idea.minor, false, tr("Major"));
+        });
+        ui.end_row();
+        ui.label(tr("Variation"));
+        ui.horizontal(|ui| {
+            ui.add(egui::DragValue::new(&mut idea.seed).range(1..=9999));
+            if ui
+                .small_button(tr("Next"))
+                .on_hover_text(tr("Another progression and melody"))
+                .clicked()
+            {
+                idea.seed = idea.seed % 9999 + 1;
+            }
+        });
+        ui.end_row();
+    });
+    ui.label(
+        RichText::new(tr(
+            "Drums, bass, chords and a lead from factory sounds, arranged into a song. Made offline by our own rules.",
+        ))
+        .small()
+        .color(theme.text_dim),
+    );
+    ui.horizontal(|ui| {
+        if ui.button(tr("Build")).clicked() {
+            action = Some(DialogAction::BuildIdea(*idea));
+        }
+        if ui.button(tr("Cancel")).clicked() {
+            action = Some(DialogAction::Close);
+        }
+    });
+    action
 }
 
 fn path_row(ui: &mut Ui, path: &mut String, browse: impl FnOnce(&str) -> Option<PathBuf>) {
@@ -311,6 +397,7 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
         Dialog::ExportMidi { .. } => "Export MIDI file",
         Dialog::NewProject { .. } => "New project",
         Dialog::SaveTemplate { .. } => "Save as template",
+        Dialog::Idea(_) => "Start from an idea",
     };
     let dim = |t: &str| RichText::new(t).color(theme.text_dim);
     egui::Window::new(title)
@@ -516,6 +603,12 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
                 {
                     action = Some(DialogAction::NewFrom(None));
                 }
+                if ui
+                    .add(egui::Button::new(tr("From an idea…")).min_size(egui::vec2(260.0, 0.0)))
+                    .clicked()
+                {
+                    action = Some(DialogAction::IdeaForm);
+                }
                 for (name, path) in templates.iter() {
                     ui.horizontal(|ui| {
                         if ui
@@ -542,6 +635,11 @@ pub fn show(ctx: &egui::Context, theme: &GloomTheme, dialog: &mut Dialog) -> Opt
                 );
                 if ui.button(tr("Cancel")).clicked() {
                     action = Some(DialogAction::Close);
+                }
+            }
+            Dialog::Idea(idea) => {
+                if let Some(a) = idea_form(ui, theme, idea) {
+                    action = Some(a);
                 }
             }
             Dialog::SaveTemplate { name, error } => {

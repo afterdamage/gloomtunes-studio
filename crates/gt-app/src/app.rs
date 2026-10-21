@@ -2106,6 +2106,9 @@ impl GloomApp {
                     self.dialog = Some(Dialog::NewProject { templates });
                 }
             }
+            Then::Idea(idea) => {
+                self.replace_project(gt_core::idea::build(&idea), None);
+            }
             Then::Demo(n) => {
                 if let Some(demo) = gt_core::demos::DEMOS.get(n) {
                     self.replace_project((demo.build)(), None);
@@ -2255,6 +2258,13 @@ impl GloomApp {
                 self.dialog = (!templates.is_empty()).then_some(Dialog::NewProject { templates });
             }
             DialogAction::SaveTemplate(name) => self.save_template(&name),
+            DialogAction::IdeaForm => {
+                self.dialog = Some(Dialog::Idea(gt_core::idea::Idea::default()));
+            }
+            DialogAction::BuildIdea(idea) => {
+                self.dialog = None;
+                self.request(Then::Idea(idea));
+            }
             DialogAction::CancelExport => {
                 if let Some(Dialog::Export(form)) = &self.dialog {
                     if let Some(p) = &form.running {
@@ -2458,6 +2468,9 @@ impl GloomApp {
                     pick = then.map(FileCmd::Request);
                 }
             }
+            if ui.button(tr("Start from an idea…")).clicked() {
+                pick = Some(FileCmd::Idea);
+            }
             ui.menu_button(tr("Demo songs"), |ui| {
                 for (n, demo) in gt_core::demos::DEMOS.iter().enumerate() {
                     if ui
@@ -2604,6 +2617,9 @@ impl GloomApp {
             FileCmd::Export => self.show_export(),
             FileCmd::ImportMidi => self.show_import_midi(),
             FileCmd::ExportMidi => self.show_export_midi(),
+            FileCmd::Idea => {
+                self.dialog = Some(Dialog::Idea(gt_core::idea::Idea::default()));
+            }
             FileCmd::SaveTemplate => {
                 self.dialog = Some(Dialog::SaveTemplate {
                     name: self.doc_name(),
@@ -2697,6 +2713,7 @@ enum FileCmd {
     ImportMidi,
     ExportMidi,
     SaveTemplate,
+    Idea,
 }
 
 impl eframe::App for GloomApp {

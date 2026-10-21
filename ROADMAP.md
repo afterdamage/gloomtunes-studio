@@ -879,6 +879,17 @@ spectral filters; (3) the modular patcher; (4) the "start from an idea" dialog.
   through a value update and a rebuild; the editor wiring by drag; saving and loading.
 - Limits (PR 3): notes and modulation act once per 32-frame quantum; plugin modules add no
   delay compensation; a synth module's user wavetables are not loaded.
+- PR 4 (D155): **start from an idea**: File > Start from an idea… (or From an idea… in the
+  New dialog) picks a style (house, techno, hip hop, trap, drum and bass, ambient, synthwave,
+  lo-fi), tempo, key, mode and variation, and builds drums, bass, chords and a lead from
+  factory sounds as five part patterns in a 28-bar arrangement. `gt_core::idea`, no online
+  services.
+- Tests: every style builds from factory sounds into a sane project; bass, chords and lead
+  stay in the key for several keys and modes; the lead hits chord tones on the beat and ends
+  on the root; the same idea builds the same song and the seed changes it; the arrangement
+  uses every pattern under its markers; odd tempos and keys are clamped.
+- Limits (PR 4): close triads only (no sevenths or inversions); one chord per bar; the lead
+  ignores the bass line.
 
 ---
 

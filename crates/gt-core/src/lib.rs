@@ -17,6 +17,7 @@ pub mod drum_synth;
 pub mod effects;
 pub mod formula;
 pub mod hardware;
+pub mod idea;
 pub mod midi;
 pub mod mixer;
 pub mod modulation;
