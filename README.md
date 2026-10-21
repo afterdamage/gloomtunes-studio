@@ -412,14 +412,14 @@ packaging/macos/build-app.sh
 
 ```powershell
 # Windows installer into dist\ (Inno Setup 6: choco install innosetup)
-& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.1.0 packaging\windows\gloomtunes.iss
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.2.0 packaging\windows\gloomtunes.iss
 ```
 
 **Making a release:** set the version in the workspace `Cargo.toml` (`[workspace.package]
 version`), update `Cargo.lock` (`cargo build`), merge, then push a matching tag:
 
 ```sh
-git tag v1.1.0 && git push origin v1.1.0
+git tag v1.2.0 && git push origin v1.2.0
 ```
 
 `.github/workflows/release.yml` builds the four packages, writes `SHA256SUMS`, attests every
